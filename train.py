@@ -138,11 +138,13 @@ def set_global_seed(seed: int):
 
 
 def make_exp_dir(algo: str, steps: int, seed: int, n_balls: int = 1,
-                 max_steps: int = 5) -> str:
+                 max_steps: int = 5, step_penalty: float = 0.01,
+                 trunc_penalty: float = 0.0) -> str:
     """Create and return a unique experiment directory path."""
     ts      = datetime.now().strftime("%Y%m%d_%H%M%S")
     env_tag = f"_multi{n_balls}_ms{max_steps}" if n_balls > 1 else ""
-    name    = f"{algo}_{steps // 1000}k_s{seed}{env_tag}_{ts}"
+    rew_tag = f"_sp{step_penalty}_tp{trunc_penalty}" if (step_penalty != 0.01 or trunc_penalty != 0.0) else ""
+    name    = f"{algo}_{steps // 1000}k_s{seed}{env_tag}{rew_tag}_{ts}"
     path    = os.path.join("logs", "experiments", name)
     os.makedirs(os.path.join(path, "best_model"), exist_ok=True)
     os.makedirs(os.path.join(path, "eval"),       exist_ok=True)
@@ -160,14 +162,17 @@ def save_json(path: str, data: dict):
 # =============================================================================
 
 def train(algo: str = "SAC", steps: int = 1_000_000, seed: int = 42,
-          n_balls: int = 1, max_steps: int = 5) -> str:
+          n_balls: int = 1, max_steps: int = 5,
+          step_penalty: float = 0.01, trunc_penalty: float = 0.0) -> str:
     """
     Train one algorithm for `steps` timesteps with a fixed seed.
     Returns the experiment directory path.
 
-    n_balls=1 → single-shot env  (Phase 0, backward-compatible)
-    n_balls=3 → multi-ball env   (Phase 1a)
-    max_steps → episode horizon for multi-ball env (ignored when n_balls=1)
+    n_balls=1     → single-shot env  (Phase 0, backward-compatible)
+    n_balls=3     → multi-ball env   (Phase 1a)
+    max_steps     → episode horizon for multi-ball env (ignored when n_balls=1)
+    step_penalty  → reward subtracted every step (default 0.01)
+    trunc_penalty → extra penalty when episode truncated by step limit (default 0.0)
     """
     algo      = algo.upper()
     algo_map  = _build_algo_map()
@@ -180,7 +185,7 @@ def train(algo: str = "SAC", steps: int = 1_000_000, seed: int = 42,
 
     set_global_seed(seed)
 
-    exp_dir   = make_exp_dir(algo, steps, seed, n_balls, max_steps)
+    exp_dir   = make_exp_dir(algo, steps, seed, n_balls, max_steps, step_penalty, trunc_penalty)
     env_label = f"multi{n_balls}(ms={max_steps})" if n_balls > 1 else "single"
     print(f"\n{'='*55}")
     print(f"  billiards-rl — {algo}  |  {steps:,} steps  |  seed {seed}  |  env {env_label}")
@@ -198,15 +203,17 @@ def train(algo: str = "SAC", steps: int = 1_000_000, seed: int = 42,
         "network"    : [256, 256],
         "algo_kwargs": {k: v for k, v in algo_cfg.items() if k != "policy_kwargs"},
         "timestamp"  : datetime.now().isoformat(timespec="seconds"),
-        "max_steps"  : max_steps,
-        "env"        : f"BilliardsEnv-n{n_balls}-ms{max_steps}",
+        "max_steps"    : max_steps,
+        "step_penalty" : step_penalty,
+        "trunc_penalty": trunc_penalty,
+        "env"          : f"BilliardsEnv-n{n_balls}-ms{max_steps}",
         "exp_dir"    : exp_dir,
     }
     save_json(os.path.join(exp_dir, "config.json"), config)
 
     # ── Random baseline ───────────────────────────────────────────────────────
     print("[1/3] Random agent baseline (500 episodes)...")
-    baseline_env = BilliardsEnv(n_balls=n_balls, max_steps=max_steps)
+    baseline_env = BilliardsEnv(n_balls=n_balls, max_steps=max_steps, step_penalty=step_penalty, trunc_penalty=trunc_penalty)
     baseline_env.reset(seed=seed)
     total_pocketed_baseline = 0
     for _ in range(500):
@@ -229,13 +236,14 @@ def train(algo: str = "SAC", steps: int = 1_000_000, seed: int = 42,
     vec_env = make_vec_env(
         BilliardsEnv,
         n_envs      = N_ENVS,
-        env_kwargs  = {"n_balls": n_balls, "max_steps": max_steps},
+        env_kwargs  = {"n_balls": n_balls, "max_steps": max_steps,
+                        "step_penalty": step_penalty, "trunc_penalty": trunc_penalty},
         vec_env_cls = SubprocVecEnv,
         monitor_dir = os.path.join(exp_dir, "train"),
         seed        = seed,
     )
 
-    _eval_env = Monitor(BilliardsEnv(n_balls=n_balls, max_steps=max_steps),
+    _eval_env = Monitor(BilliardsEnv(n_balls=n_balls, max_steps=max_steps, step_penalty=step_penalty, trunc_penalty=trunc_penalty),
                         filename=os.path.join(exp_dir, "eval", "monitor"))
     _eval_env.reset(seed=seed)
 
@@ -276,7 +284,7 @@ def train(algo: str = "SAC", steps: int = 1_000_000, seed: int = 42,
     best_model = AlgoClass.load(best_model_path)
     print(f"\n[3/3] Evaluating best {algo} checkpoint (500 episodes)...")
 
-    final_eval_env = BilliardsEnv(n_balls=n_balls, max_steps=max_steps)
+    final_eval_env = BilliardsEnv(n_balls=n_balls, max_steps=max_steps, step_penalty=step_penalty, trunc_penalty=trunc_penalty)
     final_eval_env.reset(seed=seed)
     n_eval = 500
     total_pocketed_eval, clears = 0, 0
@@ -303,6 +311,8 @@ def train(algo: str = "SAC", steps: int = 1_000_000, seed: int = 42,
         "algo"               : algo,
         "n_balls"            : n_balls,
         "max_steps"          : max_steps,
+        "step_penalty"       : step_penalty,
+        "trunc_penalty"      : trunc_penalty,
         "steps"              : steps,
         "seed"               : seed,
         "random_pocket_rate" : round(random_rate,  2),
@@ -345,8 +355,13 @@ def main():
                         help="Number of target balls: 1=single-shot (default), 3=multi-ball Phase 1a")
     parser.add_argument("--max-steps", type=int, default=5,
                         help="Max steps per episode for multi-ball env (default: 5, ignored for n-balls=1)")
+    parser.add_argument("--step-penalty", type=float, default=0.01,
+                        help="Reward penalty per step (default: 0.01)")
+    parser.add_argument("--trunc-penalty", type=float, default=0.0,
+                        help="Extra reward penalty when episode truncated by step limit (default: 0.0)")
     args = parser.parse_args()
-    train(args.algo, args.steps, args.seed, args.n_balls, args.max_steps)
+    train(args.algo, args.steps, args.seed, args.n_balls, args.max_steps,
+          args.step_penalty, args.trunc_penalty)
 
 
 if __name__ == "__main__":

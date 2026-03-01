@@ -17,9 +17,7 @@ Phase 1  Multi-ball clearing
   [x] Exp-04  Transfer A · obs-collapse zero-shot  →  pocket 63.6%, clear 31.4% (0 min!)
   [x] Exp-05  Transfer B · weight-copy warm-start  →  pocket 61.5%, clear 30.4%
 
-  [ ] Exp-06  Reward shaping scratch         (truncation penalty + stronger step penalty)
-  [ ] Exp-07  Reward shaping Transfer A      (zero-shot)
-  [ ] Exp-08  Reward shaping Transfer B      (warm-start)
+  [ ] Exp-06  Reward shaping — step penalty -0.1, truncation -1.0 (scratch / A / B)
 
 Phase 2  (미정)
   [ ] Phase 1b  cushion/bank shots (action space 확장)
@@ -183,20 +181,23 @@ Phase 2  (미정)
 
 ## Experiments — Planned
 
-### Exp-06/07/08 · Reward shaping — truncation penalty + stronger step penalty
+### Exp-06 · Reward shaping — stronger step penalty + truncation penalty
 
-**목표:** ep_len을 줄여 shot efficiency를 실질적으로 강제. Exp-03/04/05와 동일 구조로 비교.
+**목표:** ep_len을 줄여 shot efficiency를 실질적으로 강제. Exp-03/04/05와 동일 구조(scratch / Transfer A / Transfer B)로 비교.
 
 **변경 사항 (simulator.py):**
-- step penalty: -0.01 → -0.1 per step
-- truncation penalty: step limit 도달 시 추가 -1.0
+- step penalty: -0.01 → **-0.1** per step
+- truncation penalty: step limit 도달 시 **-1.0** 추가 (현재는 없음)
 
-**실험 구조:**
-- Exp-06: scratch (Exp-03 대응)
-- Exp-07: Transfer A zero-shot (Exp-04 대응)
-- Exp-08: Transfer B warm-start (Exp-05 대응)
+**실험 조건:**
 
-**비교 기준:** Exp-03 scratch (60.7% / 29.4%, ep_len≈4.7)
+| 조건 | 대응 | 비교 |
+|------|------|------|
+| scratch | Exp-03 | reward 구조만 다름 |
+| Transfer A zero-shot | Exp-04 | reward 구조만 다름 |
+| Transfer B warm-start | Exp-05 | reward 구조만 다름 |
+
+**비교 기준:** Exp-03/04/05 (ep_len≈4.7)
 
 ---
 

@@ -39,7 +39,8 @@ class BilliardsEnv(gym.Env):
        b2x, b2y, b2_pocketed,
        b3x, b3y, b3_pocketed,
        p0x,p0y, ..., p5x,p5y]
-    Reward : +1.0 per ball pocketed  ·  -0.01 per step  ·  -0.5 for scratch
+    Reward : +1.0 per ball pocketed  ·  -step_penalty per step  ·  -0.5 for scratch
+             ·  -trunc_penalty when episode truncated (step limit reached)
     Episode ends : all balls pocketed  OR  step >= max_steps
 
     Action (2-dim continuous, same for both):
@@ -52,12 +53,15 @@ class BilliardsEnv(gym.Env):
 
     MIN_BALL_DIST = 0.12   # metres — minimum distance between any two balls at reset
 
-    def __init__(self, n_balls: int = 1, max_steps: int = 5):
+    def __init__(self, n_balls: int = 1, max_steps: int = 5,
+                 step_penalty: float = 0.01, trunc_penalty: float = 0.0):
         super().__init__()
         assert n_balls >= 1, "n_balls must be >= 1"
 
-        self.n_balls   = n_balls
-        self.max_steps = max_steps
+        self.n_balls       = n_balls
+        self.max_steps     = max_steps
+        self.step_penalty  = step_penalty   # subtracted every step
+        self.trunc_penalty = trunc_penalty  # subtracted when truncated by step limit
 
         # Ball IDs: "1", "2", "3", ...
         self._ball_ids = [str(i + 1) for i in range(n_balls)]
@@ -183,11 +187,6 @@ class BilliardsEnv(gym.Env):
                     self._pocketed[bid] = True
                     newly_pocketed += 1
 
-        # ── Reward ────────────────────────────────────────────────────────────
-        reward = float(newly_pocketed) - 0.01
-        if scratch:
-            reward -= 0.5
-
         # ── Termination ───────────────────────────────────────────────────────
         if self.n_balls == 1:
             # Backward-compatible: always terminate after one shot
@@ -196,6 +195,13 @@ class BilliardsEnv(gym.Env):
         else:
             terminated = all(self._pocketed.values())
             truncated  = (not terminated) and (self._step_count >= self.max_steps)
+
+        # ── Reward ────────────────────────────────────────────────────────────
+        reward = float(newly_pocketed) - self.step_penalty
+        if scratch:
+            reward -= 0.5
+        if truncated:
+            reward -= self.trunc_penalty
 
         # ── Ball-in-hand after scratch (multi-ball only) ──────────────────────
         if scratch and not terminated and not truncated:

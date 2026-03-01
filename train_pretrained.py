@@ -120,9 +120,11 @@ class ObsCollapseWrapper(gym.ObservationWrapper):
         return np.concatenate([cue, nearest, pockets]).astype(np.float32)
 
 
-def make_collapse_env(n_balls: int = 3, max_steps: int = 5, seed: int = 0):
+def make_collapse_env(n_balls: int = 3, max_steps: int = 5,
+                      step_penalty: float = 0.01, trunc_penalty: float = 0.0):
     """Create an ObsCollapseWrapper env (single, not vectorised)."""
-    base = BilliardsEnv(n_balls=n_balls, max_steps=max_steps)
+    base = BilliardsEnv(n_balls=n_balls, max_steps=max_steps,
+                        step_penalty=step_penalty, trunc_penalty=trunc_penalty)
     return ObsCollapseWrapper(base)
 
 
@@ -229,6 +231,8 @@ def run_transfer(
     steps: int = 500_000,
     seed: int = 42,
     max_steps: int = 5,
+    step_penalty: float = 0.01,
+    trunc_penalty: float = 0.0,
     eval_only: bool = False,
     n_eval: int = 500,
 ):
@@ -242,7 +246,8 @@ def run_transfer(
 
     ts      = datetime.now().strftime("%Y%m%d_%H%M%S")
     strat   = strategy.replace("-", "_")
-    name    = f"SAC_transfer_{strat}_ms{max_steps}_s{seed}_{ts}"
+    rew_tag = f"_sp{step_penalty}_tp{trunc_penalty}" if (step_penalty != 0.01 or trunc_penalty != 0.0) else ""
+    name    = f"SAC_transfer_{strat}_ms{max_steps}{rew_tag}_s{seed}_{ts}"
     exp_dir = os.path.join("logs", "experiments", name)
     os.makedirs(os.path.join(exp_dir, "best_model"), exist_ok=True)
     os.makedirs(os.path.join(exp_dir, "eval"),       exist_ok=True)
@@ -252,6 +257,7 @@ def run_transfer(
     print(f"  billiards-rl  transfer — strategy={strategy}")
     print(f"  pretrained   : {pretrained_path}")
     print(f"  max_steps    : {max_steps}  |  seed {seed}")
+    print(f"  step_penalty : {step_penalty}  |  trunc_penalty {trunc_penalty}")
     if not eval_only:
         print(f"  fine-tune    : {steps:,} steps")
     print(f"  exp_dir      : {exp_dir}")
@@ -265,7 +271,7 @@ def run_transfer(
     if strategy == "obs-collapse":
 
         def _env_factory():
-            return ObsCollapseWrapper(BilliardsEnv(n_balls=3, max_steps=max_steps))
+            return ObsCollapseWrapper(BilliardsEnv(n_balls=3, max_steps=max_steps, step_penalty=step_penalty, trunc_penalty=trunc_penalty))
 
         # Zero-shot eval (no training)
         print("[2] Zero-shot evaluation (obs-collapse, 23→16-dim)...")
@@ -279,6 +285,8 @@ def run_transfer(
                 "strategy"         : strategy,
                 "pretrained"       : pretrained_path,
                 "max_steps"        : max_steps,
+                "step_penalty"     : step_penalty,
+                "trunc_penalty"    : trunc_penalty,
                 "seed"             : seed,
                 "zeroshot_pocket%" : round(zs_pocket, 2),
                 "zeroshot_clear%"  : round(zs_clear, 2),
@@ -290,14 +298,14 @@ def run_transfer(
         # Fine-tune
         print(f"\n[3] Fine-tuning pretrained model ({steps:,} steps, obs-collapse)...")
         vec_env = make_vec_env(
-            lambda: ObsCollapseWrapper(BilliardsEnv(n_balls=3, max_steps=max_steps)),
+            lambda: ObsCollapseWrapper(BilliardsEnv(n_balls=3, max_steps=max_steps, step_penalty=step_penalty, trunc_penalty=trunc_penalty)),
             n_envs      = N_ENVS,
             vec_env_cls = SubprocVecEnv,
             monitor_dir = os.path.join(exp_dir, "train"),
             seed        = seed,
         )
         _eval_env = Monitor(
-            ObsCollapseWrapper(BilliardsEnv(n_balls=3, max_steps=max_steps)),
+            ObsCollapseWrapper(BilliardsEnv(n_balls=3, max_steps=max_steps, step_penalty=step_penalty, trunc_penalty=trunc_penalty)),
             filename=os.path.join(exp_dir, "eval", "monitor"),
         )
 
@@ -334,6 +342,8 @@ def run_transfer(
             "pretrained"        : pretrained_path,
             "steps"             : steps,
             "max_steps"         : max_steps,
+            "step_penalty"      : step_penalty,
+            "trunc_penalty"     : trunc_penalty,
             "seed"              : seed,
             "zeroshot_pocket%"  : round(zs_pocket, 2),
             "zeroshot_clear%"   : round(zs_clear,  2),
@@ -352,14 +362,15 @@ def run_transfer(
     elif strategy == "weight-copy":
 
         def _env_factory():
-            return BilliardsEnv(n_balls=3, max_steps=max_steps)
+            return BilliardsEnv(n_balls=3, max_steps=max_steps, step_penalty=step_penalty, trunc_penalty=trunc_penalty)
 
         # Build fresh 23-dim SAC
         print("[2] Building fresh 23-dim SAC and copying pretrained weights...")
         vec_env = make_vec_env(
             BilliardsEnv,
             n_envs      = N_ENVS,
-            env_kwargs  = {"n_balls": 3, "max_steps": max_steps},
+            env_kwargs  = {"n_balls": 3, "max_steps": max_steps,
+                        "step_penalty": step_penalty, "trunc_penalty": trunc_penalty},
             vec_env_cls = SubprocVecEnv,
             monitor_dir = os.path.join(exp_dir, "train"),
             seed        = seed,
@@ -386,6 +397,8 @@ def run_transfer(
                 "strategy"         : strategy,
                 "pretrained"       : pretrained_path,
                 "max_steps"        : max_steps,
+                "step_penalty"     : step_penalty,
+                "trunc_penalty"    : trunc_penalty,
                 "seed"             : seed,
                 "zeroshot_pocket%" : round(zs_pocket, 2),
                 "zeroshot_clear%"  : round(zs_clear, 2),
@@ -397,7 +410,7 @@ def run_transfer(
         # Warm-start training
         print(f"\n[4] Warm-start training ({steps:,} steps, full 23-dim obs)...")
         _eval_env = Monitor(
-            BilliardsEnv(n_balls=3, max_steps=max_steps),
+            BilliardsEnv(n_balls=3, max_steps=max_steps, step_penalty=step_penalty, trunc_penalty=trunc_penalty),
             filename=os.path.join(exp_dir, "eval", "monitor"),
         )
         eval_cb = EvalCallback(
@@ -429,6 +442,8 @@ def run_transfer(
             "pretrained"        : pretrained_path,
             "steps"             : steps,
             "max_steps"         : max_steps,
+            "step_penalty"      : step_penalty,
+            "trunc_penalty"     : trunc_penalty,
             "seed"              : seed,
             "zeroshot_pocket%"  : round(zs_pocket, 2),
             "zeroshot_clear%"   : round(zs_clear,  2),
@@ -474,6 +489,14 @@ def main():
         help="Max episode steps for n_balls=3 env (default: 5)",
     )
     parser.add_argument(
+        "--step-penalty", type=float, default=0.01,
+        help="Reward penalty per step (default: 0.01)",
+    )
+    parser.add_argument(
+        "--trunc-penalty", type=float, default=0.0,
+        help="Extra penalty when episode truncated by step limit (default: 0.0)",
+    )
+    parser.add_argument(
         "--eval-only", action="store_true",
         help="Only evaluate zero-shot performance, no fine-tuning",
     )
@@ -484,13 +507,15 @@ def main():
     args = parser.parse_args()
 
     run_transfer(
-        strategy       = args.strategy,
+        strategy        = args.strategy,
         pretrained_path = args.pretrained,
-        steps          = args.steps,
-        seed           = args.seed,
-        max_steps      = args.max_steps,
-        eval_only      = args.eval_only,
-        n_eval         = args.n_eval,
+        steps           = args.steps,
+        seed            = args.seed,
+        max_steps       = args.max_steps,
+        step_penalty    = args.step_penalty,
+        trunc_penalty   = args.trunc_penalty,
+        eval_only       = args.eval_only,
+        n_eval          = args.n_eval,
     )
 
 
