@@ -1,0 +1,18 @@
+# Core simulator
+pooltool-billiards
+
+# RL framework
+gymnasium
+numpy
+
+# RL algorithms
+stable-baselines3
+sb3-contrib          # TQC, RecurrentPPO, and other extras
+torch
+tensorboard
+
+# Visualization
+matplotlib
+
+# Build compatibility
+setuptools==69.5.1
