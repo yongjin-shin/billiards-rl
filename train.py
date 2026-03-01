@@ -142,7 +142,9 @@ def make_exp_dir(algo: str, steps: int, seed: int, n_balls: int = 1,
                  trunc_penalty: float = 0.0,
                  progressive_penalty: bool = False,
                  clear_bonus: float = 0.0,
-                 shots_taken: bool = False) -> str:
+                 shots_taken: bool = False,
+                 learning_rate: float = 3e-4,
+                 gradient_steps: int = 1) -> str:
     """Create and return a unique experiment directory path."""
     ts      = datetime.now().strftime("%Y%m%d_%H%M%S")
     env_tag = f"_multi{n_balls}_ms{max_steps}" if n_balls > 1 else ""
@@ -153,6 +155,10 @@ def make_exp_dir(algo: str, steps: int, seed: int, n_balls: int = 1,
         rew_tag += f"_cb{clear_bonus}"
     if shots_taken:
         rew_tag += "_st"
+    if learning_rate != 3e-4:
+        rew_tag += f"_lr{learning_rate}"
+    if gradient_steps != 1:
+        rew_tag += f"_gs{gradient_steps}"
     name    = f"{algo}_{steps // 1000}k_s{seed}{env_tag}{rew_tag}_{ts}"
     path    = os.path.join("logs", "experiments", name)
     os.makedirs(os.path.join(path, "best_model"), exist_ok=True)
@@ -175,7 +181,9 @@ def train(algo: str = "SAC", steps: int = 1_000_000, seed: int = 42,
           step_penalty: float = 0.01, trunc_penalty: float = 0.0,
           progressive_penalty: bool = False,
           clear_bonus: float = 0.0,
-          shots_taken: bool = False) -> str:
+          shots_taken: bool = False,
+          learning_rate: float = 3e-4,
+          gradient_steps: int = 1) -> str:
     """
     Train one algorithm for `steps` timesteps with a fixed seed.
     Returns the experiment directory path.
@@ -188,6 +196,8 @@ def train(algo: str = "SAC", steps: int = 1_000_000, seed: int = 42,
     progressive_penalty  → if True, step i costs step_penalty×i (later steps more expensive)
     clear_bonus          → +clear_bonus/steps_used added on termination (all balls cleared)
     shots_taken          → if True, append shots_taken/max_steps to obs (24-dim for n_balls=3)
+    learning_rate        → critic/actor learning rate (default 3e-4; try 1e-4 for stability)
+    gradient_steps       → gradient updates per env step (default 1; set to N_ENVS=10 for 1:1 ratio)
     """
     algo      = algo.upper()
     algo_map  = _build_algo_map()
@@ -200,7 +210,7 @@ def train(algo: str = "SAC", steps: int = 1_000_000, seed: int = 42,
 
     set_global_seed(seed)
 
-    exp_dir   = make_exp_dir(algo, steps, seed, n_balls, max_steps, step_penalty, trunc_penalty, progressive_penalty, clear_bonus, shots_taken)
+    exp_dir   = make_exp_dir(algo, steps, seed, n_balls, max_steps, step_penalty, trunc_penalty, progressive_penalty, clear_bonus, shots_taken, learning_rate, gradient_steps)
     env_label = f"multi{n_balls}(ms={max_steps})" if n_balls > 1 else "single"
     print(f"\n{'='*55}")
     print(f"  billiards-rl — {algo}  |  {steps:,} steps  |  seed {seed}  |  env {env_label}")
@@ -224,6 +234,8 @@ def train(algo: str = "SAC", steps: int = 1_000_000, seed: int = 42,
         "progressive_penalty" : progressive_penalty,
         "clear_bonus"         : clear_bonus,
         "shots_taken"         : shots_taken,
+        "learning_rate"       : learning_rate,
+        "gradient_steps"      : gradient_steps,
         "env"                 : f"BilliardsEnv-n{n_balls}-ms{max_steps}",
         "exp_dir"    : exp_dir,
     }
@@ -284,6 +296,8 @@ def train(algo: str = "SAC", steps: int = 1_000_000, seed: int = 42,
         device          = DEVICE,
         verbose         = 0,        # silent: ETACallback handles progress printing
         tensorboard_log = "logs/tensorboard",
+        learning_rate   = learning_rate,
+        gradient_steps  = gradient_steps,
         **algo_cfg,
     )
 
@@ -336,6 +350,8 @@ def train(algo: str = "SAC", steps: int = 1_000_000, seed: int = 42,
         "progressive_penalty" : progressive_penalty,
         "clear_bonus"         : clear_bonus,
         "shots_taken"         : shots_taken,
+        "learning_rate"       : learning_rate,
+        "gradient_steps"      : gradient_steps,
         "steps"               : steps,
         "seed"               : seed,
         "random_pocket_rate" : round(random_rate,  2),
@@ -388,10 +404,14 @@ def main():
                         help="Bonus added at termination scaled by 1/steps_used — rewards faster clears (default: 0.0)")
     parser.add_argument("--shots-taken", action="store_true",
                         help="Append shots_taken/max_steps to obs (24-dim for n_balls=3) — urgency ablation")
+    parser.add_argument("--learning-rate", type=float, default=3e-4,
+                        help="Critic/actor learning rate (default: 3e-4; try 1e-4 for stability)")
+    parser.add_argument("--gradient-steps", type=int, default=1,
+                        help="Gradient updates per env step (default: 1; set to N_ENVS=10 for 1:1 ratio)")
     args = parser.parse_args()
     train(args.algo, args.steps, args.seed, args.n_balls, args.max_steps,
           args.step_penalty, args.trunc_penalty, args.progressive_penalty,
-          args.clear_bonus, args.shots_taken)
+          args.clear_bonus, args.shots_taken, args.learning_rate, args.gradient_steps)
 
 
 if __name__ == "__main__":
