@@ -137,10 +137,11 @@ def set_global_seed(seed: int):
         torch.cuda.manual_seed_all(seed)
 
 
-def make_exp_dir(algo: str, steps: int, seed: int, n_balls: int = 1) -> str:
+def make_exp_dir(algo: str, steps: int, seed: int, n_balls: int = 1,
+                 max_steps: int = 5) -> str:
     """Create and return a unique experiment directory path."""
     ts      = datetime.now().strftime("%Y%m%d_%H%M%S")
-    env_tag = f"_multi{n_balls}" if n_balls > 1 else ""
+    env_tag = f"_multi{n_balls}_ms{max_steps}" if n_balls > 1 else ""
     name    = f"{algo}_{steps // 1000}k_s{seed}{env_tag}_{ts}"
     path    = os.path.join("logs", "experiments", name)
     os.makedirs(os.path.join(path, "best_model"), exist_ok=True)
@@ -159,13 +160,14 @@ def save_json(path: str, data: dict):
 # =============================================================================
 
 def train(algo: str = "SAC", steps: int = 1_000_000, seed: int = 42,
-          n_balls: int = 1) -> str:
+          n_balls: int = 1, max_steps: int = 5) -> str:
     """
     Train one algorithm for `steps` timesteps with a fixed seed.
     Returns the experiment directory path.
 
     n_balls=1 → single-shot env  (Phase 0, backward-compatible)
     n_balls=3 → multi-ball env   (Phase 1a)
+    max_steps → episode horizon for multi-ball env (ignored when n_balls=1)
     """
     algo      = algo.upper()
     algo_map  = _build_algo_map()
@@ -178,8 +180,8 @@ def train(algo: str = "SAC", steps: int = 1_000_000, seed: int = 42,
 
     set_global_seed(seed)
 
-    exp_dir   = make_exp_dir(algo, steps, seed, n_balls)
-    env_label = f"multi{n_balls}" if n_balls > 1 else "single"
+    exp_dir   = make_exp_dir(algo, steps, seed, n_balls, max_steps)
+    env_label = f"multi{n_balls}(ms={max_steps})" if n_balls > 1 else "single"
     print(f"\n{'='*55}")
     print(f"  billiards-rl — {algo}  |  {steps:,} steps  |  seed {seed}  |  env {env_label}")
     print(f"  exp_dir : {exp_dir}")
@@ -196,14 +198,15 @@ def train(algo: str = "SAC", steps: int = 1_000_000, seed: int = 42,
         "network"    : [256, 256],
         "algo_kwargs": {k: v for k, v in algo_cfg.items() if k != "policy_kwargs"},
         "timestamp"  : datetime.now().isoformat(timespec="seconds"),
-        "env"        : f"BilliardsEnv-n{n_balls}",
+        "max_steps"  : max_steps,
+        "env"        : f"BilliardsEnv-n{n_balls}-ms{max_steps}",
         "exp_dir"    : exp_dir,
     }
     save_json(os.path.join(exp_dir, "config.json"), config)
 
     # ── Random baseline ───────────────────────────────────────────────────────
     print("[1/3] Random agent baseline (500 episodes)...")
-    baseline_env = BilliardsEnv(n_balls=n_balls)
+    baseline_env = BilliardsEnv(n_balls=n_balls, max_steps=max_steps)
     baseline_env.reset(seed=seed)
     total_pocketed_baseline = 0
     for _ in range(500):
@@ -226,13 +229,13 @@ def train(algo: str = "SAC", steps: int = 1_000_000, seed: int = 42,
     vec_env = make_vec_env(
         BilliardsEnv,
         n_envs      = N_ENVS,
-        env_kwargs  = {"n_balls": n_balls},
+        env_kwargs  = {"n_balls": n_balls, "max_steps": max_steps},
         vec_env_cls = SubprocVecEnv,
         monitor_dir = os.path.join(exp_dir, "train"),
         seed        = seed,
     )
 
-    _eval_env = Monitor(BilliardsEnv(n_balls=n_balls),
+    _eval_env = Monitor(BilliardsEnv(n_balls=n_balls, max_steps=max_steps),
                         filename=os.path.join(exp_dir, "eval", "monitor"))
     _eval_env.reset(seed=seed)
 
@@ -273,7 +276,7 @@ def train(algo: str = "SAC", steps: int = 1_000_000, seed: int = 42,
     best_model = AlgoClass.load(best_model_path)
     print(f"\n[3/3] Evaluating best {algo} checkpoint (500 episodes)...")
 
-    final_eval_env = BilliardsEnv(n_balls=n_balls)
+    final_eval_env = BilliardsEnv(n_balls=n_balls, max_steps=max_steps)
     final_eval_env.reset(seed=seed)
     n_eval = 500
     total_pocketed_eval, clears = 0, 0
@@ -299,6 +302,7 @@ def train(algo: str = "SAC", steps: int = 1_000_000, seed: int = 42,
     results = {
         "algo"               : algo,
         "n_balls"            : n_balls,
+        "max_steps"          : max_steps,
         "steps"              : steps,
         "seed"               : seed,
         "random_pocket_rate" : round(random_rate,  2),
@@ -339,8 +343,10 @@ def main():
                         help="Random seed (default: 42)")
     parser.add_argument("--n-balls", type=int, default=1, choices=[1, 3],
                         help="Number of target balls: 1=single-shot (default), 3=multi-ball Phase 1a")
+    parser.add_argument("--max-steps", type=int, default=5,
+                        help="Max steps per episode for multi-ball env (default: 5, ignored for n-balls=1)")
     args = parser.parse_args()
-    train(args.algo, args.steps, args.seed, args.n_balls)
+    train(args.algo, args.steps, args.seed, args.n_balls, args.max_steps)
 
 
 if __name__ == "__main__":
