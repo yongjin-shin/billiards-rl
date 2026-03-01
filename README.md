@@ -21,6 +21,7 @@ Phase 1  Multi-ball clearing
               ep_len unchanged (80.9% use all 5 steps) — aiming↑ but efficiency unchanged
 
   [ ] Exp-07  SAC vs TQC — clear_bonus(=2.0/steps_used) reward shaping
+  [ ] Exp-08  shots_taken obs ablation — urgency 정보가 ep_len에 미치는 영향
 
 Phase 2  (미정)
   [ ] Phase 1b  cushion/bank shots (action space 확장)
@@ -240,6 +241,29 @@ reward: sp=0.1 (flat), tp=1.0, **clear_bonus=2.0**
 - clear_bonus가 step count 없이도 빠른 클리어에 명시적 gradient를 제공 → ep_len 감소 기대
 - TQC: reward 분포가 [-1.5 ~ +3.4] 범위의 고분산. top quantile dropping으로 overestimation 감소 → SAC보다 나은 shot selection
 - 단, Exp-01에서 TQC는 seed 간 분산이 매우 컸음(±27pp). 단일 seed 결과 해석 주의.
+
+### Exp-08 · shots_taken obs ablation
+
+**목표:** `shots_taken`을 obs에 추가했을 때 ep_len이 감소하는지 확인. Exp-07의 직접적인 ablation.
+
+**배경:**
+- `shots_taken`과 `steps_remaining`은 동치 정보 (`shots_taken + steps_remaining = max_steps`)
+- `steps_remaining`은 "게임적" 개념이라 비현실적이지만, `shots_taken`은 자연스러움 — 실제 당구 플레이어도 몇 번 쐈는지 앎
+- Exp-03~07까지 ep_len≈4.7~4.9 고정 — agent가 urgency를 모르는 것인지 vs task가 원래 어려운 것인지 미결
+
+**변경:** obs 23-dim → 24-dim
+```
+obs[23] = shots_taken / max_steps   # ∈ (0, 1], step 1에서 0.2 ~ step 5에서 1.0
+```
+
+**설정:** Exp-07 best(SAC or TQC) + shots_taken, 동일 하이퍼파라미터
+
+**해석 기준:**
+
+| Exp-08 ep_len 결과 | 해석 |
+|-------------------|------|
+| 줄어듦 (< 4.5) | urgency 정보 없어서 못 배운 것. shots_taken이 효과적 |
+| 그대로 (≈ 4.8) | task 자체가 어려워서 5번 다 쓰는 게 합리적인 전략. ep_len 단축은 task 한계 |
 
 ---
 
