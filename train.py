@@ -141,7 +141,8 @@ def make_exp_dir(algo: str, steps: int, seed: int, n_balls: int = 1,
                  max_steps: int = 5, step_penalty: float = 0.01,
                  trunc_penalty: float = 0.0,
                  progressive_penalty: bool = False,
-                 clear_bonus: float = 0.0) -> str:
+                 clear_bonus: float = 0.0,
+                 shots_taken: bool = False) -> str:
     """Create and return a unique experiment directory path."""
     ts      = datetime.now().strftime("%Y%m%d_%H%M%S")
     env_tag = f"_multi{n_balls}_ms{max_steps}" if n_balls > 1 else ""
@@ -150,6 +151,8 @@ def make_exp_dir(algo: str, steps: int, seed: int, n_balls: int = 1,
         rew_tag += "_pp"
     if clear_bonus > 0.0:
         rew_tag += f"_cb{clear_bonus}"
+    if shots_taken:
+        rew_tag += "_st"
     name    = f"{algo}_{steps // 1000}k_s{seed}{env_tag}{rew_tag}_{ts}"
     path    = os.path.join("logs", "experiments", name)
     os.makedirs(os.path.join(path, "best_model"), exist_ok=True)
@@ -171,7 +174,8 @@ def train(algo: str = "SAC", steps: int = 1_000_000, seed: int = 42,
           n_balls: int = 1, max_steps: int = 5,
           step_penalty: float = 0.01, trunc_penalty: float = 0.0,
           progressive_penalty: bool = False,
-          clear_bonus: float = 0.0) -> str:
+          clear_bonus: float = 0.0,
+          shots_taken: bool = False) -> str:
     """
     Train one algorithm for `steps` timesteps with a fixed seed.
     Returns the experiment directory path.
@@ -183,6 +187,7 @@ def train(algo: str = "SAC", steps: int = 1_000_000, seed: int = 42,
     trunc_penalty        → extra penalty when episode truncated by step limit (default 0.0)
     progressive_penalty  → if True, step i costs step_penalty×i (later steps more expensive)
     clear_bonus          → +clear_bonus/steps_used added on termination (all balls cleared)
+    shots_taken          → if True, append shots_taken/max_steps to obs (24-dim for n_balls=3)
     """
     algo      = algo.upper()
     algo_map  = _build_algo_map()
@@ -195,7 +200,7 @@ def train(algo: str = "SAC", steps: int = 1_000_000, seed: int = 42,
 
     set_global_seed(seed)
 
-    exp_dir   = make_exp_dir(algo, steps, seed, n_balls, max_steps, step_penalty, trunc_penalty, progressive_penalty, clear_bonus)
+    exp_dir   = make_exp_dir(algo, steps, seed, n_balls, max_steps, step_penalty, trunc_penalty, progressive_penalty, clear_bonus, shots_taken)
     env_label = f"multi{n_balls}(ms={max_steps})" if n_balls > 1 else "single"
     print(f"\n{'='*55}")
     print(f"  billiards-rl — {algo}  |  {steps:,} steps  |  seed {seed}  |  env {env_label}")
@@ -218,6 +223,7 @@ def train(algo: str = "SAC", steps: int = 1_000_000, seed: int = 42,
         "trunc_penalty"       : trunc_penalty,
         "progressive_penalty" : progressive_penalty,
         "clear_bonus"         : clear_bonus,
+        "shots_taken"         : shots_taken,
         "env"                 : f"BilliardsEnv-n{n_balls}-ms{max_steps}",
         "exp_dir"    : exp_dir,
     }
@@ -225,7 +231,7 @@ def train(algo: str = "SAC", steps: int = 1_000_000, seed: int = 42,
 
     # ── Random baseline ───────────────────────────────────────────────────────
     print("[1/3] Random agent baseline (500 episodes)...")
-    baseline_env = BilliardsEnv(n_balls=n_balls, max_steps=max_steps, step_penalty=step_penalty, trunc_penalty=trunc_penalty, progressive_penalty=progressive_penalty, clear_bonus=clear_bonus)
+    baseline_env = BilliardsEnv(n_balls=n_balls, max_steps=max_steps, step_penalty=step_penalty, trunc_penalty=trunc_penalty, progressive_penalty=progressive_penalty, clear_bonus=clear_bonus, shots_taken=shots_taken)
     baseline_env.reset(seed=seed)
     total_pocketed_baseline = 0
     for _ in range(500):
@@ -251,13 +257,13 @@ def train(algo: str = "SAC", steps: int = 1_000_000, seed: int = 42,
         env_kwargs  = {"n_balls": n_balls, "max_steps": max_steps,
                        "step_penalty": step_penalty, "trunc_penalty": trunc_penalty,
                        "progressive_penalty": progressive_penalty,
-                       "clear_bonus": clear_bonus},
+                       "clear_bonus": clear_bonus, "shots_taken": shots_taken},
         vec_env_cls = SubprocVecEnv,
         monitor_dir = os.path.join(exp_dir, "train"),
         seed        = seed,
     )
 
-    _eval_env = Monitor(BilliardsEnv(n_balls=n_balls, max_steps=max_steps, step_penalty=step_penalty, trunc_penalty=trunc_penalty, progressive_penalty=progressive_penalty, clear_bonus=clear_bonus),
+    _eval_env = Monitor(BilliardsEnv(n_balls=n_balls, max_steps=max_steps, step_penalty=step_penalty, trunc_penalty=trunc_penalty, progressive_penalty=progressive_penalty, clear_bonus=clear_bonus, shots_taken=shots_taken),
                         filename=os.path.join(exp_dir, "eval", "monitor"))
     _eval_env.reset(seed=seed)
 
@@ -298,7 +304,7 @@ def train(algo: str = "SAC", steps: int = 1_000_000, seed: int = 42,
     best_model = AlgoClass.load(best_model_path)
     print(f"\n[3/3] Evaluating best {algo} checkpoint (500 episodes)...")
 
-    final_eval_env = BilliardsEnv(n_balls=n_balls, max_steps=max_steps, step_penalty=step_penalty, trunc_penalty=trunc_penalty, progressive_penalty=progressive_penalty, clear_bonus=clear_bonus)
+    final_eval_env = BilliardsEnv(n_balls=n_balls, max_steps=max_steps, step_penalty=step_penalty, trunc_penalty=trunc_penalty, progressive_penalty=progressive_penalty, clear_bonus=clear_bonus, shots_taken=shots_taken)
     final_eval_env.reset(seed=seed)
     n_eval = 500
     total_pocketed_eval, clears = 0, 0
@@ -329,6 +335,7 @@ def train(algo: str = "SAC", steps: int = 1_000_000, seed: int = 42,
         "trunc_penalty"       : trunc_penalty,
         "progressive_penalty" : progressive_penalty,
         "clear_bonus"         : clear_bonus,
+        "shots_taken"         : shots_taken,
         "steps"               : steps,
         "seed"               : seed,
         "random_pocket_rate" : round(random_rate,  2),
@@ -379,10 +386,12 @@ def main():
                         help="Use progressive step penalty: step i costs step_penalty × i (default: flat)")
     parser.add_argument("--clear-bonus", type=float, default=0.0,
                         help="Bonus added at termination scaled by 1/steps_used — rewards faster clears (default: 0.0)")
+    parser.add_argument("--shots-taken", action="store_true",
+                        help="Append shots_taken/max_steps to obs (24-dim for n_balls=3) — urgency ablation")
     args = parser.parse_args()
     train(args.algo, args.steps, args.seed, args.n_balls, args.max_steps,
           args.step_penalty, args.trunc_penalty, args.progressive_penalty,
-          args.clear_bonus)
+          args.clear_bonus, args.shots_taken)
 
 
 if __name__ == "__main__":
