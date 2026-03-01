@@ -149,10 +149,35 @@ tensorboard --logdir logs/tensorboard
 
 ---
 
-## Next steps
+## Roadmap
 
-- [ ] Multi-ball environment (3–7 balls, ordered pocketing)
-- [ ] Multi-shot episodes → longer horizon → PPO / RecurrentPPO become competitive
-- [ ] Cushion shots (bank shots) via richer action space
-- [ ] Self-play / opponent modelling for full 8-ball game
-- [ ] DreamerV3 for model-based planning
+### Phase 0 — Single-shot benchmark ✅
+SAC / PPO / TQC on single-shot env. Multi-seed (×3) statistical comparison in progress.
+
+### Phase 1 — Multi-ball (`feature/multi-ball`)
+3 target balls. Progressive difficulty within this phase:
+
+| Level | Reward | Action | Scratch | Notes |
+|-------|--------|--------|---------|-------|
+| **1a** (easy) | sparse `+1` · `-0.01/step` | `[angle, speed]` | `-0.5` penalty | Entry point |
+| **1b** (medium) | dense (distance-based) | `[ball_idx, angle, speed]` | `-0.5` penalty | Explicit targeting |
+| **1c** (hard) | dense | `[ball_idx, angle, speed]` | episode ends | Full difficulty |
+
+- Obs: 23-dim `[cue(2) + balls(3×2) + pocketed_flags(3) + pockets(12)]`
+- Episode ends: all pocketed **or** step ≥ 15
+- Longer horizon → PPO / RecurrentPPO become competitive
+
+### Phase 2 — Cushion shots (`feature/cushion-env`)
+- `BilliardsEnv(mode="direct" | "cushion" | "free")`
+- `mode="cushion"`: direct pocket = reward 0; cushion-first pocket = +1
+- Geometric forcing: ball placement that makes direct shots sub-optimal
+- Curriculum: start `mode="direct"` (warm-start), then switch to `mode="cushion"`
+
+### Phase 3 — Multi-ball + cushion
+- Combine Phase 1 + 2: 3 balls, agent chooses when to use cushion
+- Algorithm focus: DreamerV3 / RecurrentPPO (longer horizon + planning)
+
+### Phase 4 — Self-play (`feature/self-play`)
+- Two agents alternate shots (full game format)
+- Self-play PPO or MAPPO
+- Opponent modelling via recurrent policy
