@@ -5,6 +5,9 @@ Architecture:
   pooltool  →  physics engine (ball physics, table geometry, pocket detection)
   BilliardsEnv  →  gym wrapper  (obs / action / reward / episode logic)
 
+BilliardsEnv(n_balls=1)  →  single-shot env  (Phase 0, backward-compatible)
+BilliardsEnv(n_balls=3)  →  multi-ball env   (Phase 1a)
+
 Usage (sanity test):
     python simulator.py
 """
@@ -16,56 +19,75 @@ import pooltool as pt
 
 
 # =============================================================================
-# Environment — v2
+# Environment
 # =============================================================================
 
 class BilliardsEnv(gym.Env):
     """
-    Single-shot billiards environment.
+    Billiards environment. Parameterised by n_balls.
 
+    --- n_balls=1  (single-shot, Phase 0) ---
     Observation (16-dim, all normalized [0, 1]):
-      [cue_x, cue_y, target_x, target_y,          ← ball positions
-       p0x,p0y, p1x,p1y, ..., p5x,p5y]            ← 6 pocket positions (fixed)
-
-    Action (2-dim continuous):
-      [delta_angle ∈ [-π, π],  speed ∈ [0.5, 8.0]]
-       delta_angle = 0  → aim directly at target ball
-       delta_angle ≠ 0  → cut shot (offset from cue→target line)
-
-    Reward:
-      +1.0  target ball pocketed  (binary — avoids local optima)
-
+      [cue_x, cue_y, ball_x, ball_y, p0x,p0y, ..., p5x,p5y]
+    Reward : +1.0 if ball pocketed, else 0.0
     Episode: single shot (horizon = 1)
+
+    --- n_balls=3  (multi-ball, Phase 1a) ---
+    Observation (23-dim, all normalized [0, 1]):
+      [cue_x, cue_y,
+       b1x, b1y, b1_pocketed,
+       b2x, b2y, b2_pocketed,
+       b3x, b3y, b3_pocketed,
+       p0x,p0y, ..., p5x,p5y]
+    Reward : +1.0 per ball pocketed  ·  -0.01 per step  ·  -0.5 for scratch
+    Episode ends : all balls pocketed  OR  step >= max_steps
+
+    Action (2-dim continuous, same for both):
+      [delta_angle ∈ [-π, π],  speed ∈ [0.5, 8.0]]
+      delta_angle = 0  →  aim at nearest unpocketed ball
+      delta_angle ≠ 0  →  cut/offset from that direction
     """
 
     metadata = {"render_modes": []}
 
-    def __init__(self):
+    MIN_BALL_DIST = 0.12   # metres — minimum distance between any two balls at reset
+
+    def __init__(self, n_balls: int = 1, max_steps: int = 15):
         super().__init__()
+        assert n_balls >= 1, "n_balls must be >= 1"
+
+        self.n_balls   = n_balls
+        self.max_steps = max_steps
+
+        # Ball IDs: "1", "2", "3", ...
+        self._ball_ids = [str(i + 1) for i in range(n_balls)]
 
         self.table        = pt.Table.default()
-        self.table_length = self.table.l        # metres
+        self.table_length = self.table.l
         self.table_width  = self.table.w
-        self._table_diag  = np.sqrt(self.table_length**2 + self.table_width**2)
 
         self.action_space = spaces.Box(
             low  = np.array([-np.pi, 0.5], dtype=np.float32),
             high = np.array([ np.pi, 8.0], dtype=np.float32),
         )
+
+        # obs dim: 2(cue) + n_balls*2(pos) + n_balls*(0 or 1)(flag) + 12(pockets)
+        # n_balls=1: no pocketed flag needed (horizon=1 → episode always ends)
+        obs_dim = 2 + n_balls * (2 if n_balls == 1 else 3) + 12
         self.observation_space = spaces.Box(
-            low=0.0, high=1.0, shape=(16,), dtype=np.float32
+            low=0.0, high=1.0, shape=(obs_dim,), dtype=np.float32
         )
 
-        # Pocket positions — fixed for the lifetime of the env
-        self._pocket_obs     = self._build_pocket_obs()          # (12,) normalized
+        self._pocket_obs     = self._build_pocket_obs()
         self._pocket_centers = self._pocket_obs.reshape(6, 2) * \
-                               np.array([self.table_width, self.table_length])  # (6,2) metres
+                               np.array([self.table_width, self.table_length])
 
-        self.system = None
+        self.system      = None
+        self._step_count = 0
+        self._pocketed   = {}
 
     # -------------------------------------------------------------------------
     def _build_pocket_obs(self):
-        """Get real pocket (x,y) from pooltool Table; fall back to standard layout."""
         try:
             pts = []
             for pocket in self.table.pockets.values():
@@ -74,7 +96,7 @@ class BilliardsEnv(gym.Env):
                 elif hasattr(pocket, "a"):
                     xy = np.asarray(pocket.a[:2], dtype=float)
                 else:
-                    raise AttributeError("unknown pocket geometry attr")
+                    raise AttributeError
                 pts.extend([
                     float(np.clip(xy[0] / self.table_width,  0.0, 1.0)),
                     float(np.clip(xy[1] / self.table_length, 0.0, 1.0)),
@@ -83,33 +105,47 @@ class BilliardsEnv(gym.Env):
                 return np.array(pts, dtype=np.float32)
         except Exception:
             pass
-        # Fallback: standard 6-pocket layout
         return np.array([
-            0.0, 0.0,   # bottom-left corner
-            1.0, 0.0,   # bottom-right corner
-            0.0, 0.5,   # side-left  (mid-length)
-            1.0, 0.5,   # side-right (mid-length)
-            0.0, 1.0,   # top-left corner
-            1.0, 1.0,   # top-right corner
+            0.0, 0.0,  1.0, 0.0,
+            0.0, 0.5,  1.0, 0.5,
+            0.0, 1.0,  1.0, 1.0,
         ], dtype=np.float32)
 
     # -------------------------------------------------------------------------
     def reset(self, *, seed=None, options=None):
         super().reset(seed=seed)
+        self._step_count = 0
+        self._pocketed   = {bid: False for bid in self._ball_ids}
 
-        # Cue ball: lower half; target: upper half (avoids trivial shots)
-        cue_xy    = self.np_random.uniform([0.2, 0.2], [0.8, 0.4]).tolist()
-        target_xy = self.np_random.uniform([0.2, 0.6], [0.8, 0.9]).tolist()
+        placed = []   # (x, y) in metres — collision tracking
 
-        cue_xy    = [cue_xy[0]    * self.table_width,  cue_xy[1]    * self.table_length]
-        target_xy = [target_xy[0] * self.table_width,  target_xy[1] * self.table_length]
+        def sample_pos(low_norm, high_norm):
+            """Sample a position that doesn't overlap with already-placed balls."""
+            for _ in range(300):
+                xy = self.np_random.uniform(low_norm, high_norm)
+                xy_m = [xy[0] * self.table_width, xy[1] * self.table_length]
+                if all(np.linalg.norm(np.array(xy_m) - np.array(p)) > self.MIN_BALL_DIST
+                       for p in placed):
+                    placed.append(xy_m)
+                    return xy_m
+            # Fallback: last sampled (very unlikely to be needed)
+            placed.append(xy_m)
+            return xy_m
 
-        cue_ball    = pt.Ball.create("cue", xy=cue_xy)
-        target_ball = pt.Ball.create("8",   xy=target_xy)
+        # Cue ball — lower portion
+        cue_xy = sample_pos([0.15, 0.15], [0.85, 0.40])
+
+        # Target balls — upper portion (spread across table)
+        ball_xys = [sample_pos([0.15, 0.30], [0.85, 0.85])
+                    for _ in self._ball_ids]
+
+        balls = {"cue": pt.Ball.create("cue", xy=cue_xy)}
+        for bid, bxy in zip(self._ball_ids, ball_xys):
+            balls[bid] = pt.Ball.create(bid, xy=bxy)
 
         self.system = pt.System(
             table=self.table,
-            balls={"cue": cue_ball, "8": target_ball},
+            balls=balls,
             cue=pt.Cue.default(),
         )
         return self._get_obs(), {}
@@ -119,91 +155,215 @@ class BilliardsEnv(gym.Env):
         delta_angle = float(action[0])
         speed       = float(action[1])
 
-        # Convert relative angle → absolute world angle
-        cue_pos    = self.system.balls["cue"].state.rvw[0, :2]
-        target_pos = self.system.balls["8"].state.rvw[0, :2]
-        phi_direct = np.arctan2(target_pos[1] - cue_pos[1],
-                                target_pos[0] - cue_pos[0])
-        phi_deg = np.degrees(phi_direct + delta_angle)
+        cue_pos = self.system.balls["cue"].state.rvw[0, :2]
+        ref_pos = self._nearest_unpocketed_pos(cue_pos)
+        if ref_pos is None:
+            ref_pos = cue_pos + np.array([1.0, 0.0])
+
+        phi_direct = np.arctan2(ref_pos[1] - cue_pos[1], ref_pos[0] - cue_pos[0])
+        phi_deg    = np.degrees(phi_direct + delta_angle)
 
         self.system.strike(phi=phi_deg, V0=speed, cue_ball_id="cue")
         pt.simulate(self.system, inplace=True)
+        self._step_count += 1
 
-        pocketed = (self.system.balls["8"].state.s == pt.constants.pocketed)
-        reward   = 1.0 if pocketed else 0.0
+        # ── Scratch (cue ball pocketed) ───────────────────────────────────────
+        scratch = (self.system.balls["cue"].state.s == pt.constants.pocketed)
 
-        return self._get_obs(), reward, True, False, {"pocketed": pocketed}
+        # ── Newly pocketed target balls ───────────────────────────────────────
+        # Guard with `in` check: pooltool may drop a ball from system.balls
+        # on subsequent simulate() calls once it was pocketed.
+        newly_pocketed = 0
+        for bid in self._ball_ids:
+            if not self._pocketed[bid]:
+                ball_gone = bid not in self.system.balls
+                ball_pocketed = (not ball_gone and
+                                 self.system.balls[bid].state.s == pt.constants.pocketed)
+                if ball_gone or ball_pocketed:
+                    self._pocketed[bid] = True
+                    newly_pocketed += 1
+
+        # ── Reward ────────────────────────────────────────────────────────────
+        reward = float(newly_pocketed) - 0.01
+        if scratch:
+            reward -= 0.5
+
+        # ── Termination ───────────────────────────────────────────────────────
+        if self.n_balls == 1:
+            # Backward-compatible: always terminate after one shot
+            terminated = True
+            truncated  = False
+        else:
+            terminated = all(self._pocketed.values())
+            truncated  = (not terminated) and (self._step_count >= self.max_steps)
+
+        # ── Ball-in-hand after scratch (multi-ball only) ──────────────────────
+        if scratch and not terminated and not truncated:
+            self._respawn_cue()
+
+        # ── Info ──────────────────────────────────────────────────────────────
+        if self.n_balls == 1:
+            info = {"pocketed": bool(newly_pocketed)}
+        else:
+            info = {
+                "pocketed_this_step": newly_pocketed,
+                "total_pocketed"    : sum(self._pocketed.values()),
+                "remaining"         : sum(1 for v in self._pocketed.values() if not v),
+                "scratch"           : scratch,
+            }
+
+        return self._get_obs(), reward, terminated, truncated, info
+
+    # -------------------------------------------------------------------------
+    def _nearest_unpocketed_pos(self, cue_pos: np.ndarray):
+        """Return position of nearest unpocketed target ball, or None if all gone."""
+        best_dist, best_pos = float("inf"), None
+        for bid in self._ball_ids:
+            if not self._pocketed[bid] and bid in self.system.balls:
+                bpos = self.system.balls[bid].state.rvw[0, :2]
+                d = np.linalg.norm(bpos - cue_pos)
+                if d < best_dist:
+                    best_dist, best_pos = d, bpos
+        return best_pos
+
+    # -------------------------------------------------------------------------
+    def _respawn_cue(self):
+        """Ball-in-hand: place cue ball at a random valid position after scratch."""
+        active_positions = [
+            self.system.balls[bid].state.rvw[0, :2].tolist()
+            for bid in self._ball_ids if not self._pocketed[bid]
+        ]
+
+        xy_m = [self.table_width * 0.5, self.table_length * 0.25]  # safe fallback
+        for _ in range(300):
+            xy = self.np_random.uniform([0.10, 0.10], [0.90, 0.90])
+            candidate = [xy[0] * self.table_width, xy[1] * self.table_length]
+            if all(np.linalg.norm(np.array(candidate) - np.array(p)) > self.MIN_BALL_DIST
+                   for p in active_positions):
+                xy_m = candidate
+                break
+
+        balls = {"cue": pt.Ball.create("cue", xy=xy_m)}
+        for bid in self._ball_ids:
+            if not self._pocketed[bid]:
+                bpos = self.system.balls[bid].state.rvw[0, :2].tolist()
+                balls[bid] = pt.Ball.create(bid, xy=bpos)
+
+        self.system = pt.System(
+            table=self.table,
+            balls=balls,
+            cue=pt.Cue.default(),
+        )
 
     # -------------------------------------------------------------------------
     def _get_obs(self):
-        def norm(ball_id, dim):
-            val   = self.system.balls[ball_id].state.rvw[0, dim]
-            scale = self.table_width if dim == 0 else self.table_length
-            return float(np.clip(val / scale, 0.0, 1.0))
+        def norm_pos(ball_id):
+            if ball_id not in self.system.balls:
+                return 0.0, 0.0
+            ball = self.system.balls[ball_id]
+            if ball.state.s == pt.constants.pocketed:
+                return 0.0, 0.0
+            x = float(np.clip(ball.state.rvw[0, 0] / self.table_width,  0.0, 1.0))
+            y = float(np.clip(ball.state.rvw[0, 1] / self.table_length, 0.0, 1.0))
+            return x, y
 
-        ball_obs = np.array([
-            norm("cue", 0), norm("cue", 1),
-            norm("8",   0), norm("8",   1),
-        ], dtype=np.float32)
+        cue_x, cue_y = norm_pos("cue")
+        obs = [cue_x, cue_y]
 
-        return np.concatenate([ball_obs, self._pocket_obs])
+        if self.n_balls == 1:
+            bx, by = norm_pos(self._ball_ids[0])
+            obs.extend([bx, by])
+        else:
+            for bid in self._ball_ids:
+                # Use self._pocketed as source of truth — don't access system.balls for
+                # pocketed balls since pooltool may remove them from the dict.
+                if self._pocketed[bid]:
+                    obs.extend([0.0, 0.0, 1.0])
+                else:
+                    bx, by = norm_pos(bid)
+                    obs.extend([bx, by, 0.0])
+
+        obs.extend(self._pocket_obs.tolist())
+        return np.array(obs, dtype=np.float32)
 
 
 # =============================================================================
-# Sanity tests — run directly to verify the simulator works
+# Sanity tests
 # =============================================================================
 
 if __name__ == "__main__":
     import sys
 
-    print("=" * 50)
-    print("BilliardsEnv — Simulator Sanity Test")
-    print("=" * 50)
+    # ── Single-ball (backward compat) ─────────────────────────────────────────
+    print("=" * 55)
+    print("BilliardsEnv(n_balls=1) — backward-compat test")
+    print("=" * 55)
 
-    env = BilliardsEnv()
+    env1 = BilliardsEnv(n_balls=1)
+    print(f"\n[1] obs shape : {env1.observation_space.shape}  (expected 16)")
+    print(f"    act shape : {env1.action_space.shape}  (expected 2)")
+    assert env1.observation_space.shape == (16,)
 
-    # --- Spaces ---
-    print(f"\n[1] Spaces")
-    print(f"  obs  : {env.observation_space}")
-    print(f"  act  : {env.action_space}")
+    obs, _ = env1.reset(seed=0)
+    _, r, terminated, truncated, info = env1.step(env1.action_space.sample())
+    assert terminated, "n_balls=1 must always terminate after 1 step"
+    assert "pocketed" in info
+    print(f"[2] Single episode OK  reward={r:.2f}  pocketed={info['pocketed']}")
 
-    # --- Table geometry ---
-    print(f"\n[2] Table geometry")
-    print(f"  size : {env.table_width:.4f} m × {env.table_length:.4f} m")
-    print(f"  pockets ({len(env._pocket_centers)}):")
-    for i, pc in enumerate(env._pocket_centers):
-        print(f"    [{i}] ({pc[0]:.3f}, {pc[1]:.3f})")
+    n, hits = 500, 0
+    for _ in range(n):
+        env1.reset()
+        _, _, _, _, info = env1.step(env1.action_space.sample())
+        hits += int(info["pocketed"])
+    print(f"[3] Random pocket rate (n=1): {hits/n*100:.1f}%")
 
-    # --- Single episode ---
-    print(f"\n[3] Single episode")
-    obs, _ = env.reset()
-    print(f"  obs  : {obs}")
-    action = env.action_space.sample()
-    obs2, reward, terminated, _, info = env.step(action)
-    print(f"  action  : delta={np.degrees(action[0]):.1f}°  speed={action[1]:.2f} m/s")
-    print(f"  reward  : {reward}  pocketed={info['pocketed']}")
-    print(f"  terminated : {terminated}")
+    # ── Multi-ball (Phase 1a) ─────────────────────────────────────────────────
+    print()
+    print("=" * 55)
+    print("BilliardsEnv(n_balls=3) — Phase 1a test")
+    print("=" * 55)
 
-    # --- Trajectory ---
-    print(f"\n[4] Trajectory (ball.history.states)")
-    for ball_id in ("cue", "8"):
-        states = env.system.balls[ball_id].history.states
-        if states:
-            print(f"  {ball_id:3s}: {len(states)} states  "
-                  f"t=[{states[0].t:.3f}→{states[-1].t:.3f}]s  "
-                  f"pos0={states[0].rvw[0,:2].round(3)}")
-        else:
-            print(f"  {ball_id}: no history")
+    env3 = BilliardsEnv(n_balls=3, max_steps=15)
+    print(f"\n[1] obs shape : {env3.observation_space.shape}  (expected 23)")
+    print(f"    act shape : {env3.action_space.shape}  (expected 2)")
+    assert env3.observation_space.shape == (23,)
 
-    # --- Random agent benchmark ---
-    print(f"\n[5] Random agent  (1,000 episodes)")
-    n, pocketed = 1000, 0
-    for i in range(n):
-        env.reset()
-        _, _, _, _, info = env.step(env.action_space.sample())
-        pocketed += int(info["pocketed"])
-        if (i + 1) % 200 == 0:
-            sys.stdout.write(f"\r  {i+1}/{n}  ({pocketed} pocketed)")
-            sys.stdout.flush()
-    print(f"\r  Random pocket rate: {pocketed/n*100:.1f}%  ({pocketed}/{n})")
+    obs, _ = env3.reset(seed=42)
+    print(f"[2] Reset obs : {obs}")
+    print(f"    Flags (pocketed): {obs[4]:.0f} {obs[7]:.0f} {obs[10]:.0f}  (all 0 expected)")
+    assert obs[4] == 0.0 and obs[7] == 0.0 and obs[10] == 0.0
+
+    # Full episode with random agent
+    print(f"\n[3] Random episode (max_steps={env3.max_steps})")
+    obs, _ = env3.reset(seed=1)
+    ep_reward, steps = 0.0, 0
+    while True:
+        obs, r, terminated, truncated, info = env3.step(env3.action_space.sample())
+        ep_reward += r
+        steps += 1
+        print(f"    step {steps:2d}  r={r:+.2f}  pocketed={info['total_pocketed']}/3"
+              f"  scratch={info['scratch']}  done={terminated or truncated}")
+        if terminated or truncated:
+            break
+    print(f"    Episode done — total_reward={ep_reward:.2f}  steps={steps}")
+    print(f"    terminated={terminated}  truncated={truncated}")
+
+    # Stats over many episodes
+    print(f"\n[4] Random agent stats (500 episodes)")
+    total_pocketed, clears, ep_steps_list = 0, 0, []
+    for _ in range(500):
+        env3.reset()
+        steps = 0
+        while True:
+            _, _, term, trunc, info = env3.step(env3.action_space.sample())
+            steps += 1
+            if term or trunc:
+                total_pocketed += info["total_pocketed"]
+                clears += int(info["total_pocketed"] == 3)
+                ep_steps_list.append(steps)
+                break
+    print(f"    Avg pocketed / episode : {total_pocketed/500:.2f} / 3")
+    print(f"    Clear rate (all 3)     : {clears/500*100:.1f}%")
+    print(f"    Avg episode length     : {sum(ep_steps_list)/len(ep_steps_list):.1f} steps")
+
     print("\nAll tests passed ✓")

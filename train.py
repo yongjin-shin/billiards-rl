@@ -137,11 +137,12 @@ def set_global_seed(seed: int):
         torch.cuda.manual_seed_all(seed)
 
 
-def make_exp_dir(algo: str, steps: int, seed: int) -> str:
+def make_exp_dir(algo: str, steps: int, seed: int, n_balls: int = 1) -> str:
     """Create and return a unique experiment directory path."""
-    ts   = datetime.now().strftime("%Y%m%d_%H%M%S")
-    name = f"{algo}_{steps // 1000}k_s{seed}_{ts}"
-    path = os.path.join("logs", "experiments", name)
+    ts      = datetime.now().strftime("%Y%m%d_%H%M%S")
+    env_tag = f"_multi{n_balls}" if n_balls > 1 else ""
+    name    = f"{algo}_{steps // 1000}k_s{seed}{env_tag}_{ts}"
+    path    = os.path.join("logs", "experiments", name)
     os.makedirs(os.path.join(path, "best_model"), exist_ok=True)
     os.makedirs(os.path.join(path, "eval"),       exist_ok=True)
     os.makedirs(os.path.join(path, "train"),      exist_ok=True)
@@ -157,15 +158,14 @@ def save_json(path: str, data: dict):
 # Training
 # =============================================================================
 
-def train(algo: str = "SAC", steps: int = 1_000_000, seed: int = 42) -> str:
+def train(algo: str = "SAC", steps: int = 1_000_000, seed: int = 42,
+          n_balls: int = 1) -> str:
     """
     Train one algorithm for `steps` timesteps with a fixed seed.
     Returns the experiment directory path.
 
-    Seed controls:
-      - global numpy / torch / random state      (network init, etc.)
-      - training vec env worker seeds            (ball positions seen during training)
-      - eval env seed                            (identical eval positions across algos)
+    n_balls=1 → single-shot env  (Phase 0, backward-compatible)
+    n_balls=3 → multi-ball env   (Phase 1a)
     """
     algo      = algo.upper()
     algo_map  = _build_algo_map()
@@ -178,9 +178,10 @@ def train(algo: str = "SAC", steps: int = 1_000_000, seed: int = 42) -> str:
 
     set_global_seed(seed)
 
-    exp_dir   = make_exp_dir(algo, steps, seed)
+    exp_dir   = make_exp_dir(algo, steps, seed, n_balls)
+    env_label = f"multi{n_balls}" if n_balls > 1 else "single"
     print(f"\n{'='*55}")
-    print(f"  billiards-rl — {algo}  |  {steps:,} steps  |  seed {seed}")
+    print(f"  billiards-rl — {algo}  |  {steps:,} steps  |  seed {seed}  |  env {env_label}")
     print(f"  exp_dir : {exp_dir}")
     print(f"{'='*55}\n")
 
@@ -189,27 +190,35 @@ def train(algo: str = "SAC", steps: int = 1_000_000, seed: int = 42) -> str:
         "algo"       : algo,
         "steps"      : steps,
         "seed"       : seed,
+        "n_balls"    : n_balls,
         "n_envs"     : N_ENVS,
         "device"     : DEVICE,
         "network"    : [256, 256],
         "algo_kwargs": {k: v for k, v in algo_cfg.items() if k != "policy_kwargs"},
         "timestamp"  : datetime.now().isoformat(timespec="seconds"),
-        "env"        : "BilliardsEnv-v2",
+        "env"        : f"BilliardsEnv-n{n_balls}",
         "exp_dir"    : exp_dir,
     }
     save_json(os.path.join(exp_dir, "config.json"), config)
 
-    # ── Random baseline (seeded for reproducibility) ──────────────────────────
+    # ── Random baseline ───────────────────────────────────────────────────────
     print("[1/3] Random agent baseline (500 episodes)...")
-    baseline_env = BilliardsEnv()
-    baseline_env.reset(seed=seed)   # seed the rng once; subsequent resets are deterministic
-    pocket_count = 0
+    baseline_env = BilliardsEnv(n_balls=n_balls)
+    baseline_env.reset(seed=seed)
+    total_pocketed_baseline = 0
     for _ in range(500):
         baseline_env.reset()
-        _, _, _, _, info = baseline_env.step(baseline_env.action_space.sample())
-        pocket_count += int(info["pocketed"])
-    random_rate = pocket_count / 500 * 100
-    print(f"      Random pocket rate: {random_rate:.1f}%\n")
+        done = False
+        while not done:
+            _, _, term, trunc, info = baseline_env.step(baseline_env.action_space.sample())
+            done = term or trunc
+        if n_balls == 1:
+            total_pocketed_baseline += int(info["pocketed"])
+        else:
+            total_pocketed_baseline += info["total_pocketed"]
+    random_rate = total_pocketed_baseline / 500 / n_balls * 100
+    print(f"      Random pocket rate: {random_rate:.1f}%  "
+          f"(avg {total_pocketed_baseline/500:.2f}/{n_balls} balls)\n")
 
     # ── Vectorised training envs ──────────────────────────────────────────────
     # seed=seed gives worker i the seed (seed + i) → reproducible but diverse
@@ -217,14 +226,14 @@ def train(algo: str = "SAC", steps: int = 1_000_000, seed: int = 42) -> str:
     vec_env = make_vec_env(
         BilliardsEnv,
         n_envs      = N_ENVS,
+        env_kwargs  = {"n_balls": n_balls},
         vec_env_cls = SubprocVecEnv,
         monitor_dir = os.path.join(exp_dir, "train"),
         seed        = seed,
     )
 
-    # eval env: seeded once → same ball-position sequence for every algorithm
-    # → SAC curve[step] and PPO curve[step] are directly comparable
-    _eval_env = Monitor(BilliardsEnv(), filename=os.path.join(exp_dir, "eval", "monitor"))
+    _eval_env = Monitor(BilliardsEnv(n_balls=n_balls),
+                        filename=os.path.join(exp_dir, "eval", "monitor"))
     _eval_env.reset(seed=seed)
 
     eval_callback = EvalCallback(
@@ -264,26 +273,37 @@ def train(algo: str = "SAC", steps: int = 1_000_000, seed: int = 42) -> str:
     best_model = AlgoClass.load(best_model_path)
     print(f"\n[3/3] Evaluating best {algo} checkpoint (500 episodes)...")
 
-    final_eval_env = BilliardsEnv()
-    final_eval_env.reset(seed=seed)   # deterministic position sequence
-    n_eval       = 500
-    pocket_count = 0
+    final_eval_env = BilliardsEnv(n_balls=n_balls)
+    final_eval_env.reset(seed=seed)
+    n_eval = 500
+    total_pocketed_eval, clears = 0, 0
     for _ in range(n_eval):
         obs, _ = final_eval_env.reset()
-        action, _ = best_model.predict(obs, deterministic=True)
-        _, _, _, _, info = final_eval_env.step(action)
-        pocket_count += int(info["pocketed"])
-    trained_rate = pocket_count / n_eval * 100
+        done = False
+        while not done:
+            action, _ = best_model.predict(obs, deterministic=True)
+            obs, _, term, trunc, info = final_eval_env.step(action)
+            done = term or trunc
+        if n_balls == 1:
+            total_pocketed_eval += int(info["pocketed"])
+            clears += int(info["pocketed"])
+        else:
+            total_pocketed_eval += info["total_pocketed"]
+            clears += int(info["total_pocketed"] == n_balls)
 
-    avg_fps = steps / elapsed
+    trained_rate = total_pocketed_eval / n_eval / n_balls * 100
+    clear_rate   = clears / n_eval * 100
+    avg_fps      = steps / elapsed
 
     # ── Save results ──────────────────────────────────────────────────────────
     results = {
         "algo"               : algo,
+        "n_balls"            : n_balls,
         "steps"              : steps,
         "seed"               : seed,
         "random_pocket_rate" : round(random_rate,  2),
         "trained_pocket_rate": round(trained_rate, 2),
+        "clear_rate"         : round(clear_rate,   2),
         "improvement_pp"     : round(trained_rate - random_rate, 2),
         "training_time_sec"  : round(elapsed, 1),
         "avg_fps"            : round(avg_fps, 0),
@@ -292,10 +312,12 @@ def train(algo: str = "SAC", steps: int = 1_000_000, seed: int = 42) -> str:
     save_json(os.path.join(exp_dir, "results.json"), results)
 
     print(f"\n  {'─'*45}")
-    print(f"  {algo} pocket rate : {trained_rate:.1f}%")
-    print(f"  Random           : {random_rate:.1f}%")
-    print(f"  Improvement      : {trained_rate - random_rate:+.1f}pp")
-    print(f"  Training time    : {elapsed/60:.1f} min  ({avg_fps:.0f} fps)")
+    print(f"  {algo} pocket rate  : {trained_rate:.1f}%")
+    if n_balls > 1:
+        print(f"  Clear rate (all {n_balls}): {clear_rate:.1f}%")
+    print(f"  Random            : {random_rate:.1f}%")
+    print(f"  Improvement       : {trained_rate - random_rate:+.1f}pp")
+    print(f"  Training time     : {elapsed/60:.1f} min  ({avg_fps:.0f} fps)")
     print(f"  Saved → {exp_dir}")
     print(f"  TensorBoard → tensorboard --logdir logs/tensorboard")
 
@@ -309,14 +331,16 @@ def train(algo: str = "SAC", steps: int = 1_000_000, seed: int = 42) -> str:
 def main():
     parser = argparse.ArgumentParser(description="Train billiards RL agent")
     _choices = ["SAC", "PPO", "TQC"] if HAS_TQC else ["SAC", "PPO"]
-    parser.add_argument("--algo",  default="SAC", choices=_choices,
-                        help="Algorithm (default: SAC). TQC requires: pip install sb3-contrib")
-    parser.add_argument("--steps", type=int, default=1_000_000,
+    parser.add_argument("--algo",   default="SAC", choices=_choices,
+                        help="Algorithm (default: SAC)")
+    parser.add_argument("--steps",  type=int, default=1_000_000,
                         help="Total training timesteps (default: 1M)")
-    parser.add_argument("--seed",  type=int, default=42,
-                        help="Random seed — use same seed for SAC & PPO to compare fairly (default: 42)")
+    parser.add_argument("--seed",   type=int, default=42,
+                        help="Random seed (default: 42)")
+    parser.add_argument("--n-balls", type=int, default=1, choices=[1, 3],
+                        help="Number of target balls: 1=single-shot (default), 3=multi-ball Phase 1a")
     args = parser.parse_args()
-    train(args.algo, args.steps, args.seed)
+    train(args.algo, args.steps, args.seed, args.n_balls)
 
 
 if __name__ == "__main__":
