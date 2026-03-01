@@ -121,10 +121,12 @@ class ObsCollapseWrapper(gym.ObservationWrapper):
 
 
 def make_collapse_env(n_balls: int = 3, max_steps: int = 5,
-                      step_penalty: float = 0.01, trunc_penalty: float = 0.0):
+                      step_penalty: float = 0.01, trunc_penalty: float = 0.0,
+                      progressive_penalty: bool = False):
     """Create an ObsCollapseWrapper env (single, not vectorised)."""
     base = BilliardsEnv(n_balls=n_balls, max_steps=max_steps,
-                        step_penalty=step_penalty, trunc_penalty=trunc_penalty)
+                        step_penalty=step_penalty, trunc_penalty=trunc_penalty,
+                        progressive_penalty=progressive_penalty)
     return ObsCollapseWrapper(base)
 
 
@@ -233,6 +235,7 @@ def run_transfer(
     max_steps: int = 5,
     step_penalty: float = 0.01,
     trunc_penalty: float = 0.0,
+    progressive_penalty: bool = False,
     eval_only: bool = False,
     n_eval: int = 500,
 ):
@@ -247,6 +250,8 @@ def run_transfer(
     ts      = datetime.now().strftime("%Y%m%d_%H%M%S")
     strat   = strategy.replace("-", "_")
     rew_tag = f"_sp{step_penalty}_tp{trunc_penalty}" if (step_penalty != 0.01 or trunc_penalty != 0.0) else ""
+    if progressive_penalty:
+        rew_tag += "_pp"
     name    = f"SAC_transfer_{strat}_ms{max_steps}{rew_tag}_s{seed}_{ts}"
     exp_dir = os.path.join("logs", "experiments", name)
     os.makedirs(os.path.join(exp_dir, "best_model"), exist_ok=True)
@@ -257,7 +262,7 @@ def run_transfer(
     print(f"  billiards-rl  transfer — strategy={strategy}")
     print(f"  pretrained   : {pretrained_path}")
     print(f"  max_steps    : {max_steps}  |  seed {seed}")
-    print(f"  step_penalty : {step_penalty}  |  trunc_penalty {trunc_penalty}")
+    print(f"  step_penalty : {step_penalty}  |  trunc_penalty {trunc_penalty}  |  progressive {progressive_penalty}")
     if not eval_only:
         print(f"  fine-tune    : {steps:,} steps")
     print(f"  exp_dir      : {exp_dir}")
@@ -271,7 +276,9 @@ def run_transfer(
     if strategy == "obs-collapse":
 
         def _env_factory():
-            return ObsCollapseWrapper(BilliardsEnv(n_balls=3, max_steps=max_steps, step_penalty=step_penalty, trunc_penalty=trunc_penalty))
+            return ObsCollapseWrapper(BilliardsEnv(n_balls=3, max_steps=max_steps,
+                                                   step_penalty=step_penalty, trunc_penalty=trunc_penalty,
+                                                   progressive_penalty=progressive_penalty))
 
         # Zero-shot eval (no training)
         print("[2] Zero-shot evaluation (obs-collapse, 23→16-dim)...")
@@ -282,15 +289,16 @@ def run_transfer(
 
         if eval_only:
             save_json(os.path.join(exp_dir, "results.json"), {
-                "strategy"         : strategy,
-                "pretrained"       : pretrained_path,
-                "max_steps"        : max_steps,
-                "step_penalty"     : step_penalty,
-                "trunc_penalty"    : trunc_penalty,
-                "seed"             : seed,
-                "zeroshot_pocket%" : round(zs_pocket, 2),
-                "zeroshot_clear%"  : round(zs_clear, 2),
-                "exp_dir"          : exp_dir,
+                "strategy"            : strategy,
+                "pretrained"          : pretrained_path,
+                "max_steps"           : max_steps,
+                "step_penalty"        : step_penalty,
+                "trunc_penalty"       : trunc_penalty,
+                "progressive_penalty" : progressive_penalty,
+                "seed"                : seed,
+                "zeroshot_pocket%"    : round(zs_pocket, 2),
+                "zeroshot_clear%"     : round(zs_clear, 2),
+                "exp_dir"             : exp_dir,
             })
             print(f"\n  Saved → {exp_dir}")
             return exp_dir
@@ -298,14 +306,18 @@ def run_transfer(
         # Fine-tune
         print(f"\n[3] Fine-tuning pretrained model ({steps:,} steps, obs-collapse)...")
         vec_env = make_vec_env(
-            lambda: ObsCollapseWrapper(BilliardsEnv(n_balls=3, max_steps=max_steps, step_penalty=step_penalty, trunc_penalty=trunc_penalty)),
+            lambda: ObsCollapseWrapper(BilliardsEnv(n_balls=3, max_steps=max_steps,
+                                                    step_penalty=step_penalty, trunc_penalty=trunc_penalty,
+                                                    progressive_penalty=progressive_penalty)),
             n_envs      = N_ENVS,
             vec_env_cls = SubprocVecEnv,
             monitor_dir = os.path.join(exp_dir, "train"),
             seed        = seed,
         )
         _eval_env = Monitor(
-            ObsCollapseWrapper(BilliardsEnv(n_balls=3, max_steps=max_steps, step_penalty=step_penalty, trunc_penalty=trunc_penalty)),
+            ObsCollapseWrapper(BilliardsEnv(n_balls=3, max_steps=max_steps,
+                                            step_penalty=step_penalty, trunc_penalty=trunc_penalty,
+                                            progressive_penalty=progressive_penalty)),
             filename=os.path.join(exp_dir, "eval", "monitor"),
         )
 
@@ -338,20 +350,21 @@ def run_transfer(
         ft_pocket, ft_clear = evaluate_model(best, _env_factory, n_eval=n_eval, n_balls=3)
 
         save_json(os.path.join(exp_dir, "results.json"), {
-            "strategy"          : strategy,
-            "pretrained"        : pretrained_path,
-            "steps"             : steps,
-            "max_steps"         : max_steps,
-            "step_penalty"      : step_penalty,
-            "trunc_penalty"     : trunc_penalty,
-            "seed"              : seed,
-            "zeroshot_pocket%"  : round(zs_pocket, 2),
-            "zeroshot_clear%"   : round(zs_clear,  2),
-            "finetuned_pocket%" : round(ft_pocket,  2),
-            "finetuned_clear%"  : round(ft_clear,   2),
-            "training_time_sec" : round(elapsed, 1),
-            "avg_fps"           : round(steps / elapsed, 0),
-            "exp_dir"           : exp_dir,
+            "strategy"            : strategy,
+            "pretrained"          : pretrained_path,
+            "steps"               : steps,
+            "max_steps"           : max_steps,
+            "step_penalty"        : step_penalty,
+            "trunc_penalty"       : trunc_penalty,
+            "progressive_penalty" : progressive_penalty,
+            "seed"                : seed,
+            "zeroshot_pocket%"    : round(zs_pocket, 2),
+            "zeroshot_clear%"     : round(zs_clear,  2),
+            "finetuned_pocket%"   : round(ft_pocket,  2),
+            "finetuned_clear%"    : round(ft_clear,   2),
+            "training_time_sec"   : round(elapsed, 1),
+            "avg_fps"             : round(steps / elapsed, 0),
+            "exp_dir"             : exp_dir,
         })
         print(f"\n  Zero-shot pocket : {zs_pocket:.1f}%  →  Fine-tuned : {ft_pocket:.1f}%")
         print(f"  Clear rate       : {zs_clear:.1f}%  →  Fine-tuned : {ft_clear:.1f}%")
@@ -362,7 +375,8 @@ def run_transfer(
     elif strategy == "weight-copy":
 
         def _env_factory():
-            return BilliardsEnv(n_balls=3, max_steps=max_steps, step_penalty=step_penalty, trunc_penalty=trunc_penalty)
+            return BilliardsEnv(n_balls=3, max_steps=max_steps, step_penalty=step_penalty,
+                                trunc_penalty=trunc_penalty, progressive_penalty=progressive_penalty)
 
         # Build fresh 23-dim SAC
         print("[2] Building fresh 23-dim SAC and copying pretrained weights...")
@@ -370,7 +384,8 @@ def run_transfer(
             BilliardsEnv,
             n_envs      = N_ENVS,
             env_kwargs  = {"n_balls": 3, "max_steps": max_steps,
-                        "step_penalty": step_penalty, "trunc_penalty": trunc_penalty},
+                           "step_penalty": step_penalty, "trunc_penalty": trunc_penalty,
+                           "progressive_penalty": progressive_penalty},
             vec_env_cls = SubprocVecEnv,
             monitor_dir = os.path.join(exp_dir, "train"),
             seed        = seed,
@@ -394,15 +409,16 @@ def run_transfer(
 
         if eval_only:
             save_json(os.path.join(exp_dir, "results.json"), {
-                "strategy"         : strategy,
-                "pretrained"       : pretrained_path,
-                "max_steps"        : max_steps,
-                "step_penalty"     : step_penalty,
-                "trunc_penalty"    : trunc_penalty,
-                "seed"             : seed,
-                "zeroshot_pocket%" : round(zs_pocket, 2),
-                "zeroshot_clear%"  : round(zs_clear, 2),
-                "exp_dir"          : exp_dir,
+                "strategy"            : strategy,
+                "pretrained"          : pretrained_path,
+                "max_steps"           : max_steps,
+                "step_penalty"        : step_penalty,
+                "trunc_penalty"       : trunc_penalty,
+                "progressive_penalty" : progressive_penalty,
+                "seed"                : seed,
+                "zeroshot_pocket%"    : round(zs_pocket, 2),
+                "zeroshot_clear%"     : round(zs_clear, 2),
+                "exp_dir"             : exp_dir,
             })
             print(f"\n  Saved → {exp_dir}")
             return exp_dir
@@ -410,7 +426,8 @@ def run_transfer(
         # Warm-start training
         print(f"\n[4] Warm-start training ({steps:,} steps, full 23-dim obs)...")
         _eval_env = Monitor(
-            BilliardsEnv(n_balls=3, max_steps=max_steps, step_penalty=step_penalty, trunc_penalty=trunc_penalty),
+            BilliardsEnv(n_balls=3, max_steps=max_steps, step_penalty=step_penalty,
+                         trunc_penalty=trunc_penalty, progressive_penalty=progressive_penalty),
             filename=os.path.join(exp_dir, "eval", "monitor"),
         )
         eval_cb = EvalCallback(
@@ -438,20 +455,21 @@ def run_transfer(
         ft_pocket, ft_clear = evaluate_model(best, _env_factory, n_eval=n_eval, n_balls=3)
 
         save_json(os.path.join(exp_dir, "results.json"), {
-            "strategy"          : strategy,
-            "pretrained"        : pretrained_path,
-            "steps"             : steps,
-            "max_steps"         : max_steps,
-            "step_penalty"      : step_penalty,
-            "trunc_penalty"     : trunc_penalty,
-            "seed"              : seed,
-            "zeroshot_pocket%"  : round(zs_pocket, 2),
-            "zeroshot_clear%"   : round(zs_clear,  2),
-            "trained_pocket%"   : round(ft_pocket,  2),
-            "trained_clear%"    : round(ft_clear,   2),
-            "training_time_sec" : round(elapsed, 1),
-            "avg_fps"           : round(steps / elapsed, 0),
-            "exp_dir"           : exp_dir,
+            "strategy"            : strategy,
+            "pretrained"          : pretrained_path,
+            "steps"               : steps,
+            "max_steps"           : max_steps,
+            "step_penalty"        : step_penalty,
+            "trunc_penalty"       : trunc_penalty,
+            "progressive_penalty" : progressive_penalty,
+            "seed"                : seed,
+            "zeroshot_pocket%"    : round(zs_pocket, 2),
+            "zeroshot_clear%"     : round(zs_clear,  2),
+            "trained_pocket%"     : round(ft_pocket,  2),
+            "trained_clear%"      : round(ft_clear,   2),
+            "training_time_sec"   : round(elapsed, 1),
+            "avg_fps"             : round(steps / elapsed, 0),
+            "exp_dir"             : exp_dir,
         })
         print(f"\n  Zero-shot pocket : {zs_pocket:.1f}%  →  Trained : {ft_pocket:.1f}%")
         print(f"  Clear rate       : {zs_clear:.1f}%  →  Trained : {ft_clear:.1f}%")
@@ -497,6 +515,10 @@ def main():
         help="Extra penalty when episode truncated by step limit (default: 0.0)",
     )
     parser.add_argument(
+        "--progressive-penalty", action="store_true",
+        help="Use progressive step penalty: step i costs step_penalty × i (default: flat)",
+    )
+    parser.add_argument(
         "--eval-only", action="store_true",
         help="Only evaluate zero-shot performance, no fine-tuning",
     )
@@ -507,15 +529,16 @@ def main():
     args = parser.parse_args()
 
     run_transfer(
-        strategy        = args.strategy,
-        pretrained_path = args.pretrained,
-        steps           = args.steps,
-        seed            = args.seed,
-        max_steps       = args.max_steps,
-        step_penalty    = args.step_penalty,
-        trunc_penalty   = args.trunc_penalty,
-        eval_only       = args.eval_only,
-        n_eval          = args.n_eval,
+        strategy             = args.strategy,
+        pretrained_path      = args.pretrained,
+        steps                = args.steps,
+        seed                 = args.seed,
+        max_steps            = args.max_steps,
+        step_penalty         = args.step_penalty,
+        trunc_penalty        = args.trunc_penalty,
+        progressive_penalty  = args.progressive_penalty,
+        eval_only            = args.eval_only,
+        n_eval               = args.n_eval,
     )
 
 
