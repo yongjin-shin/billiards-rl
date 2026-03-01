@@ -17,6 +17,10 @@ Phase 1  Multi-ball clearing
   [x] Exp-04  Transfer A · obs-collapse zero-shot  →  pocket 63.6%, clear 31.4% (0 min!)
   [x] Exp-05  Transfer B · weight-copy warm-start  →  pocket 61.5%, clear 30.4%
 
+  [ ] Exp-06  Reward shaping scratch         (truncation penalty + stronger step penalty)
+  [ ] Exp-07  Reward shaping Transfer A      (zero-shot)
+  [ ] Exp-08  Reward shaping Transfer B      (warm-start)
+
 Phase 2  (미정)
   [ ] Phase 1b  cushion/bank shots (action space 확장)
   [ ] Phase 2   self-play / full 8-ball
@@ -161,13 +165,40 @@ Phase 2  (미정)
 | Training time | 25.4 min | 0 min | 22.6 min |
 
 **관찰:**
-- warm-start(B)가 scratch(Exp-03)보다 소폭 나은 수준. 초반 수렴이 빠를 것이라는 가설은 최종 성능으로는 확인하기 어려움 — 학습 곡선 초반부 비교 필요.
-- 가장 충격적인 결과는 **Exp-04(zero-shot)** — 훈련 0분으로 B와 거의 동등. aiming skill의 direct transfer 효과가 weight-copy fine-tuning 전체를 압도.
-- weight-copy의 이점이 생각보다 크지 않은 이유: ball2/ball3 뉴런이 0에서 시작하므로 초반에 잘못된 gradient가 shared 뉴런에 영향 → pretrained weight 효과가 희석될 가능성.
+- 학습 곡선을 보면 **초반 reward가 높다가 점점 떨어지는** 패턴이 관찰됨. weight dilution의 전형적인 증거.
+  - b2/b3 뉴런이 0에서 시작 → 초반에는 shared 뉴런(pretrained)이 주도 → 높은 reward
+  - 학습이 진행되면서 multi-ball gradient가 shared 뉴런을 점진적으로 덮어씀 → reward 하락
+  - 결국 pretrained weight의 이점이 희석되어 scratch(Exp-03)와 거의 수렴
+- **ep_len_mean ≈ 4.7** — 5번 step 한도를 거의 다 소진하고 끝남. agent가 "빨리 끝내는" 전략을 배우지 못했음을 시사. 현재 step penalty(-0.01)가 너무 작아서 agent 입장에서는 step을 아낄 동기가 없음.
+- 가장 충격적인 결과는 **Exp-04(zero-shot)** — 훈련 0분으로 B보다 더 좋음. aiming skill의 direct transfer 효과가 weight-copy fine-tuning 전체를 압도.
+
+**다음 방향:**
+- ep_len을 줄이려면 reward 구조 개선이 필요. 두 가지 조합을 검토:
+  1. **truncation penalty**: step limit에 걸려 종료될 때 명시적 패널티(-N). 현재는 limit에 걸려도 추가 패널티 없음.
+  2. **step penalty 강화**: -0.01 → -0.1~-0.2. ball 하나 넣는 이득(+1.0)이 step을 낭비하는 비용을 확실히 상회하도록.
+- max_steps 자체를 줄이는 것보다, max_steps=5를 유지하면서 내부 incentive 구조를 바꾸는 게 학습 안정성 면에서 현실적.
+- 동일한 실험 구조(scratch / Strategy A zero-shot / Strategy B warm-start)로 reward 구조 변경 전후를 비교 → **Exp-06/07/08**
 
 ---
 
 ## Experiments — Planned
+
+### Exp-06/07/08 · Reward shaping — truncation penalty + stronger step penalty
+
+**목표:** ep_len을 줄여 shot efficiency를 실질적으로 강제. Exp-03/04/05와 동일 구조로 비교.
+
+**변경 사항 (simulator.py):**
+- step penalty: -0.01 → -0.1 per step
+- truncation penalty: step limit 도달 시 추가 -1.0
+
+**실험 구조:**
+- Exp-06: scratch (Exp-03 대응)
+- Exp-07: Transfer A zero-shot (Exp-04 대응)
+- Exp-08: Transfer B warm-start (Exp-05 대응)
+
+**비교 기준:** Exp-03 scratch (60.7% / 29.4%, ep_len≈4.7)
+
+---
 
 ## Project Structure
 
