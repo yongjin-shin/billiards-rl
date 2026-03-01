@@ -3,7 +3,7 @@
 Reinforcement learning project using [pooltool](https://github.com/ekiefl/pooltool) — a physics-accurate billiards simulator.
 
 Trains SAC, PPO, and TQC agents to pocket a target ball with a single cue-ball shot.
-**Current best: TQC / SAC → ~81%+ pocket rate** (random baseline: ~6%)
+**Current best: TQC → 84.4% pocket rate** (random baseline: ~3%)
 
 ---
 
@@ -126,14 +126,18 @@ billiards-rl/
 
 ## Algorithm comparison
 
-| Algorithm | Type | Best pocket rate | Notes |
-|-----------|------|-----------------|-------|
-| **TQC** | Off-policy, distributional | TBD | Expected best — drops top quantiles to reduce overestimation |
-| **SAC** | Off-policy | ~81% | Strong baseline; can collapse at end of training (use best_model) |
-| **PPO** | On-policy | ~29% | Structurally disadvantaged at horizon=1: GAE provides no signal |
-| Random | — | ~6% | Uniform random action |
+All runs: 1M steps, seed 42, single-shot environment (horizon = 1).
+
+| Algorithm | Type | Pocket rate | Training time | FPS | Notes |
+|-----------|------|-------------|--------------|-----|-------|
+| 🥇 **TQC** | Off-policy, distributional | **84.4%** | 26.5 min | 630 | Distributional Q — best result |
+| 🥈 **SAC** | Off-policy | **81.4%** | 18.6 min | 895 | Entropy regularisation; can collapse near end |
+| 🥉 **PPO** | On-policy | **28.8%** | 36.5 min | 457 | Structurally disadvantaged at horizon=1 |
+| Random | — | ~3% | — | — | Uniform random action |
 
 > **Why off-policy wins here:** Single-shot episodes mean PPO's multi-step advantage estimation (GAE) degenerates to simple REINFORCE. SAC/TQC's replay buffer recycles every transition efficiently.
+>
+> **TQC vs SAC (+3pp):** Distributional Q-learning drops the top 4 of 50 quantiles per update, reducing overestimation bias. More stable learning curve, less collapse near the end.
 
 ---
 
