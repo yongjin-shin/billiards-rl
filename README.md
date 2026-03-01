@@ -3,7 +3,7 @@
 Reinforcement learning project using [pooltool](https://github.com/ekiefl/pooltool) — a physics-accurate billiards simulator.
 
 Trains SAC, PPO, and TQC agents to pocket a target ball with a single cue-ball shot.
-**Current best: TQC → 84.4% pocket rate** (random baseline: ~3%)
+**Multi-seed results (3 seeds):** SAC 77.6% ± 3.9pp · TQC 66.9% ± 27.2pp · PPO 28.5% ± 4.0pp (random: ~3%)
 
 ---
 
@@ -126,18 +126,20 @@ billiards-rl/
 
 ## Algorithm comparison
 
-All runs: 1M steps, seed 42, single-shot environment (horizon = 1).
+All runs: 1M steps, 3 seeds (0, 1, 2), single-shot environment (horizon = 1).
 
-| Algorithm | Type | Pocket rate | Training time | FPS | Notes |
-|-----------|------|-------------|--------------|-----|-------|
-| 🥇 **TQC** | Off-policy, distributional | **84.4%** | 26.5 min | 630 | Distributional Q — best result |
-| 🥈 **SAC** | Off-policy | **81.4%** | 18.6 min | 895 | Entropy regularisation; can collapse near end |
-| 🥉 **PPO** | On-policy | **28.8%** | 36.5 min | 457 | Structurally disadvantaged at horizon=1 |
-| Random | — | ~3% | — | — | Uniform random action |
+| Algorithm | Type | Mean ± std | Best seed | Notes |
+|-----------|------|------------|-----------|-------|
+| 🥇 **SAC** | Off-policy | **77.6% ± 3.9pp** | 81.4% | Most consistent; all seeds collapse near end but best_model saved |
+| 🥈 **TQC** | Off-policy, distributional | **66.9% ± 27.2pp** | 84.6% | Highest ceiling but high variance — seed 2 catastrophically failed (35.6%) |
+| 🥉 **PPO** | On-policy | **28.5% ± 4.0pp** | 31.6% | Consistent but structurally disadvantaged at horizon=1 |
+| Random | — | ~3% | — | Uniform random action |
 
 > **Why off-policy wins here:** Single-shot episodes mean PPO's multi-step advantage estimation (GAE) degenerates to simple REINFORCE. SAC/TQC's replay buffer recycles every transition efficiently.
 >
-> **TQC vs SAC (+3pp):** Distributional Q-learning drops the top 4 of 50 quantiles per update, reducing overestimation bias. More stable learning curve, less collapse near the end.
+> **SAC vs TQC (multi-seed):** TQC reaches the highest single-seed peak (84.6%) but shows catastrophic instability on seed 2. SAC is more robust across seeds (77.6% ± 3.9pp). Both algorithms exhibit end-of-training collapse; EvalCallback's best_model checkpoint is essential.
+>
+> **SAC collapse pattern:** All 3 SAC seeds collapse to near-zero pocket rate at the end of training. The best checkpoint (saved mid-training) is used for evaluation.
 
 ---
 
