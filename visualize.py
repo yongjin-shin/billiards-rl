@@ -12,6 +12,9 @@ Usage:
     python visualize.py --mode video --n-balls 3               # random, 3 balls, video
     python visualize.py --model <path> --algo TQC              # trained TQC, image
     python visualize.py --model <path> --algo SAC --mode video # trained SAC, video
+
+    # Before/after comparison (concatenates two MP4s with title cards):
+    python visualize.py --mode compare --before before.mp4 --after after.mp4
 """
 
 import argparse
@@ -595,6 +598,105 @@ def render_video(env, policy_fn, args):
 
 
 # =============================================================================
+# Compare mode — concatenate two MP4s with title cards
+# =============================================================================
+
+def _make_title_frames(text, subtext, w, h, n_frames, bg="#111111",
+                       text_color="white", sub_color="#aaaaaa"):
+    """Render a title card as a list of identical RGB frames."""
+    dpi   = 100
+    fig_w = w / dpi
+    fig_h = h / dpi
+    fig   = plt.figure(figsize=(fig_w, fig_h), dpi=dpi)
+    fig.patch.set_facecolor(bg)
+    fig.text(0.5, 0.58, text,    ha="center", va="center",
+             fontsize=22, fontweight="bold", color=text_color)
+    fig.text(0.5, 0.42, subtext, ha="center", va="center",
+             fontsize=13, color=sub_color)
+    fig.canvas.draw()
+    buf = np.frombuffer(fig.canvas.buffer_rgba(), dtype=np.uint8).reshape(h, w, 4)
+    frame = buf[:, :, :3].copy()
+    plt.close(fig)
+    return [frame] * n_frames
+
+
+def render_compare(args):
+    """Concatenate before.mp4 + after.mp4 with title cards into one video."""
+    import imageio.v2 as imageio
+
+    if not args.before or not args.after:
+        print("ERROR: --mode compare requires --before <path> and --after <path>")
+        sys.exit(1)
+
+    def _count_and_meta(path):
+        r = imageio.get_reader(path)
+        meta = r.get_meta_data()
+        count = 0
+        first = None
+        for f in r:
+            if first is None:
+                first = f
+            count += 1
+        r.close()
+        return meta, count, first
+
+    print(f"Scanning before: {args.before}")
+    meta_b, n_b, first_b = _count_and_meta(args.before)
+    print(f"Scanning after : {args.after}")
+    meta_a, n_a, first_a = _count_and_meta(args.after)
+
+    h, w = first_b.shape[:2]
+    fps  = int(meta_b.get("fps", FPS))
+    card_sec = getattr(args, "card_sec", 2.5)
+    n_card   = int(card_sec * fps)
+
+    before_label = getattr(args, "before_label", "Before  ·  Random Agent")
+    after_label  = getattr(args, "after_label",  "After  ·  Trained SAC")
+    before_sub   = f"{n_b // fps}s  ·  {n_b} frames"
+    after_sub    = f"{n_a // fps}s  ·  {n_a} frames"
+
+    os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
+    writer = imageio.get_writer(args.out, fps=fps, codec="libx264",
+                                output_params=["-crf", "18", "-pix_fmt", "yuv420p"])
+
+    # Title card → before section (stream frames one by one)
+    print("Writing before section ...")
+    for f in _make_title_frames(before_label, before_sub, w, h, n_card):
+        writer.append_data(f)
+    reader_b = imageio.get_reader(args.before)
+    for i, f in enumerate(reader_b):
+        writer.append_data(f)
+        if (i + 1) % 100 == 0:
+            sys.stdout.write(f"\r  Before: {i+1}/{n_b} frames")
+            sys.stdout.flush()
+    reader_b.close()
+    print(f"\r  Before: {n_b}/{n_b} frames ✓")
+
+    # Short black gap
+    gap = np.zeros((h, w, 3), dtype=np.uint8)
+    for _ in range(int(fps * 0.5)):
+        writer.append_data(gap)
+
+    # Title card → after section
+    print("Writing after section ...")
+    for f in _make_title_frames(after_label, after_sub, w, h, n_card,
+                                text_color=HIT_CLR):
+        writer.append_data(f)
+    reader_a = imageio.get_reader(args.after)
+    for i, f in enumerate(reader_a):
+        writer.append_data(f)
+        if (i + 1) % 100 == 0:
+            sys.stdout.write(f"\r  After : {i+1}/{n_a} frames")
+            sys.stdout.flush()
+    reader_a.close()
+    print(f"\r  After : {n_a}/{n_a} frames ✓")
+
+    writer.close()
+    total_sec = (n_card * 2 + n_b + n_a + int(fps * 0.5)) / fps
+    print(f"\nSaved → {args.out}  ({total_sec:.0f}s total)")
+
+
+# =============================================================================
 # Main
 # =============================================================================
 
@@ -604,8 +706,8 @@ def main():
 
     parser.add_argument("--n-balls", type=int, default=1, choices=[1, 3],
                         help="Number of target balls (default: 1)")
-    parser.add_argument("--mode",    default="image", choices=["image", "video"],
-                        help="Output type: image grid or MP4 video (default: image)")
+    parser.add_argument("--mode",    default="image", choices=["image", "video", "compare"],
+                        help="image grid / MP4 video / before-after comparison (default: image)")
     parser.add_argument("--model",   default=None,
                         help="Trained model path without .zip. Omit for random agent.")
     parser.add_argument("--algo",    default="SAC", choices=["SAC", "TQC", "PPO"],
@@ -622,7 +724,26 @@ def main():
                         help="Output file path (auto-named if omitted)")
     parser.add_argument("--seed",    type=int, default=0,
                         help="Random seed (default: 0)")
+    # compare mode args
+    parser.add_argument("--before",        default=None, help="Before MP4 path (compare mode)")
+    parser.add_argument("--after",         default=None, help="After MP4 path (compare mode)")
+    parser.add_argument("--before-label",  default="Before  ·  Random Agent",
+                        help="Title text for before section")
+    parser.add_argument("--after-label",   default="After  ·  Trained SAC",
+                        help="Title text for after section")
+    parser.add_argument("--card-sec",      type=float, default=2.5,
+                        help="Title card duration in seconds (default: 2.5)")
     args = parser.parse_args()
+
+    # compare mode — just concatenate, no env needed
+    if args.mode == "compare":
+        if args.out is None:
+            args.out = "outputs/comparison.mp4"
+        args.before_label = args.before_label
+        args.after_label  = args.after_label
+        args.card_sec     = args.card_sec
+        render_compare(args)
+        return
 
     # Defaults for count and out
     if args.count is None:
