@@ -14,8 +14,8 @@ Phase 0  Single-ball aiming
 Phase 1  Multi-ball clearing
   [x] Exp-02  SAC from scratch — max_steps=15  →  너무 느슨함, step 낭비
   [x] Exp-03  SAC from scratch — max_steps=5   →  pocket 60.7%, clear 29.4%
-  [ ] Exp-04  Transfer A · obs-collapse zero-shot eval
-  [ ] Exp-05  Transfer B · weight-copy warm-start vs Exp-03 scratch
+  [x] Exp-04  Transfer A · obs-collapse zero-shot  →  pocket 63.6%, clear 31.4% (0 min!)
+  [~] Exp-05  Transfer B · weight-copy warm-start  →  진행 중
 
 Phase 2  (미정)
   [ ] Phase 1b  cushion/bank shots (action space 확장)
@@ -103,8 +103,6 @@ Phase 2  (미정)
 
 ---
 
-## Experiments — Planned
-
 ### Exp-03 · Phase 1a multi-ball (max_steps=5)
 
 **목표:** 타이트한 horizon으로 shot efficiency를 강제. Exp-02와 비교.
@@ -122,44 +120,45 @@ Phase 2  (미정)
 
 **관찰:**
 - max_steps=5는 훨씬 어려운 문제. 5번 안에 3개를 넣으려면 샷당 평균 0.6개 이상 pocketing해야 함.
-- clear rate 29.4%는 여전히 유의미하지만, Exp-02의 95.8%와 극명한 차이 — horizon이 얼마나 중요한지 확인.
-- Transfer 실험(Exp-04, 05)의 scratch baseline이 됨.
+- clear rate 29.4%는 Exp-02의 95.8%와 극명한 차이 — horizon이 difficulty를 얼마나 바꾸는지 확인.
+- Transfer 실험(Exp-04, 05)의 scratch baseline.
 
 ---
 
-### Exp-04 · Transfer Strategy A — obs-collapse zero-shot eval
+### Exp-04 · Transfer A — obs-collapse zero-shot eval
 
 **목표:** Phase 0에서 학습한 aiming skill이 추가 훈련 없이 multi-ball에 얼마나 transfer되는지 측정.
 
-**방법:** `ObsCollapseWrapper`로 23-dim obs → 16-dim으로 축소. 매 step마다 nearest unpocketed ball을 "the ball"로 제시. Pretrained n_balls=1 모델을 그대로 사용.
+**방법:** `ObsCollapseWrapper`로 23-dim obs → 16-dim 축소. 매 step 가장 가까운 unpocketed ball을 "the ball"로 제시. Pretrained n_balls=1 모델(seed=0, 81.4%) 그대로 사용.
 
-**가설:** aiming geometry가 동일하므로 공 1개씩 순서대로 pocketing 가능. 단, ball2/ball3가 invisible하여 interference를 피할 수 없음 → ceiling 존재.
+**결과:**
 
-```bash
-python train_pretrained.py \
-    --strategy obs-collapse \
-    --pretrained logs/experiments/SAC_1000k_s42_.../best_model/best_model \
-    --eval-only
-```
+| Metric | Exp-03 scratch | Exp-04 zero-shot |
+|--------|----------------|-----------------|
+| Pocket rate | 60.7% | **63.6%** |
+| Clear rate (all 3) | 29.4% | **31.4%** |
+| Training | 25.4 min | 0 min |
+
+**관찰:**
+- 추가 훈련 없이 scratch(Exp-03)와 거의 동등한 성능. aiming skill이 multi-ball로 그대로 transfer됨.
+- 공을 1개씩 순서대로 보여주는 wrapper 덕분에 n_balls=1 모델이 n_balls=3 환경에서도 유효하게 작동.
+- 단, ball2/ball3 위치를 모르므로 interference는 피할 수 없음 — 이 이상의 개선은 full obs 없이는 불가.
 
 ---
 
-### Exp-05 · Transfer Strategy B — weight-copy warm-start
+## Experiments — Planned
+
+### Exp-05 · Transfer B — weight-copy warm-start `[진행 중]`
 
 **목표:** Phase 0 가중치를 warm-start로 활용했을 때 Exp-03(scratch)보다 빠르게 수렴하는지 확인.
 
-**방법:** 23-dim SAC를 새로 만들고, 첫 번째 input layer의 shared 뉴런(cue, ball1, pocket 열)에 n_balls=1 모델 가중치 복사. ball2/ball3 관련 새 뉴런은 0으로 초기화 후 전체 fine-tune.
+**방법:** 23-dim SAC를 새로 만들고, 첫 번째 input layer의 shared 뉴런(cue, ball1, pocket 열)에 n_balls=1 모델 가중치 복사. ball2/ball3 뉴런은 0 초기화 후 전체 fine-tune.
 
-**가설:** aiming skill을 보존한 채 multi-ball 전략을 추가 학습 → Exp-03보다 초반 수렴 빠름.
+**zero-shot (훈련 전):** pocket 59.7%, clear 24.0%
+
+**가설:** aiming skill 보존 + multi-ball 전략 학습 → Exp-03보다 초반 수렴 빠름.
 
 **비교 대상:** Exp-03 scratch 학습 곡선
-
-```bash
-python train_pretrained.py \
-    --strategy weight-copy \
-    --pretrained logs/experiments/SAC_1000k_s42_.../best_model/best_model \
-    --steps 1000000 --seed 42
-```
 
 ---
 
