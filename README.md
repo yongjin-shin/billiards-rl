@@ -20,7 +20,8 @@ Phase 1  Multi-ball clearing
   [x] Exp-06  Progressive penalty (sp=0.1×step, tp=1.0) → scratch 63.9% / A 64.3% / B 64.8%
               ep_len unchanged (80.9% use all 5 steps) — aiming↑ but efficiency unchanged
 
-  [ ] Exp-07  SAC vs TQC — clear_bonus(=2.0/steps_used) reward shaping
+  [x] Exp-07  SAC vs TQC — clear_bonus(=2.0/steps_used) → SAC 62.0%/29.2%, TQC 49.7%/17.6%
+              ep_len unchanged (81.5% use all 5 steps) — clear_bonus도 efficiency 개선 없음
   [ ] Exp-08  shots_taken obs ablation — urgency 정보가 ep_len에 미치는 영향
 
 Phase 2  (미정)
@@ -237,10 +238,32 @@ reward: sp=0.1 (flat), tp=1.0, **clear_bonus=2.0**
 
 3-step vs 5-step gap: **+0.47** (clear_bonus 없을 때 +0.20, 2.3× 향상)
 
-**가설:**
-- clear_bonus가 step count 없이도 빠른 클리어에 명시적 gradient를 제공 → ep_len 감소 기대
-- TQC: reward 분포가 [-1.5 ~ +3.4] 범위의 고분산. top quantile dropping으로 overestimation 감소 → SAC보다 나은 shot selection
-- 단, Exp-01에서 TQC는 seed 간 분산이 매우 컸음(±27pp). 단일 seed 결과 해석 주의.
+**결과:**
+
+| Metric | SAC (Exp-07) | TQC (Exp-07) | SAC Exp-06 (참고) |
+|--------|-------------|-------------|-----------------|
+| Pocket rate | **62.0%** | 49.7% | 63.9% |
+| Clear rate | **29.2%** | 17.6% | 33.2% |
+| ep_len (5-step %) | 81.5% | 91.0% | 80.9% |
+| avg clear step | 4.14 | 4.16 | 4.11 |
+| Training time | 32.4 min | 26.3 min | 36.2 min |
+
+**Episode length 분포 (SAC Exp-07, n=1000):**
+
+| step | count | % |
+|------|-------|---|
+| 1 | 3 | 0.3% |
+| 2 | 11 | 1.1% |
+| 3 | 64 | 6.4% |
+| 4 | 107 | 10.7% |
+| 5 | 815 | **81.5%** |
+
+**관찰:**
+- **clear_bonus도 ep_len 단축 실패.** 81.5%가 여전히 5-step 소진 — Exp-06(80.9%)과 사실상 동일. 3-step vs 5-step 보상 차이(+0.47)가 policy gradient를 바꾸기엔 부족하거나, 에이전트가 step count를 모르므로 이 차이를 활용할 수 없음. **ep_len 단축은 obs 변경 없이는 불가능해 보임 → Exp-08 shots_taken 필요.**
+- **TQC가 SAC보다 크게 열세 (49.7% vs 62.0%).** Exp-01에서 관찰된 seed 간 불안정성(±27pp)이 여기서도 재현. 단일 seed로는 TQC가 나쁜 local optima에 수렴할 가능성이 있음. multi-seed 비교 없이 TQC 우위를 주장하기 어려움.
+- SAC Exp-07 (62.0%)이 Exp-06 (63.9%)보다 소폭 낮음 — clear_bonus가 reward scale을 높여(최대 +3.37) Q-learning을 오히려 불안정하게 만들었을 가능성.
+
+**다음 방향:** ep_len 원인 규명 → Exp-08 shots_taken ablation.
 
 ### Exp-08 · shots_taken obs ablation
 
