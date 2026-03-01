@@ -15,7 +15,7 @@ Phase 1  Multi-ball clearing
   [x] Exp-02  SAC from scratch — max_steps=15  →  너무 느슨함, step 낭비
   [x] Exp-03  SAC from scratch — max_steps=5   →  pocket 60.7%, clear 29.4%
   [x] Exp-04  Transfer A · obs-collapse zero-shot  →  pocket 63.6%, clear 31.4% (0 min!)
-  [~] Exp-05  Transfer B · weight-copy warm-start  →  진행 중
+  [x] Exp-05  Transfer B · weight-copy warm-start  →  pocket 61.5%, clear 30.4%
 
 Phase 2  (미정)
   [ ] Phase 1b  cushion/bank shots (action space 확장)
@@ -146,21 +146,28 @@ Phase 2  (미정)
 
 ---
 
-## Experiments — Planned
-
-### Exp-05 · Transfer B — weight-copy warm-start `[진행 중]`
+### Exp-05 · Transfer B — weight-copy warm-start
 
 **목표:** Phase 0 가중치를 warm-start로 활용했을 때 Exp-03(scratch)보다 빠르게 수렴하는지 확인.
 
 **방법:** 23-dim SAC를 새로 만들고, 첫 번째 input layer의 shared 뉴런(cue, ball1, pocket 열)에 n_balls=1 모델 가중치 복사. ball2/ball3 뉴런은 0 초기화 후 전체 fine-tune.
 
-**zero-shot (훈련 전):** pocket 59.7%, clear 24.0%
+**결과:**
 
-**가설:** aiming skill 보존 + multi-ball 전략 학습 → Exp-03보다 초반 수렴 빠름.
+| Metric | Exp-03 scratch | Exp-04 zero-shot (A) | Exp-05 warm-start (B) |
+|--------|----------------|----------------------|----------------------|
+| Pocket rate | 60.7% | 63.6% | **61.5%** |
+| Clear rate | 29.4% | 31.4% | **30.4%** |
+| Training time | 25.4 min | 0 min | 22.6 min |
 
-**비교 대상:** Exp-03 scratch 학습 곡선
+**관찰:**
+- warm-start(B)가 scratch(Exp-03)보다 소폭 나은 수준. 초반 수렴이 빠를 것이라는 가설은 최종 성능으로는 확인하기 어려움 — 학습 곡선 초반부 비교 필요.
+- 가장 충격적인 결과는 **Exp-04(zero-shot)** — 훈련 0분으로 B와 거의 동등. aiming skill의 direct transfer 효과가 weight-copy fine-tuning 전체를 압도.
+- weight-copy의 이점이 생각보다 크지 않은 이유: ball2/ball3 뉴런이 0에서 시작하므로 초반에 잘못된 gradient가 shared 뉴런에 영향 → pretrained weight 효과가 희석될 가능성.
 
 ---
+
+## Experiments — Planned
 
 ## Project Structure
 
