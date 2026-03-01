@@ -122,11 +122,13 @@ class ObsCollapseWrapper(gym.ObservationWrapper):
 
 def make_collapse_env(n_balls: int = 3, max_steps: int = 5,
                       step_penalty: float = 0.01, trunc_penalty: float = 0.0,
-                      progressive_penalty: bool = False):
+                      progressive_penalty: bool = False,
+                      clear_bonus: float = 0.0):
     """Create an ObsCollapseWrapper env (single, not vectorised)."""
     base = BilliardsEnv(n_balls=n_balls, max_steps=max_steps,
                         step_penalty=step_penalty, trunc_penalty=trunc_penalty,
-                        progressive_penalty=progressive_penalty)
+                        progressive_penalty=progressive_penalty,
+                        clear_bonus=clear_bonus)
     return ObsCollapseWrapper(base)
 
 
@@ -236,6 +238,7 @@ def run_transfer(
     step_penalty: float = 0.01,
     trunc_penalty: float = 0.0,
     progressive_penalty: bool = False,
+    clear_bonus: float = 0.0,
     eval_only: bool = False,
     n_eval: int = 500,
 ):
@@ -252,6 +255,8 @@ def run_transfer(
     rew_tag = f"_sp{step_penalty}_tp{trunc_penalty}" if (step_penalty != 0.01 or trunc_penalty != 0.0) else ""
     if progressive_penalty:
         rew_tag += "_pp"
+    if clear_bonus > 0.0:
+        rew_tag += f"_cb{clear_bonus}"
     name    = f"SAC_transfer_{strat}_ms{max_steps}{rew_tag}_s{seed}_{ts}"
     exp_dir = os.path.join("logs", "experiments", name)
     os.makedirs(os.path.join(exp_dir, "best_model"), exist_ok=True)
@@ -262,7 +267,7 @@ def run_transfer(
     print(f"  billiards-rl  transfer — strategy={strategy}")
     print(f"  pretrained   : {pretrained_path}")
     print(f"  max_steps    : {max_steps}  |  seed {seed}")
-    print(f"  step_penalty : {step_penalty}  |  trunc_penalty {trunc_penalty}  |  progressive {progressive_penalty}")
+    print(f"  step_penalty : {step_penalty}  |  trunc_penalty {trunc_penalty}  |  progressive {progressive_penalty}  |  clear_bonus {clear_bonus}")
     if not eval_only:
         print(f"  fine-tune    : {steps:,} steps")
     print(f"  exp_dir      : {exp_dir}")
@@ -278,7 +283,8 @@ def run_transfer(
         def _env_factory():
             return ObsCollapseWrapper(BilliardsEnv(n_balls=3, max_steps=max_steps,
                                                    step_penalty=step_penalty, trunc_penalty=trunc_penalty,
-                                                   progressive_penalty=progressive_penalty))
+                                                   progressive_penalty=progressive_penalty,
+                                                   clear_bonus=clear_bonus))
 
         # Zero-shot eval (no training)
         print("[2] Zero-shot evaluation (obs-collapse, 23→16-dim)...")
@@ -295,6 +301,7 @@ def run_transfer(
                 "step_penalty"        : step_penalty,
                 "trunc_penalty"       : trunc_penalty,
                 "progressive_penalty" : progressive_penalty,
+                "clear_bonus"         : clear_bonus,
                 "seed"                : seed,
                 "zeroshot_pocket%"    : round(zs_pocket, 2),
                 "zeroshot_clear%"     : round(zs_clear, 2),
@@ -308,7 +315,8 @@ def run_transfer(
         vec_env = make_vec_env(
             lambda: ObsCollapseWrapper(BilliardsEnv(n_balls=3, max_steps=max_steps,
                                                     step_penalty=step_penalty, trunc_penalty=trunc_penalty,
-                                                    progressive_penalty=progressive_penalty)),
+                                                    progressive_penalty=progressive_penalty,
+                                                    clear_bonus=clear_bonus)),
             n_envs      = N_ENVS,
             vec_env_cls = SubprocVecEnv,
             monitor_dir = os.path.join(exp_dir, "train"),
@@ -317,7 +325,8 @@ def run_transfer(
         _eval_env = Monitor(
             ObsCollapseWrapper(BilliardsEnv(n_balls=3, max_steps=max_steps,
                                             step_penalty=step_penalty, trunc_penalty=trunc_penalty,
-                                            progressive_penalty=progressive_penalty)),
+                                            progressive_penalty=progressive_penalty,
+                                            clear_bonus=clear_bonus)),
             filename=os.path.join(exp_dir, "eval", "monitor"),
         )
 
@@ -357,6 +366,7 @@ def run_transfer(
             "step_penalty"        : step_penalty,
             "trunc_penalty"       : trunc_penalty,
             "progressive_penalty" : progressive_penalty,
+            "clear_bonus"         : clear_bonus,
             "seed"                : seed,
             "zeroshot_pocket%"    : round(zs_pocket, 2),
             "zeroshot_clear%"     : round(zs_clear,  2),
@@ -376,7 +386,8 @@ def run_transfer(
 
         def _env_factory():
             return BilliardsEnv(n_balls=3, max_steps=max_steps, step_penalty=step_penalty,
-                                trunc_penalty=trunc_penalty, progressive_penalty=progressive_penalty)
+                                trunc_penalty=trunc_penalty, progressive_penalty=progressive_penalty,
+                                clear_bonus=clear_bonus)
 
         # Build fresh 23-dim SAC
         print("[2] Building fresh 23-dim SAC and copying pretrained weights...")
@@ -385,7 +396,8 @@ def run_transfer(
             n_envs      = N_ENVS,
             env_kwargs  = {"n_balls": 3, "max_steps": max_steps,
                            "step_penalty": step_penalty, "trunc_penalty": trunc_penalty,
-                           "progressive_penalty": progressive_penalty},
+                           "progressive_penalty": progressive_penalty,
+                           "clear_bonus": clear_bonus},
             vec_env_cls = SubprocVecEnv,
             monitor_dir = os.path.join(exp_dir, "train"),
             seed        = seed,
@@ -415,6 +427,7 @@ def run_transfer(
                 "step_penalty"        : step_penalty,
                 "trunc_penalty"       : trunc_penalty,
                 "progressive_penalty" : progressive_penalty,
+                "clear_bonus"         : clear_bonus,
                 "seed"                : seed,
                 "zeroshot_pocket%"    : round(zs_pocket, 2),
                 "zeroshot_clear%"     : round(zs_clear, 2),
@@ -427,7 +440,8 @@ def run_transfer(
         print(f"\n[4] Warm-start training ({steps:,} steps, full 23-dim obs)...")
         _eval_env = Monitor(
             BilliardsEnv(n_balls=3, max_steps=max_steps, step_penalty=step_penalty,
-                         trunc_penalty=trunc_penalty, progressive_penalty=progressive_penalty),
+                         trunc_penalty=trunc_penalty, progressive_penalty=progressive_penalty,
+                         clear_bonus=clear_bonus),
             filename=os.path.join(exp_dir, "eval", "monitor"),
         )
         eval_cb = EvalCallback(
@@ -462,6 +476,7 @@ def run_transfer(
             "step_penalty"        : step_penalty,
             "trunc_penalty"       : trunc_penalty,
             "progressive_penalty" : progressive_penalty,
+            "clear_bonus"         : clear_bonus,
             "seed"                : seed,
             "zeroshot_pocket%"    : round(zs_pocket, 2),
             "zeroshot_clear%"     : round(zs_clear,  2),
@@ -519,6 +534,10 @@ def main():
         help="Use progressive step penalty: step i costs step_penalty × i (default: flat)",
     )
     parser.add_argument(
+        "--clear-bonus", type=float, default=0.0,
+        help="Bonus added at termination scaled by 1/steps_used — rewards faster clears (default: 0.0)",
+    )
+    parser.add_argument(
         "--eval-only", action="store_true",
         help="Only evaluate zero-shot performance, no fine-tuning",
     )
@@ -537,6 +556,7 @@ def main():
         step_penalty         = args.step_penalty,
         trunc_penalty        = args.trunc_penalty,
         progressive_penalty  = args.progressive_penalty,
+        clear_bonus          = args.clear_bonus,
         eval_only            = args.eval_only,
         n_eval               = args.n_eval,
     )

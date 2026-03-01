@@ -80,10 +80,27 @@ def load_experiment(exp_dir: str) -> dict | None:
                     (rewards.mean(axis=1) - r_min) / denom * 100, 0, 100
                 )
             else:
-                # Flat penalty: episode reward is sum of per-ball rewards + step penalties.
-                # Normalize to [0,100] using n_balls as ceiling (max reward ≈ n_balls).
-                # This gives an approximate "fraction of balls pocketed" curve.
-                pocket_rates = np.clip(rewards.mean(axis=1) / n_balls * 100, 0, 100)
+                cb = config.get("clear_bonus", 0.0)
+                sp = config.get("step_penalty", 0.01)
+                tp = config.get("trunc_penalty", 0.0)
+                ms = config.get("max_steps", 5)
+                if cb > 0.0:
+                    # Clear bonus raises max reward above n_balls.
+                    # Best-case approx: clear at step n_balls (one ball per step):
+                    #   r_max = n_balls - sp*n_balls + cb/n_balls
+                    # Worst-case: all steps used, 0 balls, truncated:
+                    #   r_min = -sp*ms - tp
+                    r_max = n_balls - sp * n_balls + cb / n_balls
+                    r_min = -sp * ms - tp
+                    denom = r_max - r_min if r_max > r_min else 1.0
+                    pocket_rates = np.clip(
+                        (rewards.mean(axis=1) - r_min) / denom * 100, 0, 100
+                    )
+                else:
+                    # Flat penalty: episode reward is sum of per-ball rewards + step penalties.
+                    # Normalize to [0,100] using n_balls as ceiling (max reward ≈ n_balls).
+                    # This gives an approximate "fraction of balls pocketed" curve.
+                    pocket_rates = np.clip(rewards.mean(axis=1) / n_balls * 100, 0, 100)
 
     return {
         "name"        : os.path.basename(exp_dir),

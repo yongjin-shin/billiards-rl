@@ -43,6 +43,7 @@ class BilliardsEnv(gym.Env):
              ·  -step_penalty×i per step if progressive_penalty else -step_penalty (flat)
              ·  -0.5 for scratch
              ·  -trunc_penalty when episode truncated (step limit reached)
+             ·  +clear_bonus/steps_used when all balls cleared (terminated)
     Episode ends : all balls pocketed  OR  step >= max_steps
 
     Action (2-dim continuous, same for both):
@@ -57,7 +58,8 @@ class BilliardsEnv(gym.Env):
 
     def __init__(self, n_balls: int = 1, max_steps: int = 5,
                  step_penalty: float = 0.01, trunc_penalty: float = 0.0,
-                 progressive_penalty: bool = False):
+                 progressive_penalty: bool = False,
+                 clear_bonus: float = 0.0):
         super().__init__()
         assert n_balls >= 1, "n_balls must be >= 1"
 
@@ -66,6 +68,7 @@ class BilliardsEnv(gym.Env):
         self.step_penalty        = step_penalty        # base penalty per step
         self.trunc_penalty       = trunc_penalty       # extra penalty when truncated
         self.progressive_penalty = progressive_penalty # if True: step i costs step_penalty × i
+        self.clear_bonus         = clear_bonus         # +clear_bonus/steps_used on termination
 
         # Ball IDs: "1", "2", "3", ...
         self._ball_ids = [str(i + 1) for i in range(n_balls)]
@@ -210,6 +213,9 @@ class BilliardsEnv(gym.Env):
             reward -= 0.5
         if truncated:
             reward -= self.trunc_penalty
+        # Clear bonus: reward faster clears — scales as 1/steps_used so fewer steps = bigger bonus
+        if terminated and self.n_balls > 1 and self.clear_bonus > 0.0:
+            reward += self.clear_bonus / self._step_count
 
         # ── Ball-in-hand after scratch (multi-ball only) ──────────────────────
         if scratch and not terminated and not truncated:
@@ -219,11 +225,14 @@ class BilliardsEnv(gym.Env):
         if self.n_balls == 1:
             info = {"pocketed": bool(newly_pocketed)}
         else:
+            _cb_earned = (self.clear_bonus / self._step_count
+                          if terminated and self.clear_bonus > 0.0 else 0.0)
             info = {
                 "pocketed_this_step": newly_pocketed,
                 "total_pocketed"    : sum(self._pocketed.values()),
                 "remaining"         : sum(1 for v in self._pocketed.values() if not v),
                 "scratch"           : scratch,
+                "clear_bonus_earned": _cb_earned,
             }
 
         return self._get_obs(), reward, terminated, truncated, info

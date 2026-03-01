@@ -20,7 +20,7 @@ Phase 1  Multi-ball clearing
   [x] Exp-06  Progressive penalty (sp=0.1×step, tp=1.0) → scratch 63.9% / A 64.3% / B 64.8%
               ep_len unchanged (80.9% use all 5 steps) — aiming↑ but efficiency unchanged
 
-  [ ] Exp-07  TQC — distributional RL, same reward as Exp-06
+  [ ] Exp-07  SAC vs TQC — clear_bonus(=2.0/steps_used) reward shaping
 
 Phase 2  (미정)
   [ ] Phase 1b  cushion/bank shots (action space 확장)
@@ -56,7 +56,7 @@ Phase 2  (미정)
 | | |
 |---|---|
 | **Observation** | 23-dim: `[cue_x, cue_y, b1x,b1y,b1_flag, b2x,b2y,b2_flag, b3x,b3y,b3_flag, p0x,p0y,…,p5x,p5y]` |
-| **Reward** | +1.0 per ball pocketed · −step_penalty (flat) or −step_penalty×i (progressive) per step · −0.5 for scratch · −trunc_penalty if truncated |
+| **Reward** | +1.0 per ball pocketed · −step_penalty (flat) or −step_penalty×i (progressive) per step · −0.5 for scratch · −trunc_penalty if truncated · +clear_bonus/steps_used on termination (all cleared) |
 | **Episode** | 공 3개 전부 pocketed OR step ≥ max_steps |
 | **Ball-in-hand** | scratch 시 큐볼을 임의 위치에 재배치 |
 
@@ -213,21 +213,33 @@ Clear 에피소드의 step 분포: step2 4.7% / step3 20.0% / step4 35.0% / **st
 - **근본 원인:** agent가 현재 step이 몇 번째인지 모름. obs에 step_remaining이 없으므로 urgency를 인식할 수 없음. 단, step_remaining은 실제 당구에 존재하지 않는 정보이므로 obs에 추가하는 것은 현실성이 없음.
 - **step 5 penalty(-0.5) + 공 하나 기댓값(+1.0 × ~30%)** → 5번째 샷 기댓값 ≈ −0.2. 여전히 쏘는 게 안 쏘는 것(terminal이 아니라 truncated)보다 낫기 때문에 agent가 5번째 step을 계속 사용함. reward만으로 ep_len을 줄이려면 step 5 penalty를 −1.5+ 수준으로 올려야 하지만, 그러면 학습 자체가 불안정해질 위험이 있음.
 
-**다음 방향:** SAC의 평균 Q-값 추정이 고분산 multimodal reward(−2.5 ~ +2.4)를 제대로 처리하지 못할 수 있음. 분포 전체를 모델링하는 **TQC**로 전환 → Exp-07.
+**다음 방향:** progressive penalty는 ep_len을 줄이지 못함 (에이전트가 step count를 모르므로 urgency 인식 불가). 대신 **clear_bonus = 2.0/steps_used**로 전환 — 빠른 클리어에 직접적인 보너스. SAC vs TQC 비교 → Exp-07.
 
 ---
 
 ## Experiments — Planned
 
-### Exp-07 · TQC — distributional RL on progressive reward
+### Exp-07 · SAC vs TQC — clear_bonus reward shaping
 
-**목표:** SAC의 평균 Q-함수 한계를 극복. Progressive penalty(sp=0.1×step, tp=1.0) 환경에서 reward 분포가 multimodal하고 분산이 큼 (−2.5 ~ +2.4). TQC는 분위수 Q-함수로 분포 전체를 모델링하고, top quantile을 drop해 overestimation을 줄임 → 5번째 step의 가치를 SAC보다 정확하게 평가할 것으로 기대.
+**목표:** (1) progressive penalty 대신 clear_bonus(=2.0/steps_used)로 빠른 클리어에 직접 보상. (2) SAC vs TQC 직접 비교 — 고분산 reward 환경에서 distributional Q-학습의 이점 측정.
 
-**설정:** TQC, 1M steps, seed=42, progressive penalty(sp=0.1, tp=1.0), n_balls=3, max_steps=5
+**설정:** SAC·TQC 각 1회, 1M steps, seed=42, n_balls=3, max_steps=5
+reward: sp=0.1 (flat), tp=1.0, **clear_bonus=2.0**
+
+**Reward 구조 (예시, n_balls=3):**
+
+| 클리어 step | ball reward | step pen | clear bonus | total |
+|------------|------------|----------|-------------|-------|
+| 3-step | +3.0 | −0.3 | +0.667 | **+3.37** |
+| 5-step | +3.0 | −0.5 | +0.400 | **+2.90** |
+| truncated | varies | −0.5 | 0 | ≤ −1.5 |
+
+3-step vs 5-step gap: **+0.47** (clear_bonus 없을 때 +0.20, 2.3× 향상)
 
 **가설:**
-- TQC의 보수적 Q-추정이 "step 5에서 낮은 확률로 공 넣기"를 SAC보다 낮게 평가 → 더 공격적인 초반 플레이
-- 단, Exp-01에서 TQC는 seed 간 분산이 매우 컸음(±27pp). 단일 seed 결과는 noise일 수 있으므로 multi-seed 필요.
+- clear_bonus가 step count 없이도 빠른 클리어에 명시적 gradient를 제공 → ep_len 감소 기대
+- TQC: reward 분포가 [-1.5 ~ +3.4] 범위의 고분산. top quantile dropping으로 overestimation 감소 → SAC보다 나은 shot selection
+- 단, Exp-01에서 TQC는 seed 간 분산이 매우 컸음(±27pp). 단일 seed 결과 해석 주의.
 
 ---
 
