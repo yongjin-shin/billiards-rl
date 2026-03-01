@@ -18,6 +18,9 @@ Phase 1  Multi-ball clearing
   [x] Exp-05  Transfer B · weight-copy warm-start  →  pocket 61.5%, clear 30.4%
 
   [x] Exp-06  Progressive penalty (sp=0.1×step, tp=1.0) → scratch 63.9% / A 64.3% / B 64.8%
+              ep_len unchanged (80.9% use all 5 steps) — aiming↑ but efficiency unchanged
+
+  [ ] Exp-07  TQC — distributional RL, same reward as Exp-06
 
 Phase 2  (미정)
   [ ] Phase 1b  cushion/bank shots (action space 확장)
@@ -192,16 +195,41 @@ Phase 2  (미정)
 | Clear rate | 29.4% | 31.4% | 30.4% | **33.2%** | **30.2%** | **32.2%** |
 | Training time | 25.4 min | 0 min | 22.6 min | 36.2 min | 0 min | 36.6 min |
 
+**Episode length 분포 (Exp-06 scratch best_model, n=1000):**
+
+| step | count | % |
+|------|-------|---|
+| 2 | 15 | 1.5% |
+| 3 | 64 | 6.4% |
+| 4 | 112 | 11.2% |
+| 5 | 809 | **80.9%** |
+
+Clear 에피소드의 step 분포: step2 4.7% / step3 20.0% / step4 35.0% / **step5 40.3%** — avg clear step **4.11**
+
 **관찰:**
-- 세 조건 모두 pocket rate 3~4pp 향상. progressive penalty가 reward signal을 실질적으로 개선함.
-- **Transfer B가 처음으로 A를 역전 (64.8% > 64.3%).** Exp-05에서는 A(zero-shot)가 B(trained)보다 좋았는데, 강화된 reward structure에서는 warm-start training이 추가 가치를 만들어냄.
-- Clear rate도 모든 조건에서 향상 (+2~4pp) — shot efficiency 개선의 직접적인 증거.
-- Transfer B의 weight dilution 문제가 완전히 해소되지는 않았지만, 충분히 강한 penalty 덕분에 최종 수렴점이 개선됨.
-- Training time이 더 늘어난 것(~36분 vs ~25분)은 episode가 짧아지면서 env reset 횟수가 늘고 오버헤드 증가 때문으로 추정.
+- 세 조건 모두 pocket rate 3~4pp 향상. progressive penalty가 더 나은 aiming을 유도함.
+- **Transfer B가 처음으로 A를 역전 (64.8% > 64.3%).** 강화된 reward structure에서 warm-start가 비로소 추가 가치를 냄.
+- **목표였던 ep_len 단축은 실패.** Exp-03/05와 동일하게 80.9%가 5 step을 전부 소진. clear rate 향상(+3~4pp)은 shot efficiency 증가가 아니라 aiming 정확도 향상에서 기인.
+- **근본 원인:** agent가 현재 step이 몇 번째인지 모름. obs에 step_remaining이 없으므로 urgency를 인식할 수 없음. 단, step_remaining은 실제 당구에 존재하지 않는 정보이므로 obs에 추가하는 것은 현실성이 없음.
+- **step 5 penalty(-0.5) + 공 하나 기댓값(+1.0 × ~30%)** → 5번째 샷 기댓값 ≈ −0.2. 여전히 쏘는 게 안 쏘는 것(terminal이 아니라 truncated)보다 낫기 때문에 agent가 5번째 step을 계속 사용함. reward만으로 ep_len을 줄이려면 step 5 penalty를 −1.5+ 수준으로 올려야 하지만, 그러면 학습 자체가 불안정해질 위험이 있음.
+
+**다음 방향:** SAC의 평균 Q-값 추정이 고분산 multimodal reward(−2.5 ~ +2.4)를 제대로 처리하지 못할 수 있음. 분포 전체를 모델링하는 **TQC**로 전환 → Exp-07.
 
 ---
 
 ## Experiments — Planned
+
+### Exp-07 · TQC — distributional RL on progressive reward
+
+**목표:** SAC의 평균 Q-함수 한계를 극복. Progressive penalty(sp=0.1×step, tp=1.0) 환경에서 reward 분포가 multimodal하고 분산이 큼 (−2.5 ~ +2.4). TQC는 분위수 Q-함수로 분포 전체를 모델링하고, top quantile을 drop해 overestimation을 줄임 → 5번째 step의 가치를 SAC보다 정확하게 평가할 것으로 기대.
+
+**설정:** TQC, 1M steps, seed=42, progressive penalty(sp=0.1, tp=1.0), n_balls=3, max_steps=5
+
+**가설:**
+- TQC의 보수적 Q-추정이 "step 5에서 낮은 확률로 공 넣기"를 SAC보다 낮게 평가 → 더 공격적인 초반 플레이
+- 단, Exp-01에서 TQC는 seed 간 분산이 매우 컸음(±27pp). 단일 seed 결과는 noise일 수 있으므로 multi-seed 필요.
+
+---
 
 ## Project Structure
 
