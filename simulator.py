@@ -52,7 +52,7 @@ class BilliardsEnv(gym.Env):
 
     MIN_BALL_DIST = 0.12   # metres — minimum distance between any two balls at reset
 
-    def __init__(self, n_balls: int = 1, max_steps: int = 15):
+    def __init__(self, n_balls: int = 1, max_steps: int = 5):
         super().__init__()
         assert n_balls >= 1, "n_balls must be >= 1"
 
@@ -323,7 +323,7 @@ if __name__ == "__main__":
     print("BilliardsEnv(n_balls=3) — Phase 1a test")
     print("=" * 55)
 
-    env3 = BilliardsEnv(n_balls=3, max_steps=15)
+    env3 = BilliardsEnv(n_balls=3, max_steps=5)
     print(f"\n[1] obs shape : {env3.observation_space.shape}  (expected 23)")
     print(f"    act shape : {env3.action_space.shape}  (expected 2)")
     assert env3.observation_space.shape == (23,)
