@@ -1,9 +1,13 @@
 # billiards-rl
 
-Reinforcement learning project using [pooltool](https://github.com/ekiefl/pooltool) — a physics-accurate billiards simulator.
+Reinforcement learning on a physics-accurate billiards simulator ([pooltool](https://github.com/ekiefl/pooltool)).
 
-**Phase 0 (single-ball):** SAC/TQC → ~77–82% pocket rate (random baseline: ~6%)
-**Phase 1a (multi-ball, 3 balls, max\_steps=5):** SAC → ~98% pocket rate, 95% clear rate (random baseline: ~17%)
+Two environments are implemented as progressive phases:
+
+| Phase | Task | Best result | Random baseline |
+|-------|------|-------------|-----------------|
+| **0 — single-ball** | Pocket one ball in one shot | SAC/TQC ~77–82% | ~6% |
+| **1a — multi-ball** | Pocket 3 balls in ≤ 5 shots | SAC ~98% pocket, 95% clear | ~17% |
 
 ---
 
@@ -18,69 +22,94 @@ Installs Python 3.13 via Homebrew, creates `.venv`, and installs all dependencie
 
 ---
 
-## Quick start
+## Environments
 
-```bash
-# Verify the simulator (single-ball + multi-ball sanity tests)
-python simulator.py
+Both environments share a 2-dim continuous action space:
 
-# Train (SAC, single-ball, 1M steps)
-python train.py --algo SAC --steps 1000000 --seed 42
+| Dim | Range | Meaning |
+|-----|-------|---------|
+| `delta_angle` | [-π, π] | Aim offset from nearest unpocketed ball (0 = straight at it) |
+| `speed` | [0.5, 8.0] | Cue ball strike speed (m/s) |
 
-# Train multi-ball (3 balls, max 5 shots per episode)
-python train.py --algo SAC --n-balls 3 --max-steps 5 --steps 1000000 --seed 42
+### Phase 0 — single-ball (`n_balls=1`)
 
-# Visualize (image grid)
-python visualize.py --n-balls 1                           # single-ball, random agent
-python visualize.py --n-balls 3 --model <path>            # multi-ball, trained agent
-python visualize.py --n-balls 1 --mode video --model <path>  # MP4 video
-python visualize.py --mode compare --before before.mp4 --after after.mp4  # side-by-side
+One target ball, one shot per episode.
 
-# Compare finished experiments
-python compare.py
-python compare.py --filter multi3   # only multi-ball experiments
-```
+| | |
+|---|---|
+| **Observation** | 16-dim: `[cue_x, cue_y, ball_x, ball_y, p0x,p0y, …, p5x,p5y]` normalized to [0,1] |
+| **Reward** | +1 if ball pocketed, else 0 |
+| **Episode** | Always terminates after 1 shot |
+
+### Phase 1a — multi-ball (`n_balls=3`)
+
+Three target balls, up to `max_steps` shots per episode.
+
+| | |
+|---|---|
+| **Observation** | 23-dim: `[cue_x, cue_y, b1x,b1y,b1_flag, b2x,b2y,b2_flag, b3x,b3y,b3_flag, p0x,p0y,…,p5x,p5y]` |
+| **Reward** | +1.0 per ball pocketed · −0.01 per step · −0.5 for scratch |
+| **Episode** | Ends when all 3 balls pocketed OR `step ≥ max_steps` |
+| **Ball-in-hand** | On scratch, cue ball respawns at a random valid position |
 
 ---
 
 ## Training
 
 ```bash
-python train.py --algo {SAC,PPO,TQC} --steps STEPS --seed SEED [--n-balls {1,3}] [--max-steps N]
+python train.py --algo {SAC,PPO,TQC} [--n-balls {1,3}] [--max-steps N] [--steps N] [--seed N]
 ```
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--algo` | `SAC` | Algorithm: `SAC`, `PPO`, or `TQC` |
-| `--steps` | `1000000` | Total environment steps |
-| `--seed` | `42` | Random seed |
-| `--n-balls` | `1` | `1` = single-shot (Phase 0), `3` = multi-ball (Phase 1a) |
-| `--max-steps` | `5` | Max shots per episode (multi-ball only) |
+| `--algo` | `SAC` | `SAC`, `PPO`, or `TQC` (TQC requires `sb3-contrib`) |
+| `--n-balls` | `1` | Phase 0 (`1`) or Phase 1a (`3`) |
+| `--max-steps` | `5` | Episode horizon for multi-ball (ignored for `n_balls=1`) |
+| `--steps` | `1000000` | Total training timesteps |
+| `--seed` | `42` | Random seed — use the same seed across algos for fair comparison |
 
-Each run saves a self-contained experiment directory:
+Each run produces a self-contained experiment directory:
 
 ```
 logs/experiments/{ALGO}_{steps}k_s{seed}[_multi{N}_ms{M}]_{timestamp}/
-  ├── config.json       ← hyperparameters (includes n_balls, max_steps)
-  ├── results.json      ← pocket rates, clear rate, fps, training time
-  ├── best_model/       ← best checkpoint (saved by EvalCallback)
-  ├── eval/             ← evaluations.npz (learning curve data)
-  └── train/            ← per-worker Monitor CSVs
+  ├── config.json      ← all hyperparameters
+  ├── results.json     ← pocket rate, clear rate, fps, training time
+  ├── best_model/      ← best checkpoint (EvalCallback)
+  ├── eval/            ← evaluations.npz (learning curve)
+  └── train/           ← per-worker Monitor CSVs
 ```
+
+### Phase 0 results (1M steps, seed 42)
+
+| Algorithm | Pocket rate | vs. random |
+|-----------|-------------|------------|
+| SAC | ~77–82% | +71–76 pp |
+| TQC | ~67–82% | +61–76 pp |
+| PPO | ~29% | +23 pp |
+
+> **Why off-policy wins at horizon=1:** GAE degenerates to REINFORCE with a single transition. SAC/TQC's replay buffer recycles every step efficiently.
+
+### Phase 1a results (1M steps, seed 42, max_steps=5)
+
+| Algorithm | Pocket rate | Clear rate (all 3) | vs. random |
+|-----------|-------------|-------------------|------------|
+| SAC | ~98% | ~95% | +81 pp |
 
 ---
 
-## Transfer learning
+## Transfer learning (Phase 0 → Phase 1a)
 
-Transfers a pretrained n\_balls=1 SAC model to the n\_balls=3 multi-ball environment. Two strategies:
+Hypothesis: a model that already knows how to aim (Phase 0) should learn multi-ball play faster than starting from scratch.
 
-**Strategy A — obs-collapse** (zero-shot baseline)
+Two strategies are implemented in `train_pretrained.py`:
 
-The `ObsCollapseWrapper` collapses the 23-dim multi-ball obs to 16-dim by always presenting the nearest unpocketed ball as "the ball". The pretrained model pockets balls one at a time without ever seeing ball2/ball3. No fine-tuning needed — evaluates how much raw aiming skill transfers.
+**Strategy A — obs-collapse** (zero-shot baseline, no training)
 
-**Strategy B — weight-copy** (warm-start fine-tuning)
+`ObsCollapseWrapper` collapses the 23-dim obs to 16-dim by always feeding the nearest unpocketed ball to the pretrained model. The model pockets balls one at a time, never seeing ball2/ball3. This measures how much raw aiming skill transfers without any additional training. Fine-tuning is possible but has a hard ceiling — the model cannot learn multi-ball strategy because ball2/ball3 are invisible.
 
-Builds a fresh SAC with 23-dim obs, copies pretrained weights into shared input neurons (cue, ball1, pockets columns), and zeros out the new ball2/ball3 input neurons. Fine-tuned from this warm start so the model retains aiming skill while freely learning multi-ball strategy.
+**Strategy B — weight-copy** (warm-start, then fine-tune)
+
+Copies pretrained weights into the shared input neurons of a fresh 23-dim SAC (cue, ball1, pocket columns); zeros out new ball2/ball3 neurons. Fine-tunes on the full multi-ball env. The model starts with working aiming skills and adapts to multi-ball strategy freely.
 
 ```bash
 # Strategy A: zero-shot eval
@@ -89,31 +118,52 @@ python train_pretrained.py \
     --pretrained logs/experiments/SAC_1000k_s42_.../best_model/best_model \
     --eval-only
 
-# Strategy B: warm-start fine-tune (1M steps)
+# Strategy B: warm-start → fine-tune (1M steps)
 python train_pretrained.py \
     --strategy weight-copy \
     --pretrained logs/experiments/SAC_1000k_s42_.../best_model/best_model \
     --steps 1000000 --seed 42
 ```
 
-| Strategy | Obs | Training | What it measures |
-|----------|-----|----------|-----------------|
-| A (obs-collapse) | 16-dim (collapsed) | none / fine-tune | Zero-shot aiming transfer; ceiling limited by info bottleneck |
-| B (weight-copy) | 23-dim (full) | warm-start fine-tune | Faster convergence vs scratch |
-| Scratch baseline | 23-dim (full) | from random init | Baseline to compare B against |
+| | Strategy A | Strategy B | Scratch (baseline) |
+|---|---|---|---|
+| **Obs space** | 16-dim (collapsed) | 23-dim (full) | 23-dim (full) |
+| **Init** | pretrained weights | pretrained weights (partial) | random |
+| **Training** | none (or fine-tune w/ ceiling) | full fine-tune | full |
+| **Goal** | measure zero-shot transfer | faster convergence? | comparison target for B |
 
 ---
 
-## Comparison
+## Visualization & analysis
+
+### Visualize
+
+```bash
+# Image grid (12 episodes)
+python visualize.py --n-balls 1                              # random agent
+python visualize.py --n-balls 3 --model <exp_dir>/best_model/best_model  # trained
+
+# MP4 video
+python visualize.py --n-balls 1 --mode video --model <path>
+
+# Before/after comparison video
+python visualize.py --mode compare --before before.mp4 --after after.mp4
+```
+
+### Compare experiments
 
 ```bash
 python compare.py                        # all finished experiments
-python compare.py --filter multi3        # only multi-ball runs
+python compare.py --filter multi3        # only multi-ball
 python compare.py --filter transfer      # only transfer experiments
 python compare.py --out my_plot.png
 ```
 
-Prints a summary table and saves a learning-curve PNG.
+### TensorBoard
+
+```bash
+tensorboard --logdir logs/tensorboard
+```
 
 ---
 
@@ -121,15 +171,15 @@ Prints a summary table and saves a learning-curve PNG.
 
 ```
 billiards-rl/
-├── simulator.py          # BilliardsEnv — gymnasium wrapper around pooltool
-│                         #   n_balls=1 → Phase 0 (single-shot, 16-dim obs)
-│                         #   n_balls=3 → Phase 1a (multi-ball, 23-dim obs)
-├── train.py              # Train SAC / PPO / TQC; supports --n-balls, --max-steps
-├── train_pretrained.py   # Transfer learning: obs-collapse (A) + weight-copy (B)
-├── compare.py            # Load experiments → summary table + learning curves
-├── visualize.py          # Unified visualizer: image grid / MP4 video / compare
+├── simulator.py          # BilliardsEnv — pooltool gymnasium wrapper
+│                         #   n_balls=1  →  Phase 0 (16-dim obs, horizon=1)
+│                         #   n_balls=3  →  Phase 1a (23-dim obs, multi-shot)
+├── train.py              # Train SAC / PPO / TQC
+├── train_pretrained.py   # Transfer learning (obs-collapse + weight-copy)
+├── compare.py            # Summary table + learning curve plots
+├── visualize.py          # Image grid / MP4 video / before-after compare
 ├── benchmark.py          # Multi-seed benchmark runner
-├── run_comparison.sh     # Batch: train SAC + PPO + TQC → compare
+├── run_comparison.sh     # Batch: train all algos → compare
 ├── requirements.txt
 ├── setup.sh
 └── logs/
@@ -139,58 +189,13 @@ billiards-rl/
 
 ---
 
-## Environment
-
-### Phase 0 — single-ball (n\_balls=1)
-
-| | |
-|---|---|
-| **Observation** | 16-dim: `[cue_x, cue_y, ball_x, ball_y, p0x,p0y, …, p5x,p5y]` normalized to [0,1] |
-| **Action** | 2-dim: `[delta_angle ∈ [-π,π], speed ∈ [0.5,8.0]]` |
-| **Reward** | +1 if ball pocketed, else 0 |
-| **Episode** | Single shot (horizon = 1) |
-
-### Phase 1a — multi-ball (n\_balls=3)
-
-| | |
-|---|---|
-| **Observation** | 23-dim: `[cue_x, cue_y, b1x,b1y,b1_flag, b2x,b2y,b2_flag, b3x,b3y,b3_flag, p0x,p0y,…,p5x,p5y]` |
-| **Action** | 2-dim: same as Phase 0 — `delta_angle` is offset from nearest unpocketed ball direction |
-| **Reward** | +1.0 per ball pocketed · −0.01 per step · −0.5 for scratch |
-| **Episode** | Ends when all 3 balls pocketed OR step ≥ max\_steps (default 5) |
-| **Ball-in-hand** | On scratch, cue ball respawns at a random valid position |
-
-`delta_angle = 0` always aims at the nearest unpocketed ball; non-zero values produce cut shots.
-
----
-
-## Algorithm comparison (Phase 0, single-ball, 1M steps, seed 42)
-
-| Algorithm | Pocket rate | Random baseline | Notes |
-|-----------|-------------|-----------------|-------|
-| **SAC** | ~77–82% | ~6% | Strong; can collapse near end — use `best_model` |
-| **TQC** | ~67–82% | ~6% | Distributional; higher variance across seeds |
-| **PPO** | ~29% | ~6% | GAE degenerates at horizon=1; structurally disadvantaged |
-
-> **Why off-policy wins at horizon=1:** PPO's multi-step advantage estimation degenerates to REINFORCE with a single transition. SAC/TQC's replay buffer recycles every step efficiently.
-
----
-
-## TensorBoard
-
-```bash
-tensorboard --logdir logs/tensorboard
-```
-
----
-
 ## Roadmap
 
-- [x] Phase 0: single-ball SAC/PPO/TQC benchmark
+- [x] Phase 0: single-ball benchmark (SAC / PPO / TQC, multi-seed)
 - [x] Phase 1a: multi-ball env (n\_balls=3, max\_steps=5)
 - [x] Unified visualizer (image / video / compare mode)
-- [ ] Transfer learning experiment: obs-collapse zero-shot eval (Strategy A)
-- [ ] Transfer learning experiment: weight-copy warm-start vs scratch (Strategy B)
-- [ ] Phase 1b: cushion shots (richer action space — bank angle)
-- [ ] Phase 2: self-play / opponent modelling (full 8-ball game)
-- [ ] DreamerV3 for model-based planning
+- [x] Transfer learning code (obs-collapse + weight-copy)
+- [ ] Transfer learning experiments (run Strategy A zero-shot + Strategy B vs scratch)
+- [ ] Phase 1b: cushion/bank shots (extended action space)
+- [ ] Phase 2: self-play / full 8-ball game
+- [ ] DreamerV3 (model-based planning)
