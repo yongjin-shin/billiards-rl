@@ -301,11 +301,22 @@ def train(algo: str = "SAC", steps: int = 1_000_000, seed: int = 42,
         **algo_cfg,
     )
 
+    # ── Descriptive TensorBoard run name ─────────────────────────────────────
+    # e.g. SAC_ms3_sp0.1_s42  →  SAC_ms3_sp0.1_s42_0 in TensorBoard
+    tb_parts = [f"ms{max_steps}", f"sp{step_penalty}"]
+    if trunc_penalty > 0.0:         tb_parts.append(f"tp{trunc_penalty}")
+    if progressive_penalty:         tb_parts.append("pp")
+    if clear_bonus > 0.0:           tb_parts.append(f"cb{clear_bonus}")
+    if shots_taken:                 tb_parts.append("st")
+    if learning_rate != 3e-4:       tb_parts.append(f"lr{learning_rate}")
+    if gradient_steps != 1:         tb_parts.append(f"gs{gradient_steps}")
+    tb_log_name = f"{algo}_{'_'.join(tb_parts)}_s{seed}"
+
     t0 = time.time()
     model.learn(
         total_timesteps = steps,
         callback        = CallbackList([eval_callback, eta_callback]),
-        tb_log_name     = algo,   # shows as SAC_0, PPO_0, ... in TensorBoard
+        tb_log_name     = tb_log_name,
     )
     elapsed = time.time() - t0
 

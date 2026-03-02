@@ -277,6 +277,87 @@ Clear 에피소드의 step 분포: step2 4.7% / step3 20.0% / step4 35.0% / **st
 
 ---
 
+### Exp-08 · shots_taken obs + clear_bonus ablation
+
+**설정:** SAC, 1M steps, seed=42, n_balls=3, ms=5, sp=0.1, tp=1.0, cb=2.0, shots_taken=True
+
+**관찰:**
+- 63.7% / 30.0%, ep_len=4.60 — Exp-07 SAC baseline(62.0%/29.2%)과 사실상 동등, 개선 없음.
+- 훈련 초반 critic loss explosion 발생 — cb=2.0의 높은 reward scale(+3.37 max)이 SAC Q값을 불안정하게 만든 것으로 추정. SAC는 gradient clipping 없음(SB3 기본).
+- shots_taken이 urgency 신호로 작동할 것을 기대했으나 ep_len이 오히려 4.50→4.60으로 증가. 당구에서 최적 action은 위치(obs)에만 의존하고 step count와 독립적임.
+- shots_taken은 Markov property를 강화하는 feature이지 non-stationarity를 유발하지 않음. uninformative feature를 추가하면 오히려 network 용량을 낭비.
+
+---
+
+### Exp-09 · shots_taken + SAC stability tuning (lr=1e-4, gs=10)
+
+**설정:** SAC, 1M steps, seed=42, n_balls=3, ms=5, sp=0.1, tp=1.0, cb=0.0, shots_taken=True, lr=1e-4, gradient_steps=10
+
+**관찰:**
+- 62.1% / 28.8%, ep_len=4.50 — Exp-08보다 오히려 worse. clear_bonus 제거 후에도 shots_taken이 도움 안 됨.
+- gs=10 → UTD(Update-To-Data)=1.0 (N_ENVS=10, gs=10 → 업데이트 : 데이터 = 1:1). vanilla SAC에서 high UTD는 critic overestimation cascade를 심화시킴.
+- lr=1e-4은 안정성 향상에 기여하지 못함. SAC hyperparameter 튜닝만으로는 critic instability 해결 불가.
+- **결론:** shots_taken 불채택. ep_len은 obs 변경으로도 단축 불가 — task 구조 자체의 문제.
+
+---
+
+### Exp-10 · ms=4, pp=False (max_steps 축소 ablation)
+
+**설정:** SAC, 1M steps, seed=42, n_balls=3, ms=4, sp=0.1, tp=1.0
+
+**관찰:**
+- 55.1% / 17.6%, ep_len=3.86 — ms=5 baseline(Exp-12: 63.6%/32.2%) 대비 pocket −8.5pp, clear −14.6pp.
+- ep_len/ms = 3.86/4 = 96.5% (ms=5의 88%보다 높음). ms를 줄여도 모든 step을 소모하는 경향이 강해짐.
+- clear rate가 pocket rate에 비해 급감: pocket 55.1% → clear 17.6%. 3개 ball을 4번 안에 모두 넣는 조합적 난이도가 급상승.
+
+---
+
+### Exp-11 · ms=3, pp=False (max_steps 최소화)
+
+**설정:** SAC, 1M steps, seed=42, n_balls=3, ms=3, sp=0.1, tp=1.0
+
+**관찰:**
+- 41.4% / 9.0%, ep_len=2.98 — ep_len/ms = 2.98/3 = **99.3%**. 사실상 모든 에피소드가 3번 full 소비.
+- clear rate 9.0% — 3번 안에 3개를 모두 넣어야 하므로 매 샷이 pocket이어야 함. reward가 매우 sparse.
+- ms=5에서 ms=3으로 줄였을 때 clear rate가 33.2% → 9.0%로 3.7배 감소. 조합적 난이도 폭발적 상승.
+- **Phase 2 frontier로 선정.** reward shaping이 아닌 알고리즘적 개선(탐색, 다단계 계획)이 필요한 구간.
+
+---
+
+### Exp-12 · ms=5, pp=False (pp ablation 페어 기준)
+
+**설정:** SAC, 1M steps, seed=42, n_balls=3, ms=5, sp=0.1, tp=1.0 ← Exp-03와 동일 구조
+
+**관찰:**
+- 63.6% / 32.2%, ep_len=4.40 — Exp-06(pp=True) 63.9%/33.2%와 사실상 동등.
+- pp의 ms=5 기여: pocket +0.3pp, clear +1.0pp — 노이즈 수준의 차이.
+- **ms=5에서 pp는 실질적으로 무효.**
+
+---
+
+### Exp-13 · ms=4, pp=True (pp ablation 페어)
+
+**설정:** SAC, 1M steps, seed=42, n_balls=3, ms=4, sp=0.1, tp=1.0, progressive_penalty=True
+
+**관찰:**
+- 51.2% / 15.8% — Exp-10(pp=False) 55.1%/17.6% 대비 pocket **−3.9pp**, clear −1.8pp. pp가 역효과.
+- ms=4에서 progressive penalty 누적: step 1(−0.1) + step 2(−0.2) + step 3(−0.3) + step 4(−0.4) = **−1.0 total**. pocket 1개(+1.0)가 4번의 step penalty와 상쇄 → 학습 신호 약화.
+- penalty가 너무 커서 agent가 적극적으로 샷을 시도하지 않는 쪽으로 수렴.
+
+---
+
+### Exp-14 · ms=3, pp=True (pp ablation 페어)
+
+**설정:** SAC, 1M steps, seed=42, n_balls=3, ms=3, sp=0.1, tp=1.0, progressive_penalty=True
+
+**관찰:**
+- 41.5% / 7.6% — Exp-11(pp=False) 41.4%/9.0% 대비 pocket +0.1pp(무의미), clear **−1.4pp**.
+- ms=3 pp 누적: step 1(−0.1)+2(−0.2)+3(−0.3) = −0.6. pocket 기댓값(~41% × 1.0 = +0.41) < penalty(0.6/3 = 0.2 per step) → 첫 샷부터 기댓값이 거의 0.
+- pp의 ms=3에서의 효과는 없음(pocket 동률) 혹은 해로움(clear 감소).
+- **★ 결론 (Exp-12~14 종합):** pp는 어떤 ms에서도 유의미한 개선 없음. 폐기.
+
+---
+
 ## Experiments — Planned
 
 ### Exp-07 · SAC vs TQC — clear_bonus reward shaping
