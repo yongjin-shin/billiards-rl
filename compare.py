@@ -55,10 +55,52 @@ def load_experiment(exp_dir: str) -> dict | None:
     timesteps    = None
     pocket_rates = None
     if os.path.isfile(eval_path):
-        data         = np.load(eval_path)
-        timesteps    = data["timesteps"]                   # (n_evals,)
-        rewards      = data["results"]                     # (n_evals, n_episodes)
-        pocket_rates = rewards.mean(axis=1) * 100         # mean reward == pocket rate (binary)
+        data    = np.load(eval_path)
+        timesteps = data["timesteps"]                      # (n_evals,)
+        rewards   = data["results"]                        # (n_evals, n_episodes)
+        n_balls   = config.get("n_balls", 1)
+        if n_balls == 1:
+            # Binary reward: mean reward == pocket rate
+            pocket_rates = rewards.mean(axis=1) * 100
+        else:
+            progressive = config.get("progressive_penalty", False)
+            if progressive:
+                # Progressive penalty: step i costs sp×i, so max penalty = sp×(1+2+…+ms).
+                # Bounds:
+                #   theoretical max ≈ n_balls - sp × (n_balls×(n_balls+1)/2)
+                #   theoretical min = 0 - sp × (ms×(ms+1)/2) - trunc_penalty
+                # Normalize to [0,100] relative to these bounds so the curve is meaningful.
+                sp   = config.get("step_penalty",  0.1)
+                tp   = config.get("trunc_penalty",  1.0)
+                ms   = config.get("max_steps",      5)
+                r_max = n_balls - sp * (n_balls * (n_balls + 1) / 2)
+                r_min = -sp * (ms * (ms + 1) / 2) - tp
+                denom = r_max - r_min if r_max > r_min else 1.0
+                pocket_rates = np.clip(
+                    (rewards.mean(axis=1) - r_min) / denom * 100, 0, 100
+                )
+            else:
+                cb = config.get("clear_bonus", 0.0)
+                sp = config.get("step_penalty", 0.01)
+                tp = config.get("trunc_penalty", 0.0)
+                ms = config.get("max_steps", 5)
+                if cb > 0.0:
+                    # Clear bonus raises max reward above n_balls.
+                    # Best-case approx: clear at step n_balls (one ball per step):
+                    #   r_max = n_balls - sp*n_balls + cb/n_balls
+                    # Worst-case: all steps used, 0 balls, truncated:
+                    #   r_min = -sp*ms - tp
+                    r_max = n_balls - sp * n_balls + cb / n_balls
+                    r_min = -sp * ms - tp
+                    denom = r_max - r_min if r_max > r_min else 1.0
+                    pocket_rates = np.clip(
+                        (rewards.mean(axis=1) - r_min) / denom * 100, 0, 100
+                    )
+                else:
+                    # Flat penalty: episode reward is sum of per-ball rewards + step penalties.
+                    # Normalize to [0,100] using n_balls as ceiling (max reward ≈ n_balls).
+                    # This gives an approximate "fraction of balls pocketed" curve.
+                    pocket_rates = np.clip(rewards.mean(axis=1) / n_balls * 100, 0, 100)
 
     return {
         "name"        : os.path.basename(exp_dir),
@@ -105,13 +147,20 @@ def print_summary_table(experiments: list[dict]):
 
     for exp in experiments:
         r = exp["results"]
+        # Support both standard train.py results and transfer experiment results
+        trained_rate = (r.get("trained_pocket_rate")
+                        or r.get("finetuned_pocket%")
+                        or r.get("trained_pocket%")
+                        or 0.0)
+        random_rate  = r.get("random_pocket_rate", 0.0)
+        algo         = r.get("algo", r.get("strategy", "?"))
         print(
-            f"  {exp['name']:<35}  "
-            f"{r.get('algo','?'):>4}  "
+            f"  {exp['name']:<40}  "
+            f"{algo:>12}  "
             f"{r.get('steps', 0)//1000:>5}k  "
-            f"{r.get('random_pocket_rate', 0):>6.1f}%  "
-            f"{r.get('trained_pocket_rate', 0):>6.1f}%  "
-            f"{r.get('improvement_pp', 0):>+5.1f}pp  "
+            f"{random_rate:>6.1f}%  "
+            f"{trained_rate:>6.1f}%  "
+            f"{trained_rate - random_rate:>+5.1f}pp  "
             f"{r.get('training_time_sec', 0)/60:>6.1f}m  "
             f"{r.get('avg_fps', 0):>6.0f}"
         )
