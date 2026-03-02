@@ -46,9 +46,74 @@ Phase 1  Multi-ball clearing (n_balls=3)
 Phase 2  ms=3 frontier (진행 예정)
   [ ] Exp-10  SAC/TQC/PPO × 5-seed benchmark  (ms=3, 3M steps) — 진행 중
   [ ] Exp-11  Curriculum: SAC ms=5 → ms=4 → ms=3
+  [ ] Exp-12  Action space 교체: delta_angle (nearest-ball 기준) → absolute angle [0, 2π]
+  [ ] Exp-13  HRL: Phase 0 System 1 freeze + System 2 별도 학습
   [ ] cushion/bank shots (action space 확장)
   [ ] self-play / full 8-ball
   [ ] DreamerV3 (model-based)
+```
+
+---
+
+## 분석 — Phase 1 병목과 Phase 2 방향
+
+### System 1 / System 2 분리
+
+Phase 1 실험 전체를 돌아보면, 현재 병목이 두 가지 서로 다른 레벨의 문제를 혼동하고 있음을 알 수 있다.
+
+**System 1 — aiming execution (저수준 운동 제어)**
+> "이 방향, 이 속도로 쏘면 저 공이 저 포켓에 들어간다"
+
+- 물리 역학 학습: cut angle, speed → ball trajectory
+- **Phase 0에서 이미 검증 완료**: SAC 77.6% (단일공)
+- **Transfer A (zero-shot)가 훈련 0분으로 63.6%** = System 1이 multi-ball로 그대로 전이됨
+- reward signal이 즉각적 (공이 들어갔는가?) → 학습이 쉬움
+
+**System 2 — strategic planning (고수준 의사결정)**
+> "3개를 3번에 넣으려면 어떤 공을 먼저, 어떤 포켓으로, 다음 샷을 위해 큐볼을 어디에?"
+
+- 어떤 공을 먼저 칠지 (ordering)
+- 어떤 포켓에 넣을지 (pocket selection)
+- 큐볼 포지셔닝 (position play)
+- reward signal이 희박하고 지연됨 (ms=3 clear rate 9%) → 학습이 매우 어려움
+
+**현재 flat MLP 정책의 문제:**
+단일 [256, 256] MLP가 System 1과 System 2를 동시에 처리하는데, 두 시스템의 reward signal 밀도가 극단적으로 다름. 결과적으로 System 1(즉각 reward)에 압도적으로 편향되어 "nearest ball을 향해 일단 쏜다"에 수렴. 이것이 ep_len ≈ ms (모든 step 소비)이면서 clear rate는 낮은 이유.
+
+---
+
+### Action Space 구조적 문제
+
+현재 `delta_angle ∈ [−π, π]`는 **nearest unpocketed ball 방향을 기준점**으로 삼는다.
+
+```
+절대 각도 = angle(cue → nearest_ball) + delta_angle
+```
+
+이 설계는 **System 2를 greedy nearest-first로 하드코딩**한 것과 동일하다:
+
+| 문제 | 설명 |
+|------|------|
+| 공 선택 불가 | 두 번째로 가까운 공을 먼저 치려면 큰 delta_angle이 필요 — 탐색으로 발견하기 어려움 |
+| 기준 non-stationarity | 공이 포켓될 때마다 nearest ball이 바뀌어 같은 delta_angle이 다른 방향을 의미 |
+| 포켓 선택 불가 | 6개 포켓 중 어느 쪽으로 넣을지 표현 수단 없음 |
+
+Phase 0 (n_balls=1)에서는 이 설계가 합리적: delta=0 → 공 직접 겨냥 → 좋은 초기 정책.
+Phase 1 (n_balls=3, ms=3)에서는 **이 inductive bias가 족쇄**.
+
+obs에는 모든 공 위치와 포켓 위치가 이미 포함되어 있으므로, **절대 각도 [0, 2π]로 교체해도 agent가 geometry에서 직접 최적 각도를 학습할 수 있다**. "테이블 배치마다 다르게 학습"이 필요하다는 우려는 obs가 전체 상태를 담고 있으므로 실제로는 문제가 아니다.
+
+---
+
+### Phase 2 실험 방향 (우선순위)
+
+```
+① Exp-10  multi-seed benchmark       현재 SAC 학습 능력의 실제 상한선 측정
+② Exp-11  curriculum (ms=5→4→3)     System 2를 쉬운 버전부터 점진적 학습
+③ Exp-12  absolute angle             action 표현력 확장 → System 2 선택 자유도 부여
+④ Exp-13  HRL                        Phase 0 System 1 freeze + System 2 별도 RL 학습
+           high-level: ball + pocket 선택 (discrete)
+           low-level:  Phase 0 pretrained model이 execution 담당
 ```
 
 ---
