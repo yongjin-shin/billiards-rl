@@ -82,38 +82,81 @@ Phase 1 실험 전체를 돌아보면, 현재 병목이 두 가지 서로 다른
 
 ---
 
-### Action Space 구조적 문제
+### Action Space 구조적 문제 → Exp-12 배경
 
 현재 `delta_angle ∈ [−π, π]`는 **nearest unpocketed ball 방향을 기준점**으로 삼는다.
 
 ```
-절대 각도 = angle(cue → nearest_ball) + delta_angle
+실제 발사 각도 = angle(cue → nearest_ball) + delta_angle
 ```
 
 이 설계는 **System 2를 greedy nearest-first로 하드코딩**한 것과 동일하다:
 
 | 문제 | 설명 |
 |------|------|
-| 공 선택 불가 | 두 번째로 가까운 공을 먼저 치려면 큰 delta_angle이 필요 — 탐색으로 발견하기 어려움 |
+| 공 선택 불가 | 두 번째로 가까운 공을 먼저 치려면 우연히 큰 delta_angle을 발견해야 함 |
 | 기준 non-stationarity | 공이 포켓될 때마다 nearest ball이 바뀌어 같은 delta_angle이 다른 방향을 의미 |
 | 포켓 선택 불가 | 6개 포켓 중 어느 쪽으로 넣을지 표현 수단 없음 |
 
-Phase 0 (n_balls=1)에서는 이 설계가 합리적: delta=0 → 공 직접 겨냥 → 좋은 초기 정책.
-Phase 1 (n_balls=3, ms=3)에서는 **이 inductive bias가 족쇄**.
+**왜 처음에 상대 각도를 썼나:**
+Phase 0 초기에는 obs가 `[cue_x, cue_y, ball_x, ball_y]` 4-dim뿐으로 포켓 위치가 없었음. 이 상태에서 절대 각도를 쓰면 agent가 "어느 방향이 포켓인지"를 obs에서 알 수 없어 학습이 불가능했음. `delta_angle = 0 → 공 직접 겨냥`이라는 inductive bias가 필수였고, 이것이 Phase 0 SAC 77.6% 달성의 핵심이었음.
 
-obs에는 모든 공 위치와 포켓 위치가 이미 포함되어 있으므로, **절대 각도 [0, 2π]로 교체해도 agent가 geometry에서 직접 최적 각도를 학습할 수 있다**. "테이블 배치마다 다르게 학습"이 필요하다는 우려는 obs가 전체 상태를 담고 있으므로 실제로는 문제가 아니다.
+**지금 조건이 바뀌었다:**
+Phase 1부터 obs에 포켓 좌표 12개가 추가됨 (23-dim). agent는 모든 공과 포켓의 위치를 다 알고 있으므로, 절대 각도 `[0, 2π]`를 사용해도 geometry에서 직접 최적 각도를 학습할 수 있음. 또한 nearest-ball 기준은 애초에 Phase 1b에서 explicit ball selection으로 교체할 예정이었던 임시 설계.
+
+**Exp-12에서 확인할 것:**
+> 절대 각도로 교체했을 때 agent가 nearest-first 제약 없이 최적 공 순서를 스스로 발견하는가?
+> 같은 SAC 알고리즘, 같은 obs에서 action 표현만 바꿨을 때 clear rate가 오르는가?
+
+---
+
+### System 1/2 명시적 분리 → Exp-13 배경
+
+Exp-12(절대 각도)로 action 표현력 문제를 해결해도, 근본적인 구조 문제가 남는다. 단일 flat MLP가 여전히 두 시스템을 동시에 학습하면서 gradient signal 밀도 차이가 지속됨.
+
+**핵심 모순:**
+- System 1(공 하나 pocketing)은 에피소드마다 0~3회 즉각 reward
+- System 2(3개 모두 clear)는 ms=3에서 9%만 성공 → 대부분 에피소드에서 학습 신호 없음
+- 같은 네트워크, 같은 optimizer가 두 신호를 동시에 처리 → System 1에 편향 불가피
+
+**Exp-13 가설:**
+Phase 0에서 System 1은 이미 77.6% 수준으로 학습 완료. 이를 freeze하고 System 2만 별도로 학습시키면 sparse한 clear reward에 집중할 수 있다.
+
+```
+High-level policy (System 2, 새로 학습):
+  obs → "어떤 공을 어떤 포켓으로 보낼지" 목표 선택
+  reward: clear 여부 (에피소드 종료 시)
+
+Low-level policy (System 1, Phase 0 모델 freeze):
+  obs + 목표 → (delta_angle, speed) 실행
+  reward: 공이 목표 포켓에 들어갔는가
+```
+
+**Exp-13에서 확인할 것:**
+> System 1을 freeze하고 System 2만 학습했을 때 clear rate가 개선되는가?
+> System 1/2를 명시적으로 분리하는 것이 flat MLP보다 sparse reward 학습에 유리한가?
+
+**Exp-12 vs Exp-13의 관계:**
+Exp-12는 action 표현력 문제("어디를 겨냥할 수 있는가"), Exp-13은 학습 구조 문제("System 1/2가 동시에 학습되어야 하는가")를 각각 독립적으로 검증. 둘 다 성공하면 Exp-12의 action space + Exp-13의 HRL 구조를 결합하는 방향.
 
 ---
 
 ### Phase 2 실험 방향 (우선순위)
 
 ```
-① Exp-10  multi-seed benchmark       현재 SAC 학습 능력의 실제 상한선 측정
-② Exp-11  curriculum (ms=5→4→3)     System 2를 쉬운 버전부터 점진적 학습
-③ Exp-12  absolute angle             action 표현력 확장 → System 2 선택 자유도 부여
-④ Exp-13  HRL                        Phase 0 System 1 freeze + System 2 별도 RL 학습
-           high-level: ball + pocket 선택 (discrete)
-           low-level:  Phase 0 pretrained model이 execution 담당
+① Exp-10  multi-seed benchmark (진행 중)
+          확인: SAC 단일 seed 9%가 운인지 실력인지. 5-seed 평균과 분산.
+
+② Exp-11  curriculum ms=5 → ms=4 → ms=3
+          확인: 쉬운 task에서 학습한 System 2 전략이 어려운 task로 전이되는가.
+
+③ Exp-12  absolute angle [0, 2π]  (feature/abs-angle)
+          확인: nearest-ball 제약 제거만으로 ball ordering이 개선되는가.
+               같은 SAC, 같은 obs, action만 변경.
+
+④ Exp-13  HRL — System 1 freeze + System 2 별도 학습  (feature/hrl)
+          확인: sparse clear reward에만 집중하면 System 2가 학습되는가.
+               high-level: 목표(ball+pocket) 선택 / low-level: Phase 0 model 실행.
 ```
 
 ---
