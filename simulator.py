@@ -33,13 +33,18 @@ class BilliardsEnv(gym.Env):
     Episode: single shot (horizon = 1)
 
     --- n_balls=3  (multi-ball, Phase 1a) ---
-    Observation (23-dim, all normalized [0, 1]):
+    Observation (23-dim base, all normalized [0, 1]):
       [cue_x, cue_y,
        b1x, b1y, b1_pocketed,
        b2x, b2y, b2_pocketed,
        b3x, b3y, b3_pocketed,
        p0x,p0y, ..., p5x,p5y]
-    Reward : +1.0 per ball pocketed  ·  -0.01 per step  ·  -0.5 for scratch
+    If shots_taken=True → 24-dim: append shots_taken/max_steps ∈ (0, 1]
+    Reward : +1.0 per ball pocketed
+             ·  -step_penalty×i per step if progressive_penalty else -step_penalty (flat)
+             ·  -0.5 for scratch
+             ·  -trunc_penalty when episode truncated (step limit reached)
+             ·  +clear_bonus/steps_used when all balls cleared (terminated)
     Episode ends : all balls pocketed  OR  step >= max_steps
 
     Action (2-dim continuous, same for both):
@@ -52,12 +57,21 @@ class BilliardsEnv(gym.Env):
 
     MIN_BALL_DIST = 0.12   # metres — minimum distance between any two balls at reset
 
-    def __init__(self, n_balls: int = 1, max_steps: int = 5):
+    def __init__(self, n_balls: int = 1, max_steps: int = 5,
+                 step_penalty: float = 0.01, trunc_penalty: float = 0.0,
+                 progressive_penalty: bool = False,
+                 clear_bonus: float = 0.0,
+                 shots_taken: bool = False):
         super().__init__()
         assert n_balls >= 1, "n_balls must be >= 1"
 
-        self.n_balls   = n_balls
-        self.max_steps = max_steps
+        self.n_balls             = n_balls
+        self.max_steps           = max_steps
+        self.step_penalty        = step_penalty        # base penalty per step
+        self.trunc_penalty       = trunc_penalty       # extra penalty when truncated
+        self.progressive_penalty = progressive_penalty # if True: step i costs step_penalty × i
+        self.clear_bonus         = clear_bonus         # +clear_bonus/steps_used on termination
+        self.shots_taken         = shots_taken         # if True: append shots_taken/max_steps to obs
 
         # Ball IDs: "1", "2", "3", ...
         self._ball_ids = [str(i + 1) for i in range(n_balls)]
@@ -73,7 +87,8 @@ class BilliardsEnv(gym.Env):
 
         # obs dim: 2(cue) + n_balls*2(pos) + n_balls*(0 or 1)(flag) + 12(pockets)
         # n_balls=1: no pocketed flag needed (horizon=1 → episode always ends)
-        obs_dim = 2 + n_balls * (2 if n_balls == 1 else 3) + 12
+        # shots_taken=True: +1 dim (shots_taken/max_steps ∈ (0,1])
+        obs_dim = 2 + n_balls * (2 if n_balls == 1 else 3) + 12 + (1 if shots_taken else 0)
         self.observation_space = spaces.Box(
             low=0.0, high=1.0, shape=(obs_dim,), dtype=np.float32
         )
@@ -183,11 +198,6 @@ class BilliardsEnv(gym.Env):
                     self._pocketed[bid] = True
                     newly_pocketed += 1
 
-        # ── Reward ────────────────────────────────────────────────────────────
-        reward = float(newly_pocketed) - 0.01
-        if scratch:
-            reward -= 0.5
-
         # ── Termination ───────────────────────────────────────────────────────
         if self.n_balls == 1:
             # Backward-compatible: always terminate after one shot
@@ -197,6 +207,20 @@ class BilliardsEnv(gym.Env):
             terminated = all(self._pocketed.values())
             truncated  = (not terminated) and (self._step_count >= self.max_steps)
 
+        # ── Reward ────────────────────────────────────────────────────────────
+        # Progressive penalty: step i costs step_penalty × i (later steps more expensive)
+        # Flat penalty: constant step_penalty every step
+        _step_pen = (self.step_penalty * self._step_count
+                     if self.progressive_penalty else self.step_penalty)
+        reward = float(newly_pocketed) - _step_pen
+        if scratch:
+            reward -= 0.5
+        if truncated:
+            reward -= self.trunc_penalty
+        # Clear bonus: reward faster clears — scales as 1/steps_used so fewer steps = bigger bonus
+        if terminated and self.n_balls > 1 and self.clear_bonus > 0.0:
+            reward += self.clear_bonus / self._step_count
+
         # ── Ball-in-hand after scratch (multi-ball only) ──────────────────────
         if scratch and not terminated and not truncated:
             self._respawn_cue()
@@ -205,11 +229,14 @@ class BilliardsEnv(gym.Env):
         if self.n_balls == 1:
             info = {"pocketed": bool(newly_pocketed)}
         else:
+            _cb_earned = (self.clear_bonus / self._step_count
+                          if terminated and self.clear_bonus > 0.0 else 0.0)
             info = {
                 "pocketed_this_step": newly_pocketed,
                 "total_pocketed"    : sum(self._pocketed.values()),
                 "remaining"         : sum(1 for v in self._pocketed.values() if not v),
                 "scratch"           : scratch,
+                "clear_bonus_earned": _cb_earned,
             }
 
         return self._get_obs(), reward, terminated, truncated, info
@@ -284,6 +311,8 @@ class BilliardsEnv(gym.Env):
                     obs.extend([bx, by, 0.0])
 
         obs.extend(self._pocket_obs.tolist())
+        if self.shots_taken:
+            obs.append(self._step_count / self.max_steps)
         return np.array(obs, dtype=np.float32)
 
 
