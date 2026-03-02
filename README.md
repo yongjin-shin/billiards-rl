@@ -11,20 +11,31 @@ Reinforcement learning on a physics-accurate billiards simulator ([pooltool](htt
 Phase 0  Single-ball aiming
   [x] Exp-01  SAC / PPO / TQC benchmark (multi-seed)
 
-Phase 1  Multi-ball clearing
-  [x] Exp-02  SAC from scratch — max_steps=15  →  너무 느슨함, step 낭비
+Phase 1  Multi-ball clearing — reward shaping & obs ablation (ms=5)
+  [x] Exp-02  SAC from scratch — max_steps=∞   →  pocket 98.3%, clear 95.8% (너무 느슨함)
   [x] Exp-03  SAC from scratch — max_steps=5   →  pocket 60.7%, clear 29.4%
   [x] Exp-04  Transfer A · obs-collapse zero-shot  →  pocket 63.6%, clear 31.4% (0 min!)
   [x] Exp-05  Transfer B · weight-copy warm-start  →  pocket 61.5%, clear 30.4%
+  [x] Exp-06  Progressive penalty (sp=0.1×i, tp=1.0) → 63.9% / 33.2%  ← 현재 ms=5 best
+              ep_len=4.48, 80.9% use all 5 steps — aiming↑ but efficiency unchanged
+  [x] Exp-07  SAC vs TQC + clear_bonus(=2.0/steps_used) → SAC 62.0%/29.2%, TQC 49.7%/17.6%
+              ep_len unchanged — clear_bonus도 efficiency 개선 없음
+  [x] Exp-08  shots_taken obs (24-dim) + cb=2.0   → 63.7%/30.0%, ep_len=4.60 — 효과 없음
+  [x] Exp-09  shots_taken + lr=1e-4 + gs=10       → 62.1%/28.8%, ep_len=4.50 — 오히려 worse
 
-  [x] Exp-06  Progressive penalty (sp=0.1×step, tp=1.0) → scratch 63.9% / A 64.3% / B 64.8%
-              ep_len unchanged (80.9% use all 5 steps) — aiming↑ but efficiency unchanged
+  ★ 결론: ep_len은 reward shaping / obs 변경으로 단축 불가. task 자체가 5-step이 최적.
 
-  [x] Exp-07  SAC vs TQC — clear_bonus(=2.0/steps_used) → SAC 62.0%/29.2%, TQC 49.7%/17.6%
-              ep_len unchanged (81.5% use all 5 steps) — clear_bonus도 efficiency 개선 없음
-  [ ] Exp-08  shots_taken obs ablation — urgency 정보가 ep_len에 미치는 영향
+Phase 1  Multi-ball clearing — max_steps ablation
+  [x] Exp-10  ms=4, pp=False  → 55.1% / 17.6%, ep_len=3.86 (96.5% use all 4 steps)
+  [x] Exp-11  ms=3, pp=False  → 41.4% /  9.0%, ep_len=2.98 (99.3% use all 3 steps)
+  [x] Exp-12  ms=5, pp=False  → 63.6% / 32.2%, ep_len=4.40  (Exp-06의 pp=True와 사실상 동등)
+  [x] Exp-13  ms=4, pp=True   → 51.2% / 15.8%, ep_len=3.86  (pp가 ms=4에선 역효과)
+  [x] Exp-14  ms=3, pp=True   → 41.5% /  7.6%, ep_len=3.00  (pp가 ms=3에선 무의미)
 
-Phase 2  (미정)
+  ★ 결론: pp는 ms=5에서만 소폭 유효. ms=4/3에서는 penalty 누적이 학습을 방해.
+
+Phase 2  (진행 예정)
+  [ ] ms=3 frontier — 더 타이트한 환경에서 알고리즘 개선 가능성 탐색
   [ ] Phase 1b  cushion/bank shots (action space 확장)
   [ ] Phase 2   self-play / full 8-ball
   [ ] DreamerV3 (model-based)
@@ -61,6 +72,43 @@ Phase 2  (미정)
 | **Reward** | +1.0 per ball pocketed · −step_penalty (flat) or −step_penalty×i (progressive) per step · −0.5 for scratch · −trunc_penalty if truncated · +clear_bonus/steps_used on termination (all cleared) |
 | **Episode** | 공 3개 전부 pocketed OR step ≥ max_steps |
 | **Ball-in-hand** | scratch 시 큐볼을 임의 위치에 재배치 |
+
+---
+
+## Experiment Summary Table
+
+### Phase 0 — n_balls=1
+
+| Exp | Algo | Seed | Pocket% | Mean R | Ep Len |
+|-----|------|------|---------|--------|--------|
+| 01 | SAC | 0/1/2 | 81.4 / 73.6 / 77.8 (avg **77.6%**) | 0.82/0.84/0.82 | 1.00 |
+| 01 | TQC | 0/1/2 | 84.6 / 80.6 / 35.6 (avg 66.9%, **±27pp**) | 0.90/0.80/0.44 | 1.00 |
+| 01 | PPO | 0/1/2 | 24.0 / 30.0 / 31.6 (avg 28.5%) | 0.54/0.38/0.46 | 1.00 |
+
+### Phase 1 — n_balls=3
+
+| Exp | Algo | ms | pp | cb | st | Pocket% | Clear% | Mean R | Ep Len | 비고 |
+|-----|------|----|----|----|----|---------|--------|--------|--------|------|
+| 02 | SAC | ∞  | ✗ | 0   | ✗ | 98.3% | 95.8% | 2.432 | 6.84 | 너무 느슨 |
+| 03 | SAC | 5  | ✗ | 0   | ✗ | 60.7% | 29.4% | 1.714 | 4.60 | scratch baseline |
+| 06 | SAC | 5  | ✓ | 0   | ✗ | **63.9%** | **33.2%** | 0.038 | 4.48 | **ms=5 best** |
+| 07 | SAC | 5  | ✗ | 2.0 | ✗ | 62.0% | 29.2% | 1.028 | 4.50 | cb 효과 없음 |
+| 07 | TQC | 5  | ✗ | 2.0 | ✗ | 49.7% | 17.6% | 0.072 | 4.80 | single-seed 불안정 |
+| 08 | SAC | 5  | ✗ | 2.0 | ✓ | 63.7% | 30.0% | 1.091 | 4.60 | shots_taken 효과 없음 |
+| 09 | SAC | 5  | ✗ | 0   | ✓ | 62.1% | 28.8% | 0.740 | 4.50 | lr↓+gs↑ 오히려 worse |
+| 10 | SAC | 4  | ✗ | 0   | ✗ | 55.1% | 17.6% | 0.424 | 3.86 | ms 축소 효과 |
+| 11 | SAC | 3  | ✗ | 0   | ✗ | 41.4% |  9.0% | 0.182 | 2.98 | ms 축소 효과 |
+| 12 | SAC | 5  | ✗ | 0   | ✗ | 63.6% | 32.2% | 0.990 | 4.40 | pp 없어도 동등 |
+| 13 | SAC | 4  | ✓ | 0   | ✗ | 51.2% | 15.8% | −0.056 | 3.86 | pp가 ms=4에서 역효과 |
+| 14 | SAC | 3  | ✓ | 0   | ✗ | 41.5% |  7.6% | −0.270 | 3.00 | pp가 ms=3에서 무의미 |
+
+**pp pair 비교 (ms별):**
+
+| ms | pp=✗ | pp=✓ | Δ pocket | Δ clear |
+|----|------|------|----------|---------|
+| 5  | 63.6% / 32.2% (Exp-12) | 63.9% / 33.2% (Exp-06) | +0.3pp | +1.0pp |
+| 4  | 55.1% / 17.6% (Exp-10) | 51.2% / 15.8% (Exp-13) | **−3.9pp** | −1.8pp |
+| 3  | 41.4% /  9.0% (Exp-11) | 41.5% /  7.6% (Exp-14) | +0.1pp | −1.4pp |
 
 ---
 
@@ -219,6 +267,16 @@ Clear 에피소드의 step 분포: step2 4.7% / step3 20.0% / step4 35.0% / **st
 
 ---
 
+### Exp-08–14 · Ablation series (요약)
+
+상세 기록은 Experiment Summary Table 참고. 핵심 발견:
+
+- **Exp-08/09 (shots_taken):** obs에 urgency 정보 추가해도 ep_len 변화 없음. 당구에서 최적 action은 step-dependent하지 않음 — shots_taken이 uninformative feature.
+- **Exp-10/11 (ms 축소):** ms를 줄여도 ep_len/ms 비율이 오히려 상승 (ms=5: 90% → ms=3: 99%). agent가 lazy한 게 아니라 task 자체가 모든 step을 소모하는 구조.
+- **Exp-12/13/14 (pp pair):** pp는 ms=5에서 +1pp 수준의 미미한 효과. ms=4/3에선 penalty 누적이 학습을 방해해 역효과. **pp의 효용 없음** 결론.
+
+---
+
 ## Experiments — Planned
 
 ### Exp-07 · SAC vs TQC — clear_bonus reward shaping
@@ -263,30 +321,7 @@ reward: sp=0.1 (flat), tp=1.0, **clear_bonus=2.0**
 - **TQC가 SAC보다 크게 열세 (49.7% vs 62.0%).** Exp-01에서 관찰된 seed 간 불안정성(±27pp)이 여기서도 재현. 단일 seed로는 TQC가 나쁜 local optima에 수렴할 가능성이 있음. multi-seed 비교 없이 TQC 우위를 주장하기 어려움.
 - SAC Exp-07 (62.0%)이 Exp-06 (63.9%)보다 소폭 낮음 — clear_bonus가 reward scale을 높여(최대 +3.37) Q-learning을 오히려 불안정하게 만들었을 가능성.
 
-**다음 방향:** ep_len 원인 규명 → Exp-08 shots_taken ablation.
-
-### Exp-08 · shots_taken obs ablation
-
-**목표:** `shots_taken`을 obs에 추가했을 때 ep_len이 감소하는지 확인. Exp-07의 직접적인 ablation.
-
-**배경:**
-- `shots_taken`과 `steps_remaining`은 동치 정보 (`shots_taken + steps_remaining = max_steps`)
-- `steps_remaining`은 "게임적" 개념이라 비현실적이지만, `shots_taken`은 자연스러움 — 실제 당구 플레이어도 몇 번 쐈는지 앎
-- Exp-03~07까지 ep_len≈4.7~4.9 고정 — agent가 urgency를 모르는 것인지 vs task가 원래 어려운 것인지 미결
-
-**변경:** obs 23-dim → 24-dim
-```
-obs[23] = shots_taken / max_steps   # ∈ (0, 1], step 1에서 0.2 ~ step 5에서 1.0
-```
-
-**설정:** Exp-07 best(SAC or TQC) + shots_taken, 동일 하이퍼파라미터
-
-**해석 기준:**
-
-| Exp-08 ep_len 결과 | 해석 |
-|-------------------|------|
-| 줄어듦 (< 4.5) | urgency 정보 없어서 못 배운 것. shots_taken이 효과적 |
-| 그대로 (≈ 4.8) | task 자체가 어려워서 5번 다 쓰는 게 합리적인 전략. ep_len 단축은 task 한계 |
+**다음 방향:** → Exp-08~14 ablation 시리즈 (완료, 위 요약 참고).
 
 ---
 
