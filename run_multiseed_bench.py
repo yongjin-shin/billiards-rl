@@ -5,22 +5,26 @@ Phase 2 baseline benchmark.
 Reward: sp=0.1, tp=1.0 (simple, no pp/st)
 Total: 3 algos x 3 seeds = 9 sequential runs.
 
+Logs are written automatically:
+  logs/bench_YYYYMMDD_HHMMSS.log  ← benchmark-level (this script)
+  logs/experiments/{run}/train.log ← per-experiment (inside train())
+
 Usage:
-    source .venv/bin/activate
-    python run_multiseed_bench.py                   # foreground
-    nohup python run_multiseed_bench.py > logs/multiseed_bench.log 2>&1 &
+    python run_multiseed_bench.py          # foreground (logs saved automatically)
+    python run_multiseed_bench.py &        # background (no redirection needed)
 """
 
+import os
 import sys
 import time
-from train import train
+from train import train, _Tee
 
 STEPS       = 2_000_000
 MAX_STEPS   = 3
 SP          = 0.1
 TP          = 1.0
 SEEDS       = [0, 1, 42]
-ALGOS       = ["SAC", "TQC", "PPO"]
+ALGOS       = ["PPO"]   # SAC/TQC already done
 
 def main():
     runs = [(algo, seed) for algo in ALGOS for seed in SEEDS]
@@ -39,6 +43,7 @@ def main():
         print(f"  [{i}/{total}]  {algo}  seed={seed}")
         print(f"  {time.strftime('%H:%M:%S')}")
         print(f"{'--'*28}")
+        
         try:
             exp_dir = train(
                 algo          = algo,
@@ -59,4 +64,13 @@ def main():
     print("=" * 56)
 
 if __name__ == "__main__":
-    main()
+    os.makedirs("logs", exist_ok=True)
+    bench_log = f"logs/bench_{time.strftime('%Y%m%d_%H%M%S')}.log"
+    _tee = _Tee(sys.stdout, bench_log)
+    sys.stdout = sys.stderr = _tee
+    try:
+        main()
+    finally:
+        sys.stdout = sys.__stdout__
+        sys.stderr = sys.__stderr__
+        _tee.close()

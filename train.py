@@ -23,7 +23,9 @@ import argparse
 import json
 import os
 import random
+import sys
 import time
+from contextlib import contextmanager
 from datetime import datetime
 
 import numpy as np
@@ -85,6 +87,51 @@ def _build_algo_map():
 
 N_ENVS  = 10
 DEVICE  = "cpu"   # cpu beats MPS on M-series for small MLPs
+
+
+# =============================================================================
+# File logging — tee stdout/stderr to exp_dir/train.log
+# =============================================================================
+
+class _Tee:
+    """Write to both an existing stream and a log file simultaneously."""
+    def __init__(self, stream, filepath):
+        self._stream = stream
+        self._file   = open(filepath, "w", buffering=1, encoding="utf-8")
+
+    def write(self, data):
+        self._stream.write(data)
+        self._file.write(data)
+
+    def flush(self):
+        self._stream.flush()
+        self._file.flush()
+
+    def fileno(self):          # needed by subprocess / multiprocessing
+        return self._stream.fileno()
+
+    def isatty(self):
+        return False
+
+    def close(self):
+        self._file.close()
+
+    def __getattr__(self, name):   # forward anything else (e.g. .encoding)
+        return getattr(self._stream, name)
+
+
+@contextmanager
+def _tee_output(filepath):
+    """Context manager: redirect stdout+stderr to both console and filepath."""
+    tee = _Tee(sys.stdout, filepath)
+    old_out, old_err = sys.stdout, sys.stderr
+    sys.stdout = sys.stderr = tee
+    try:
+        yield
+    finally:
+        sys.stdout = old_out
+        sys.stderr = old_err
+        tee.close()
 
 
 # =============================================================================
@@ -199,18 +246,32 @@ def train(algo: str = "SAC", steps: int = 1_000_000, seed: int = 42,
     learning_rate        → critic/actor learning rate (default 3e-4; try 1e-4 for stability)
     gradient_steps       → gradient updates per env step (default 1; set to N_ENVS=10 for 1:1 ratio)
     """
-    algo      = algo.upper()
-    algo_map  = _build_algo_map()
+    algo     = algo.upper()
+    algo_map = _build_algo_map()
     if algo not in algo_map:
         raise ValueError(f"Unknown algo '{algo}'. Available: {list(algo_map.keys())}")
     if algo == "TQC" and not HAS_TQC:
         raise ImportError("TQC requires sb3-contrib: pip install sb3-contrib")
-    AlgoClass = algo_map[algo]
-    algo_cfg  = ALGO_CONFIGS[algo]
 
     set_global_seed(seed)
 
     exp_dir   = make_exp_dir(algo, steps, seed, n_balls, max_steps, step_penalty, trunc_penalty, progressive_penalty, clear_bonus, shots_taken, learning_rate, gradient_steps)
+
+    with _tee_output(os.path.join(exp_dir, "train.log")):
+        _train_inner(algo, steps, seed, n_balls, max_steps, step_penalty,
+                     trunc_penalty, progressive_penalty, clear_bonus,
+                     shots_taken, learning_rate, gradient_steps,
+                     exp_dir)
+
+    return exp_dir
+
+
+def _train_inner(algo, steps, seed, n_balls, max_steps, step_penalty,
+                 trunc_penalty, progressive_penalty, clear_bonus,
+                 shots_taken, learning_rate, gradient_steps, exp_dir):
+    AlgoClass = _build_algo_map()[algo]
+    algo_cfg  = ALGO_CONFIGS[algo]
+
     env_label = f"multi{n_balls}(ms={max_steps})" if n_balls > 1 else "single"
     print(f"\n{'='*55}")
     print(f"  billiards-rl — {algo}  |  {steps:,} steps  |  seed {seed}  |  env {env_label}")
@@ -290,16 +351,16 @@ def train(algo: str = "SAC", steps: int = 1_000_000, seed: int = 42,
     )
     eta_callback = ETACallback(total_timesteps=steps, log_freq=10_000)
 
-    model = AlgoClass(
-        "MlpPolicy",
-        vec_env,
+    model_kwargs = dict(
         device          = DEVICE,
         verbose         = 0,        # silent: ETACallback handles progress printing
         tensorboard_log = "logs/tensorboard",
         learning_rate   = learning_rate,
-        gradient_steps  = gradient_steps,
-        **algo_cfg,
     )
+    if algo != "PPO":   # gradient_steps is off-policy only (SAC, TQC)
+        model_kwargs["gradient_steps"] = gradient_steps
+
+    model = AlgoClass("MlpPolicy", vec_env, **model_kwargs, **algo_cfg)
 
     # ── Descriptive TensorBoard run name ─────────────────────────────────────
     # e.g. SAC_ms3_sp0.1_s42  →  SAC_ms3_sp0.1_s42_0 in TensorBoard
@@ -384,8 +445,6 @@ def train(algo: str = "SAC", steps: int = 1_000_000, seed: int = 42,
     print(f"  Training time     : {elapsed/60:.1f} min  ({avg_fps:.0f} fps)")
     print(f"  Saved → {exp_dir}")
     print(f"  TensorBoard → tensorboard --logdir logs/tensorboard")
-
-    return exp_dir
 
 
 # =============================================================================
