@@ -1,9 +1,9 @@
 """
-run_multiseed_bench.py -- SAC / TQC / PPO x 5 seeds, ms=3, 3M steps
+run_multiseed_bench.py -- SAC / TQC / PPO x 3 seeds, ms=3, 2M steps
 
 Phase 2 baseline benchmark.
 Reward: sp=0.1, tp=1.0 (simple, no pp/st)
-Total: 3 algos x 5 seeds = 15 sequential runs.
+Total: 3 algos x 3 seeds = 9 sequential runs.
 
 Usage:
     source .venv/bin/activate
@@ -15,11 +15,11 @@ import sys
 import time
 from train import train
 
-STEPS       = 3_000_000
+STEPS       = 2_000_000
 MAX_STEPS   = 3
 SP          = 0.1
 TP          = 1.0
-SEEDS       = [0, 1, 2, 3, 42]
+SEEDS       = [0, 1, 42]
 ALGOS       = ["SAC", "TQC", "PPO"]
 
 def main():
@@ -27,7 +27,7 @@ def main():
     total = len(runs)
 
     print("=" * 56)
-    print("  Multi-seed benchmark: ms=3, 3M steps")
+    print("  Multi-seed benchmark: ms=3, 2M steps")
     print(f"  Algos: {ALGOS}")
     print(f"  Seeds: {SEEDS}")
     print(f"  Total runs: {total}")
