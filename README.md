@@ -48,9 +48,10 @@ Phase 2  ms=3 frontier
               SAC 41.7%/8.4% · TQC 27.1%/2.0% · PPO 6.5%/0.0%  → SAC 압도적 우위
   [ ] Exp-11  Curriculum: SAC ms=5 → ms=4 → ms=3
   [ ] Exp-12  Action space 교체: delta_angle (nearest-ball 기준) → absolute angle [0, 2π]
-  [ ] Exp-13a HRL-A: 공 선택만 (discrete 3) · Phase 0 완전 freeze · obs-collapse
-  [ ] Exp-13b HRL-B: 공+포켓 선택 (discrete 18) · Phase 0 goal-conditioned fine-tune
-  [ ] Exp-13c HRL-C: 공+포켓 선택 (discrete 18) · System 1 goal-conditioned 재학습
+  [ ] Exp-13a HRL-A: 공 선택 (discrete 3) · Phase 0 완전 freeze · obs-collapse
+  [ ] Exp-13b HRL-B: 공+포켓 선택 (discrete 18) · Phase 0 freeze · 비목표포켓 마스킹
+  [ ] Exp-13c HRL-C: 공+포켓 선택 (discrete 18) · Phase 0 freeze · 전체 포켓 공개
+  [ ] Exp-13d HRL-D: 공+포켓 선택 (discrete 18) · scratch (Phase 0 없이 joint 학습)
   [ ] cushion/bank shots (action space 확장)
   [ ] self-play / full 8-ball
   [ ] DreamerV3 (model-based)
@@ -135,19 +136,26 @@ Low-level (System 1, Phase 0 기반):
 
 **System 1 설계 선택지 → 각각 별도 실험:**
 
-| | Exp-13a | Exp-13b | Exp-13c |
-|---|---------|---------|---------|
-| **System 2 action** | 공 선택 (discrete 3) | 공+포켓 (discrete 18) | 공+포켓 (discrete 18) |
-| **System 1** | Phase 0 완전 freeze | Phase 0 goal-conditioned fine-tune | goal-conditioned 재학습 |
-| **System 1 obs** | `[cue_xy, target_ball_xy, 6포켓]` (16-dim, Phase 0 그대로) | `[cue_xy, target_ball_xy, target_pocket_xy × 6]` (16-dim, 포켓 1개 반복) | `[cue_xy, target_ball_xy, target_pocket_xy, 나머지5포켓]` (16-dim) |
-| **Phase 0 재사용** | 완전 그대로 | warm-start, fine-tune 필요 | warm-start만, 전체 재학습 |
-| **포켓 선택권** | System 1이 알아서 | System 2 지정 | System 2 지정 |
-| **변수** | System 2 구조만 | System 1 obs 분포 변화 | System 1 전체 재학습 비용 |
+| | Exp-13a | Exp-13b | Exp-13c | Exp-13d |
+|---|---------|---------|---------|---------|
+| **System 2 action** | 공 선택 (discrete 3) | 공+포켓 (discrete 18) | 공+포켓 (discrete 18) | 공+포켓 (discrete 18) |
+| **System 1** | Phase 0 완전 freeze | Phase 0 freeze | Phase 0 freeze | scratch (joint 학습) |
+| **System 1 obs** | `[cue_xy, target_ball_xy, 6포켓]` (Phase 0 그대로) | `[cue_xy, target_ball_xy, target_pocket_xy, 0×10]` (비목표 마스킹, OOD) | `[cue_xy, target_ball_xy, target_pocket_xy, 나머지5포켓]` (16-dim, in-dist.) | goal-conditioned 새 설계 |
+| **Phase 0 재사용** | 완전 그대로 | 완전 그대로 (OOD 입력) | 완전 그대로 (in-distribution) | 없음 |
+| **포켓 선택** | System 1이 자율 결정 | System 2 지정 (masking으로 강제) | System 2 지정 (soft, System 1이 무시 가능) | System 2 지정 |
+| **Credit assignment** | 문제없음 | 문제없음 | 문제없음 | non-stationarity 주의 |
+| **핵심 질문** | HRL 구조 자체가 유효한가? | masking으로 포켓 강제 가능한가? | 포켓 info 추가가 도움되는가? | Phase 0 없이 end-to-end 가능한가? |
+
+**리워드 구조 (13a~d 공통):**
+- 어느 포켓이든 들어가면 +1 (포켓 지정 여부 무관)
+- 포켓 지정 준수 여부는 reward에 반영하지 않음 — System 2가 episode clear reward로 간접 학습
+- **평가 지표 추가 (13b/c/d)**: `pocket_accuracy` = 지정 포켓에 실제로 들어간 비율. reward는 아니지만 매 eval마다 기록 → System 1이 포켓 지시를 얼마나 따르는지 사후 분석
 
 **실험 순서 근거:**
 - 13a → HRL 구조 자체가 flat MLP보다 유리한지 가장 깨끗하게 검증 (변수 최소)
-- 13b → 포켓 선택권을 System 2에 주면 추가 이득이 있는지
-- 13c → System 1을 goal-conditioned로 재학습할 때의 상한선 측정
+- 13b → masking으로 System 1이 실제로 지정 포켓을 겨냥하는가 (OOD 효과 확인)
+- 13c → 포켓 정보를 온전히 줄 때 vs 마스킹할 때 차이 (13b 대비)
+- 13d → Phase 0 pretraining의 기여도 ablation (13b/c 대비, non-stationarity 감수)
 
 **Exp-12 vs Exp-13의 관계:**
 Exp-12는 action 표현력 문제("어디를 겨냥할 수 있는가"), Exp-13은 학습 구조 문제("System 1/2가 동시에 학습되어야 하는가")를 각각 독립적으로 검증. 둘 다 성공하면 Exp-12의 action space + Exp-13의 HRL 구조를 결합하는 방향.
@@ -193,12 +201,14 @@ Low-level (System 1, execution):
 
 ```
 Exp-12   절대각도      → 공 선택 자유도 확보 (쿠션 없이 먼저)
-Exp-13a  HRL-A         → 공 선택만 (discrete 3), Phase 0 완전 freeze, obs-collapse
+Exp-13a  HRL-A         → 공 선택 (discrete 3), Phase 0 완전 freeze, obs-collapse
                           확인: HRL 구조 자체가 flat MLP 대비 유리한가? (변수 최소)
-Exp-13b  HRL-B         → 공+포켓 선택 (discrete 18), Phase 0 goal-conditioned fine-tune
-                          확인: 포켓 선택권을 System 2에 주면 추가 이득이 있는가?
-Exp-13c  HRL-C         → 공+포켓 선택 (discrete 18), System 1 goal-conditioned 재학습
-                          확인: System 1을 처음부터 goal-conditioned로 훈련하면 상한선은?
+Exp-13b  HRL-B         → 공+포켓 선택 (discrete 18), Phase 0 freeze, 비목표포켓 마스킹
+                          확인: masking으로 System 1이 지정 포켓을 실제로 겨냥하는가?
+Exp-13c  HRL-C         → 공+포켓 선택 (discrete 18), Phase 0 freeze, 전체 포켓 공개
+                          확인: 포켓 정보 온전히 줄 때 vs 마스킹 대비 차이?
+Exp-13d  HRL-D         → 공+포켓 선택 (discrete 18), scratch (Phase 0 없이 joint 학습)
+                          확인: Phase 0 pretraining이 없으면 얼마나 못하나? (ablation)
 Exp-14   쿠션 확장     → simulator에 cushion count 추가
                           obs에 n_cushions 포함, high-level에 쿠션 선택 추가
                           확인: goal-conditioned low-level이 0쿠션/1쿠션/2쿠션을
@@ -223,13 +233,19 @@ Exp-14   쿠션 확장     → simulator에 cushion count 추가
 ④ Exp-13a  HRL-A — 공 선택 (discrete 3), Phase 0 완전 freeze
            확인: HRL 구조 자체가 flat MLP보다 유리한가? (변수 최소, 가장 깨끗한 검증)
 
-⑤ Exp-13b  HRL-B — 공+포켓 선택 (discrete 18), Phase 0 goal-conditioned fine-tune
-           확인: 포켓 선택권을 System 2에 주면 Exp-13a 대비 추가 이득이 있는가?
+⑤ Exp-13b  HRL-B — 공+포켓 선택 (discrete 18), Phase 0 freeze, 비목표포켓 마스킹
+           확인: masking으로 System 1이 지정 포켓을 실제로 겨냥하는가?
+           평가: pocket_accuracy (지정 포켓 적중률) 추가 기록
 
-⑥ Exp-13c  HRL-C — 공+포켓 선택 (discrete 18), System 1 goal-conditioned 재학습
-           확인: System 1을 처음부터 goal-conditioned로 훈련하면 상한선은?
+⑥ Exp-13c  HRL-C — 공+포켓 선택 (discrete 18), Phase 0 freeze, 전체 포켓 공개
+           확인: 포켓 정보를 온전히 줄 때 masking 대비 차이?
+           평가: pocket_accuracy 추가 기록
 
-⑦ Exp-14  쿠션 확장  (Exp-13 성공 후)
+⑦ Exp-13d  HRL-D — 공+포켓 선택 (discrete 18), scratch (Phase 0 없이 joint)
+           확인: Phase 0 pretraining 없이 end-to-end 가능한가? (13b/c 대비 ablation)
+           평가: pocket_accuracy 추가 기록
+
+⑧ Exp-14  쿠션 확장  (Exp-13 성공 후)
           확인: goal-conditioned low-level이 n_cushions 조건에 따라
                다른 각도 전략을 학습하는가?
 ```
