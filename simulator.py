@@ -48,9 +48,14 @@ class BilliardsEnv(gym.Env):
     Episode ends : all balls pocketed  OR  step >= max_steps
 
     Action (2-dim continuous, same for both):
-      [delta_angle ∈ [-π, π],  speed ∈ [0.5, 8.0]]
-      delta_angle = 0  →  aim at nearest unpocketed ball
-      delta_angle ≠ 0  →  cut/offset from that direction
+      abs_angle=False (default):
+        [delta_angle ∈ [-π, π],  speed ∈ [0.5, 8.0]]
+        delta_angle = 0  →  aim at nearest unpocketed ball
+        delta_angle ≠ 0  →  cut/offset from that direction
+      abs_angle=True (Exp-12):
+        [phi ∈ [0, 2π],  speed ∈ [0.5, 8.0]]
+        phi = absolute cue angle in table coordinates (0 = +x axis)
+        nearest-ball inductive bias 제거 → agent가 공 순서를 스스로 선택
     """
 
     metadata = {"render_modes": []}
@@ -61,7 +66,8 @@ class BilliardsEnv(gym.Env):
                  step_penalty: float = 0.01, trunc_penalty: float = 0.0,
                  progressive_penalty: bool = False,
                  clear_bonus: float = 0.0,
-                 shots_taken: bool = False):
+                 shots_taken: bool = False,
+                 abs_angle: bool = False):
         super().__init__()
         assert n_balls >= 1, "n_balls must be >= 1"
 
@@ -72,6 +78,7 @@ class BilliardsEnv(gym.Env):
         self.progressive_penalty = progressive_penalty # if True: step i costs step_penalty × i
         self.clear_bonus         = clear_bonus         # +clear_bonus/steps_used on termination
         self.shots_taken         = shots_taken         # if True: append shots_taken/max_steps to obs
+        self.abs_angle           = abs_angle           # if True: action[0] = absolute phi [0, 2π]
 
         # Ball IDs: "1", "2", "3", ...
         self._ball_ids = [str(i + 1) for i in range(n_balls)]
@@ -80,10 +87,18 @@ class BilliardsEnv(gym.Env):
         self.table_length = self.table.l
         self.table_width  = self.table.w
 
-        self.action_space = spaces.Box(
-            low  = np.array([-np.pi, 0.5], dtype=np.float32),
-            high = np.array([ np.pi, 8.0], dtype=np.float32),
-        )
+        if abs_angle:
+            # Absolute table angle — agent freely chooses any direction
+            self.action_space = spaces.Box(
+                low  = np.array([0.0,      0.5], dtype=np.float32),
+                high = np.array([2*np.pi,  8.0], dtype=np.float32),
+            )
+        else:
+            # Delta offset from nearest-unpocketed-ball direction
+            self.action_space = spaces.Box(
+                low  = np.array([-np.pi, 0.5], dtype=np.float32),
+                high = np.array([ np.pi, 8.0], dtype=np.float32),
+            )
 
         # obs dim: 2(cue) + n_balls*2(pos) + n_balls*(0 or 1)(flag) + 12(pockets)
         # n_balls=1: no pocketed flag needed (horizon=1 → episode always ends)
@@ -167,16 +182,20 @@ class BilliardsEnv(gym.Env):
 
     # -------------------------------------------------------------------------
     def step(self, action):
-        delta_angle = float(action[0])
-        speed       = float(action[1])
+        speed = float(action[1])
 
-        cue_pos = self.system.balls["cue"].state.rvw[0, :2]
-        ref_pos = self._nearest_unpocketed_pos(cue_pos)
-        if ref_pos is None:
-            ref_pos = cue_pos + np.array([1.0, 0.0])
-
-        phi_direct = np.arctan2(ref_pos[1] - cue_pos[1], ref_pos[0] - cue_pos[0])
-        phi_deg    = np.degrees(phi_direct + delta_angle)
+        if self.abs_angle:
+            # Exp-12: action[0] is absolute angle in [0, 2π]
+            phi_deg = np.degrees(float(action[0]))
+        else:
+            # Default: action[0] is offset from nearest-ball direction
+            delta_angle = float(action[0])
+            cue_pos = self.system.balls["cue"].state.rvw[0, :2]
+            ref_pos = self._nearest_unpocketed_pos(cue_pos)
+            if ref_pos is None:
+                ref_pos = cue_pos + np.array([1.0, 0.0])
+            phi_direct = np.arctan2(ref_pos[1] - cue_pos[1], ref_pos[0] - cue_pos[0])
+            phi_deg    = np.degrees(phi_direct + delta_angle)
 
         self.system.strike(phi=phi_deg, V0=speed, cue_ball_id="cue")
         pt.simulate(self.system, inplace=True)

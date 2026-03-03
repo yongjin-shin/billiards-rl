@@ -24,7 +24,8 @@ MAX_STEPS   = 3
 SP          = 0.1
 TP          = 1.0
 SEEDS       = [0, 1, 42]
-ALGOS       = ["PPO"]   # SAC/TQC already done
+ALGOS       = ["SAC", "TQC", "PPO"]
+ABS_ANGLE   = False     # Exp-12: set True to use absolute angle [0, 2π]
 
 def main():
     runs = [(algo, seed) for algo in ALGOS for seed in SEEDS]
@@ -53,6 +54,7 @@ def main():
                 max_steps     = MAX_STEPS,
                 step_penalty  = SP,
                 trunc_penalty = TP,
+                abs_angle     = ABS_ANGLE,
             )
             print(f"  -> saved: {exp_dir}")
         except Exception as e:
