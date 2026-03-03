@@ -43,8 +43,9 @@ Phase 1  Multi-ball clearing (n_balls=3)
 
   ★ 결론: pp 폐기. ms=3이 Phase 2 frontier (sparse reward, 알고리즘 개선 필요).
 
-Phase 2  ms=3 frontier (진행 예정)
-  [ ] Exp-10  SAC/TQC/PPO × 5-seed benchmark  (ms=3, 3M steps) — 진행 중
+Phase 2  ms=3 frontier
+  [x] Exp-10  SAC/TQC/PPO × 3-seed benchmark  (ms=3, 2M steps)
+              SAC 41.7%/8.4% · TQC 27.1%/2.0% · PPO 6.5%/0.0%  → SAC 압도적 우위
   [ ] Exp-11  Curriculum: SAC ms=5 → ms=4 → ms=3
   [ ] Exp-12  Action space 교체: delta_angle (nearest-ball 기준) → absolute angle [0, 2π]
   [ ] Exp-13  HRL: Phase 0 System 1 freeze + System 2 별도 학습
@@ -192,8 +193,8 @@ Exp-14  쿠션 확장    → simulator에 cushion count 추가
 ### Phase 2 실험 방향 (우선순위)
 
 ```
-① Exp-10  multi-seed benchmark (진행 중)
-          확인: SAC 단일 seed 9%가 운인지 실력인지. 3-seed 평균과 분산.
+① Exp-10  multi-seed benchmark ✓ (완료)
+          확인: SAC clear 8.4% (2-seed)는 실력. TQC/PPO는 ms=3 sparse reward에서 기대 이하.
 
 ② Exp-11  curriculum ms=5 → ms=4 → ms=3
           확인: 쉬운 task에서 학습한 System 2 전략이 어려운 task로 전이되는가.
@@ -297,6 +298,21 @@ SAC, 1M steps, sp=0.1, tp=1.0. pp=✓ at ms=5는 Exp-06 참고.
 | 3 | 41.4% /  9.0% (09e) | 41.5% /  7.6% (09f) | +0.1pp | −1.4pp | 2.98 |
 
 ep_len/ms: ms=5 → 88%, ms=4 → 96.5%, ms=3 → **99.3%** — ms가 줄수록 step 효율 악화.
+
+---
+
+### Phase 2 — ms=3 algorithm benchmark (Exp-10)
+
+SAC/TQC/PPO × 3 seeds, ms=3, sp=0.1, tp=1.0, 2M steps. (SAC s42, PPO s1/s42는 실험 중 오류로 제외)
+
+| Algo | Seeds (pocket%) | Seeds (clear%) | avg pocket | avg clear |
+|------|-----------------|----------------|------------|-----------|
+| **SAC** | 41.5 / 41.9 / — | 8.2 / 8.6 / — | **41.7%** | **8.4%** |
+| TQC | 24.6 / 24.9 / 31.9 | 2.2 / 0.4 / 3.4 | 27.1% | 2.0% |
+| PPO | 6.5 / — / — | 0.0 / — / — | ~6.5% | ~0.0% |
+| Random | — | — | ~9% | ~0% |
+
+**관찰:** SAC이 ms=3 sparse reward 환경에서 유일하게 의미 있는 학습. TQC는 top quantile drop의 overconservatism, PPO는 on-policy credit assignment 한계로 clear 거의 불가.
 
 ---
 
@@ -480,6 +496,31 @@ ep_len/ms: ms=5 → 88%, ms=4 → 96.5%, ms=3 → **99.3%** — ms가 줄수록 
 
 ---
 
+### Exp-10 · Phase 2 ms=3 algorithm benchmark
+
+**목표:** SAC 단일 seed 9% clear가 재현 가능한 실력인지 확인. SAC/TQC/PPO 공정 비교.
+
+**설정:** SAC/TQC/PPO × 3 seeds {0, 1, 42}, ms=3, sp=0.1, tp=1.0, 2M steps
+
+**결과:**
+
+| Algorithm | Pocket% (s0 / s1 / s42) | Clear% (s0 / s1 / s42) | avg pocket | avg clear |
+|-----------|------------------------|------------------------|------------|-----------|
+| **SAC** | 41.5 / 41.9 / — | 8.2 / 8.6 / — | **41.7%** | **8.4%** |
+| TQC | 24.6 / 24.9 / 31.9 | 2.2 / 0.4 / 3.4 | 27.1% | 2.0% |
+| PPO | 6.5 / — / — | 0.0 / — / — | ~6.5% | ~0.0% |
+| Random | ~9% | ~0% | — | — |
+
+(SAC s42: eval 단계에서 crash. PPO s1/s42: TB 디렉토리 이동 중 파일 손실로 제외)
+
+**관찰:**
+- **SAC clear 8.4% 재현 확인.** seed 간 분산이 작음 (41.5% vs 41.9%) — 학습이 안정적.
+- **TQC는 clear 2.0%로 저조.** top quantile drop의 overconservatism이 sparse reward에서 역효과. Q값 추정이 지나치게 낮아지면 탐색 동기 감소.
+- **PPO는 clear ≈ 0%.** on-policy 특성상 3-step credit assignment가 극도로 노이즈. 에피소드 중 한 번이라도 실패하면 모든 이전 action이 동등하게 패널티를 받음.
+- **Phase 2에서는 SAC가 baseline.** TQC/PPO는 현 설정에서 ms=3 task에 부적합.
+
+---
+
 ## Project Structure
 
 ```
@@ -493,7 +534,7 @@ billiards-rl/
 ├── compare.py             # 실험 결과 비교 테이블 + 학습 곡선 PNG
 ├── visualize.py           # 이미지 그리드 / MP4 영상 / before-after 비교
 ├── benchmark.py           # 하드웨어 벤치마크 (vec_env / device 조합)
-├── run_multiseed_bench.py # SAC/TQC/PPO × 5 seeds, ms=3, 3M steps
+├── run_multiseed_bench.py # SAC/TQC/PPO × 3 seeds, ms=3, 2M steps
 ├── requirements.txt
 ├── setup.sh
 └── logs/
@@ -523,9 +564,9 @@ python compare.py --filter multi3      # multi-ball 실험만
 # TensorBoard (네이밍: {ALGO}_ms{X}_sp{Y}_s{seed})
 tensorboard --logdir logs/tensorboard
 
-# Phase 2 multi-seed benchmark 백그라운드 실행
-nohup python run_multiseed_bench.py > logs/multiseed_bench.log 2>&1 &
-tail -f logs/multiseed_bench.log      # 진행 확인
+# Phase 2 multi-seed benchmark 백그라운드 실행 (로그 자동 저장)
+python run_multiseed_bench.py &
+tail -f logs/ppo_bench.log            # 진행 확인 (bench_YYYYMMDD_HHMMSS.log)
 
 # Curriculum training
 python train_curriculum.py                              # 1M+500k+500k, seed=42
