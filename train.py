@@ -363,8 +363,8 @@ def _train_inner(algo, steps, seed, n_balls, max_steps, step_penalty,
     model = AlgoClass("MlpPolicy", vec_env, **model_kwargs, **algo_cfg)
 
     # ── Descriptive TensorBoard run name (hierarchy: config/algo/seed/run) ──────
-    # Tree: ms3_sp0.1_tp1.0 → SAC → s0 → 8227999999_20260303_075200
-    # sort_key = 9999999999 - unix_ts  →  decreases over time  →  newest sorts first (top)
+    # Tree: ms3_sp0.1_tp1.0 → SAC → s0 → 2026-03-03@0752
+    # ※ macOS APFS에서 ':' 는 경로 구분자로 처리되므로 시·분 사이 구분자 생략
     cfg_parts = [f"ms{max_steps}", f"sp{step_penalty}"]
     if trunc_penalty > 0.0:     cfg_parts.append(f"tp{trunc_penalty}")
     if progressive_penalty:     cfg_parts.append("pp")
@@ -372,10 +372,8 @@ def _train_inner(algo, steps, seed, n_balls, max_steps, step_penalty,
     if shots_taken:             cfg_parts.append("st")
     if learning_rate != 3e-4:   cfg_parts.append(f"lr{learning_rate}")
     if gradient_steps != 1:     cfg_parts.append(f"gs{gradient_steps}")
-    _ts_unix = int(time.time())
-    _ts_str  = time.strftime("%Y%m%d_%H%M%S")
-    _sort_key = 9999999999 - _ts_unix          # smaller = newer = sorts first in TB sidebar
-    tb_log_name = f"{'_'.join(cfg_parts)}/{algo}/s{seed}/{_sort_key:010d}_{_ts_str}"
+    _ts_str = time.strftime("%Y-%m-%d@%H%M")   # e.g. 2026-03-03@0752
+    tb_log_name = f"{'_'.join(cfg_parts)}/{algo}/s{seed}/{_ts_str}"
 
     t0 = time.time()
     model.learn(
