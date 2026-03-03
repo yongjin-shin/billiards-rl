@@ -32,7 +32,7 @@ from stable_baselines3.common.callbacks import BaseCallback, EvalCallback, Callb
 from stable_baselines3.common.vec_env import SubprocVecEnv
 
 from simulator import BilliardsEnv
-from train import ETACallback, set_global_seed, save_json, ALGO_CONFIGS, N_ENVS, DEVICE
+from train import ETACallback, set_global_seed, save_json, ALGO_CONFIGS, N_ENVS, DEVICE, _tee_output
 
 
 # =============================================================================
@@ -129,8 +129,9 @@ def train_stage(stage: int, max_steps: int, steps: int, seed: int,
     )
     eta_callback = ETACallback(total_timesteps=steps, log_freq=10_000)
 
-    # Descriptive TensorBoard name: curriculum_ms{X}_s{seed}_stage{N}
-    tb_log_name = f"curriculum_ms{max_steps}_sp{step_penalty}_s{seed}_stage{stage}"
+    # TensorBoard: curriculum_sp0.1_tp1.0/SAC/s42/stage1_2026-03-03@0900
+    _ts = time.strftime("%Y-%m-%d@%H%M")
+    tb_log_name = f"curriculum_sp{step_penalty}_tp{trunc_penalty}/SAC/s{seed}/stage{stage}_{_ts}"
 
     if pretrained_path:
         # Load weights into a new model with the new environment
@@ -212,69 +213,76 @@ def run_curriculum(steps1: int = 1_000_000,
     )
     os.makedirs(exp_dir, exist_ok=True)
 
-    print(f"\n{'#'*55}")
-    print(f"  CURRICULUM  ms=5 → ms=4 → ms=3")
-    print(f"  total steps : {total_steps:,}  ({steps1//1000}k + {steps2//1000}k + {steps3//1000}k)")
-    print(f"  seed        : {seed}")
-    print(f"  exp_dir     : {exp_dir}")
-    print(f"{'#'*55}")
+    log_file = os.path.join(exp_dir, "train.log")
 
-    t_total = time.time()
+    def _run():
+        print(f"\n{'#'*55}")
+        print(f"  CURRICULUM  ms=5 → ms=4 → ms=3")
+        print(f"  total steps : {total_steps:,}  ({steps1//1000}k + {steps2//1000}k + {steps3//1000}k)")
+        print(f"  seed        : {seed}")
+        print(f"  exp_dir     : {exp_dir}")
+        print(f"{'#'*55}")
 
-    # Stage 1 — ms=5, train from scratch
-    s1_best = train_stage(
-        stage=1, max_steps=5, steps=steps1, seed=seed,
-        parent_dir=exp_dir,
-        step_penalty=step_penalty, trunc_penalty=trunc_penalty,
-        pretrained_path=None,
-    )
+        t_total = time.time()
 
-    # Stage 2 — ms=4, warm-start from Stage 1
-    s2_best = train_stage(
-        stage=2, max_steps=4, steps=steps2, seed=seed,
-        parent_dir=exp_dir,
-        step_penalty=step_penalty, trunc_penalty=trunc_penalty,
-        pretrained_path=s1_best,
-    )
+        # Stage 1 — ms=5, train from scratch
+        s1_best = train_stage(
+            stage=1, max_steps=5, steps=steps1, seed=seed,
+            parent_dir=exp_dir,
+            step_penalty=step_penalty, trunc_penalty=trunc_penalty,
+            pretrained_path=None,
+        )
 
-    # Stage 3 — ms=3, warm-start from Stage 2
-    s3_best = train_stage(
-        stage=3, max_steps=3, steps=steps3, seed=seed,
-        parent_dir=exp_dir,
-        step_penalty=step_penalty, trunc_penalty=trunc_penalty,
-        pretrained_path=s2_best,
-    )
+        # Stage 2 — ms=4, warm-start from Stage 1
+        s2_best = train_stage(
+            stage=2, max_steps=4, steps=steps2, seed=seed,
+            parent_dir=exp_dir,
+            step_penalty=step_penalty, trunc_penalty=trunc_penalty,
+            pretrained_path=s1_best,
+        )
 
-    elapsed_total = time.time() - t_total
+        # Stage 3 — ms=3, warm-start from Stage 2
+        s3_best = train_stage(
+            stage=3, max_steps=3, steps=steps3, seed=seed,
+            parent_dir=exp_dir,
+            step_penalty=step_penalty, trunc_penalty=trunc_penalty,
+            pretrained_path=s2_best,
+        )
 
-    # Cross-stage evaluation: test Stage 3 model on ms=3 (primary metric)
-    print(f"\n{'='*55}")
-    print(f"  CURRICULUM COMPLETE — {elapsed_total/60:.1f} min total")
-    print(f"  Loading Stage 3 best model for final evaluation (ms=3, 500 eps)...")
-    final_model = SAC.load(s3_best)
-    final_metrics = evaluate_model(final_model, max_steps=3, seed=seed,
-                                   step_penalty=step_penalty,
-                                   trunc_penalty=trunc_penalty)
-    print(f"  Final (ms=3) pocket={final_metrics['pocket_rate']:.1f}%  "
-          f"clear={final_metrics['clear_rate']:.1f}%  "
-          f"ep_len={final_metrics['ep_len_mean']:.2f}")
-    print(f"  Saved → {exp_dir}")
-    print(f"{'='*55}\n")
+        elapsed_total = time.time() - t_total
 
-    save_json(os.path.join(exp_dir, "results.json"), {
-        "algo"           : "SAC",
-        "method"         : "curriculum_ms5-4-3",
-        "steps1"         : steps1,
-        "steps2"         : steps2,
-        "steps3"         : steps3,
-        "total_steps"    : total_steps,
-        "seed"           : seed,
-        "step_penalty"   : step_penalty,
-        "trunc_penalty"  : trunc_penalty,
-        "final_ms"       : 3,
-        "training_time_sec": round(elapsed_total, 1),
-        **{f"final_{k}": v for k, v in final_metrics.items()},
-    })
+        # Cross-stage evaluation: test Stage 3 model on ms=3 (primary metric)
+        print(f"\n{'='*55}")
+        print(f"  CURRICULUM COMPLETE — {elapsed_total/60:.1f} min total")
+        print(f"  Loading Stage 3 best model for final evaluation (ms=3, 500 eps)...")
+        final_model = SAC.load(s3_best)
+        final_metrics = evaluate_model(final_model, max_steps=3, seed=seed,
+                                       step_penalty=step_penalty,
+                                       trunc_penalty=trunc_penalty)
+        print(f"  Final (ms=3) pocket={final_metrics['pocket_rate']:.1f}%  "
+              f"clear={final_metrics['clear_rate']:.1f}%  "
+              f"ep_len={final_metrics['ep_len_mean']:.2f}")
+        print(f"  Saved → {exp_dir}")
+        print(f"{'='*55}\n")
+
+        save_json(os.path.join(exp_dir, "results.json"), {
+            "algo"           : "SAC",
+            "method"         : "curriculum_ms5-4-3",
+            "steps1"         : steps1,
+            "steps2"         : steps2,
+            "steps3"         : steps3,
+            "total_steps"    : total_steps,
+            "seed"           : seed,
+            "step_penalty"   : step_penalty,
+            "trunc_penalty"  : trunc_penalty,
+            "final_ms"       : 3,
+            "training_time_sec": round(elapsed_total, 1),
+            **{f"final_{k}": v for k, v in final_metrics.items()},
+        })
+
+    with _tee_output(log_file):
+        _run()
+
     return exp_dir
 
 
