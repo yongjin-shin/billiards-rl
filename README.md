@@ -46,8 +46,14 @@ Phase 1  Multi-ball clearing (n_balls=3)
 Phase 2  ms=3 frontier
   [x] Exp-10  SAC/TQC/PPO × 3-seed benchmark  (ms=3, 2M steps)
               SAC 41.7%/8.4% · TQC 27.1%/2.0% · PPO 6.5%/0.0%  → SAC 압도적 우위
-  [ ] Exp-11  Curriculum: SAC ms=5 → ms=4 → ms=3
-  [ ] Exp-12  Action space 교체: delta_angle (nearest-ball 기준) → absolute angle [0, 2π]
+  [x] Exp-11  Curriculum: SAC ms=5 → ms=4 → ms=3
+              43.0%/10.4% (2M total) — Exp-10 대비 +1.3pp/+2.0pp 개선
+              (+) ms=2 extension: 28.6%/1.6% → 더블포켓 필수, 학습 신호 부재 확인
+  [x] Exp-12  Action space 교체: delta_angle → absolute angle [0, 2π]  ★ 폐기
+              seed=1 5M: 37.8%/6.4%  — delta_angle 2M(41.7%/8.4%)보다 낮음
+              결론: abs_angle 불필요. delta_angle + HRL(Exp-13)이 올바른 방향.
+  [ ] Exp-13  Phase 0 재훈련: n_balls=1, 1M steps, seed=42  (Exp-13a~d 선행 조건)
+              ※ Exp-01 weight 유실 → 재훈련 필요. obs 16-dim / delta_angle 그대로.
   [ ] Exp-13a HRL-A: 공 선택 (discrete 3) · Phase 0 완전 freeze · obs-collapse
   [ ] Exp-13b HRL-B: 공+포켓 선택 (discrete 18) · Phase 0 freeze · 비목표포켓 마스킹
   [ ] Exp-13c HRL-C: 공+포켓 선택 (discrete 18) · Phase 0 freeze · 전체 포켓 공개
@@ -112,6 +118,17 @@ Phase 1부터 obs에 포켓 좌표 12개가 추가됨 (23-dim). agent는 모든 
 > 절대 각도로 교체했을 때 agent가 nearest-first 제약 없이 최적 공 순서를 스스로 발견하는가?
 > 같은 SAC 알고리즘, 같은 obs에서 action 표현만 바꿨을 때 clear rate가 오르는가?
 
+**Exp-12 결과 (완료):** ❌ **효과 없음 → 폐기**
+
+| | delta 2M (Exp-10) | abs 2M (s42) | abs 5M (s1) |
+|---|---|---|---|
+| Pocket | 41.7% | 32.5% | 37.8% |
+| Clear | 8.4% | 2.0% | 6.4% |
+
+abs_angle은 inductive bias(delta=0이면 공 직접 겨냥)가 없어 탐색 공간이 넓어지고 학습 속도가 급감. 5M을 써도 delta 2M을 따라잡지 못했다. **System 1(aiming)에 delta_angle의 inductive bias는 여전히 필수.**
+
+공 선택 자유도 문제는 Exp-13(HRL)에서 System 2가 target ball을 명시적으로 지정하는 방식으로 해결 → abs_angle 불필요.
+
 ---
 
 ### System 1/2 명시적 분리 → Exp-13 배경
@@ -157,8 +174,25 @@ Low-level (System 1, Phase 0 기반):
 - 13c → 포켓 정보를 온전히 줄 때 vs 마스킹할 때 차이 (13b 대비)
 - 13d → Phase 0 pretraining의 기여도 ablation (13b/c 대비, non-stationarity 감수)
 
-**Exp-12 vs Exp-13의 관계:**
-Exp-12는 action 표현력 문제("어디를 겨냥할 수 있는가"), Exp-13은 학습 구조 문제("System 1/2가 동시에 학습되어야 하는가")를 각각 독립적으로 검증. 둘 다 성공하면 Exp-12의 action space + Exp-13의 HRL 구조를 결합하는 방향.
+**Exp-12 vs Exp-13의 관계 (업데이트):**
+Exp-12는 실패 → abs_angle 불채택. Exp-13은 delta_angle + Phase 0 그대로 사용.
+공 선택 자유도는 abs_angle이 아닌 System 2의 명시적 target 지정으로 해결.
+
+---
+
+### Phase 0 obs 호환성 분석 — Exp-13a/b/c에서 재훈련 필요 없음
+
+Phase 0 obs: `[cue_x, cue_y, ball_x, ball_y, p0x,p0y, …, p5x,p5y]` = **16-dim, delta_angle**
+
+| Exp | System 1 obs 구성 | dim | Phase 0 대비 |
+|-----|------------------|-----|-------------|
+| 13a | `[cue_xy, target_ball_xy, 6포켓]` | 16 | **완전 동일** (obs-collapse만) |
+| 13b | `[cue_xy, target_ball_xy, target_pkt_xy, 0×10]` | 16 | 같은 dim, 비목표 포켓 0 마스킹 (OOD) |
+| 13c | `[cue_xy, target_ball_xy, target_pkt_xy, 나머지5포켓]` | 16 | 같은 dim, 포켓 순서 재배치 (in-dist) |
+| 13d | goal-conditioned 새 설계 | new | Phase 0 미사용 |
+
+**결론:** 13a/b/c 모두 16-dim으로 동일 → Phase 0 **가중치 구조 변경 불필요**.
+단, Exp-01 가중치 파일이 유실됨 → **n_balls=1 재훈련 필요 (1M steps, ~30분)**. obs/action 설계는 그대로.
 
 ---
 
@@ -223,29 +257,34 @@ Exp-14   쿠션 확장     → simulator에 cushion count 추가
 ① Exp-10  multi-seed benchmark ✓ (완료)
           확인: SAC clear 8.4% (2-seed)는 실력. TQC/PPO는 ms=3 sparse reward에서 기대 이하.
 
-② Exp-11  curriculum ms=5 → ms=4 → ms=3
-          확인: 쉬운 task에서 학습한 System 2 전략이 어려운 task로 전이되는가.
+② Exp-11  curriculum ms=5→4→3 ✓ (완료) → 43.0%/10.4%
+          (+) ms=2 extension ✓ (완료) → 28.6%/1.6% 더블포켓 필수, 학습 신호 부재 확인
+          확인: curriculum이 flat scratch 대비 유효 (+2.0pp clear)
 
-③ Exp-12  absolute angle [0, 2π]  (feature/abs-angle)
-          확인: nearest-ball 제약 제거만으로 ball ordering이 개선되는가.
-               같은 SAC, 같은 obs, action만 변경.
+③ Exp-12  absolute angle [0, 2π] ✓ (완료) → ❌ 폐기
+          확인: 5M 써도 delta 2M(41.7%/8.4%)보다 낮음(37.8%/6.4%)
+               abs_angle의 inductive bias 부재가 치명적. delta_angle 유지.
 
-④ Exp-13a  HRL-A — 공 선택 (discrete 3), Phase 0 완전 freeze
+④ Phase 0 재훈련  n_balls=1, 1M steps, seed=42  ← 지금 바로 필요 (Exp-13 선행)
+           Exp-01 weight 유실. 설계 변경 없음(16-dim obs, delta_angle).
+           ETA: ~30분. best_model 경로 저장 필수.
+
+⑤ Exp-13a  HRL-A — 공 선택 (discrete 3), Phase 0 완전 freeze, obs-collapse
            확인: HRL 구조 자체가 flat MLP보다 유리한가? (변수 최소, 가장 깨끗한 검증)
 
-⑤ Exp-13b  HRL-B — 공+포켓 선택 (discrete 18), Phase 0 freeze, 비목표포켓 마스킹
+⑥ Exp-13b  HRL-B — 공+포켓 선택 (discrete 18), Phase 0 freeze, 비목표포켓 마스킹
            확인: masking으로 System 1이 지정 포켓을 실제로 겨냥하는가?
            평가: pocket_accuracy (지정 포켓 적중률) 추가 기록
 
-⑥ Exp-13c  HRL-C — 공+포켓 선택 (discrete 18), Phase 0 freeze, 전체 포켓 공개
+⑦ Exp-13c  HRL-C — 공+포켓 선택 (discrete 18), Phase 0 freeze, 전체 포켓 공개
            확인: 포켓 정보를 온전히 줄 때 masking 대비 차이?
            평가: pocket_accuracy 추가 기록
 
-⑦ Exp-13d  HRL-D — 공+포켓 선택 (discrete 18), scratch (Phase 0 없이 joint)
+⑧ Exp-13d  HRL-D — 공+포켓 선택 (discrete 18), scratch (Phase 0 없이 joint)
            확인: Phase 0 pretraining 없이 end-to-end 가능한가? (13b/c 대비 ablation)
            평가: pocket_accuracy 추가 기록
 
-⑧ Exp-14  쿠션 확장  (Exp-13 성공 후)
+⑨ Exp-14  쿠션 확장  (Exp-13 성공 후)
           확인: goal-conditioned low-level이 n_cushions 조건에 따라
                다른 각도 전략을 학습하는가?
 ```
@@ -351,6 +390,19 @@ SAC/TQC/PPO × 3 seeds, ms=3, sp=0.1, tp=1.0, 2M steps. (SAC s42, PPO s1/s42는 
 | Random | — | — | ~9% | ~0% |
 
 **관찰:** SAC이 ms=3 sparse reward 환경에서 유일하게 의미 있는 학습. TQC는 top quantile drop의 overconservatism, PPO는 on-policy credit assignment 한계로 clear 거의 불가.
+
+---
+
+### Phase 2 — Curriculum (Exp-11) vs abs_angle (Exp-12) 비교
+
+| Exp | 방법 | Steps | Pocket% | Clear% | 비고 |
+|-----|------|-------|---------|--------|------|
+| 10 | SAC delta_angle | 2M | 41.7% | 8.4% | baseline |
+| **11** | **SAC curriculum ms=5→4→3** | **2M** | **43.0%** | **10.4%** | **+2.0pp clear** |
+| 11+ | ms=2 extension (curriculum s4) | +500k | 28.6% | 1.6% | 더블포켓 필수, 사실상 불가 |
+| 12 | SAC abs_angle (s1 only) | 5M | 37.8% | 6.4% | 2.5× 스텝 소모, 오히려 낮음 |
+
+**Exp-12 결론:** abs_angle은 delta_angle 대비 개선 없음. 5M을 써도 delta 2M보다 낮다. nearest-ball 기준의 inductive bias가 Phase 2에서도 여전히 유효. Exp-13(HRL)에서 System 1은 delta_angle + Phase 0 그대로 사용.
 
 ---
 
@@ -556,6 +608,51 @@ SAC/TQC/PPO × 3 seeds, ms=3, sp=0.1, tp=1.0, 2M steps. (SAC s42, PPO s1/s42는 
 - **TQC는 clear 2.0%로 저조.** top quantile drop의 overconservatism이 sparse reward에서 역효과. Q값 추정이 지나치게 낮아지면 탐색 동기 감소.
 - **PPO는 clear ≈ 0%.** on-policy 특성상 3-step credit assignment가 극도로 노이즈. 에피소드 중 한 번이라도 실패하면 모든 이전 action이 동등하게 패널티를 받음.
 - **Phase 2에서는 SAC가 baseline.** TQC/PPO는 현 설정에서 ms=3 task에 부적합.
+
+---
+
+### Exp-11 · Curriculum ms=5 → ms=4 → ms=3
+
+**목표:** 쉬운 task(ms=5)에서 학습한 전략이 어려운 task(ms=3)로 전이되는가. scratch 2M(Exp-10) 대비 curriculum 2M 효과 측정.
+
+**설정:** SAC, seed=42, sp=0.1, tp=1.0. Stage 1: ms=5 1M / Stage 2: ms=4 500k / Stage 3: ms=3 500k
+
+| Stage | ms | Steps | Pocket% | Clear% | Ep Len |
+|-------|----|-------|---------|--------|--------|
+| 1 | 5 | 1M | 65.1% | 33.2% | 4.65 |
+| 2 | 4 | 500k | 53.6% | 21.6% | 3.86 |
+| 3 | 3 | 500k | **43.0%** | **10.4%** | 2.98 |
+| Exp-10 baseline | 3 | 2M scratch | 41.7% | 8.4% | — |
+
+**Extension — Stage 4 ms=2 (500k):** pocket 28.6% / clear **1.6%**
+- 2샷으로 3포켓 → 한 번 이상 더블포켓 필수. reward 신호 극히 희박. 예상대로 학습 실패.
+
+**관찰:**
+- curriculum이 같은 2M steps에서 Exp-10 대비 +1.3pp pocket / +2.0pp clear 개선.
+- Stage 3(500k)만으로 Stage 1(1M)보다 낮지만, warm-start 덕분에 scratch 2M과 경쟁.
+- ms=3 frontier에서는 curriculum의 benefit이 작음 — System 2 전략 자체가 부재한 것이 병목.
+
+---
+
+### Exp-12 · abs_angle action space ❌ 폐기
+
+**목표:** delta_angle(nearest-ball 기준)을 absolute angle [0, 2π]로 교체 시 ball ordering 개선 여부.
+
+**설정:** SAC, ms=3, sp=0.1, tp=1.0. 3 seeds × 5M steps 계획 → 4/5 조기 종료(환경 오류)
+
+**결과 (완료된 run만):**
+
+| Seed | Steps | Pocket% | Clear% |
+|------|-------|---------|--------|
+| 42 | 2M (조기종료) | 32.5% | 2.0% |
+| 1 | 5M (완료) | 37.8% | 6.4% |
+| Exp-10 SAC baseline | 2M | **41.7%** | **8.4%** |
+
+**관찰:**
+- abs_angle은 5M을 써도 delta 2M보다 낮다. 2.5× 스텝으로 오히려 뒤처짐.
+- 원인: delta=0 → 공 직접 겨냥이라는 inductive bias가 없어져 탐색 공간 폭발. System 1(aiming)에는 이 bias가 필수.
+- 공 선택 자유도 문제는 abs_angle이 아닌 System 2(HRL)가 target을 명시적으로 지정하는 방식으로 해결.
+- **결론: abs_angle 폐기. Exp-13 이후 모두 delta_angle 유지.**
 
 ---
 
