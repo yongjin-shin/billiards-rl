@@ -1,0 +1,1412 @@
+========================================================
+  Multi-seed benchmark: ms=3, 2M steps
+  Algos: ['SAC', 'TQC', 'PPO']
+  Seeds: [0, 1, 42]
+  Total runs: 9
+  Started: 2026-03-02 15:10:21
+========================================================
+
+--------------------------------------------------------
+  [1/9]  SAC  seed=0
+  15:10:21
+--------------------------------------------------------
+
+=======================================================
+  billiards-rl — SAC  |  2,000,000 steps  |  seed 0  |  env multi3(ms=3)
+  exp_dir : logs/experiments/SAC_2000k_s0_multi3_ms3_sp0.1_tp1.0_20260302_151021
+=======================================================
+
+[1/3] Random agent baseline (500 episodes)...
+      Random pocket rate: 8.8%  (avg 0.26/3 balls)
+
+[2/3] Training SAC — 2,000,000 steps × 10 envs ...
+/Users/yj/Documents/billiards-rl/.venv/lib/python3.13/site-packages/stable_baselines3/common/callbacks.py:418: UserWarning: Training and eval env are not of the same type<stable_baselines3.common.vec_env.subproc_vec_env.SubprocVecEnv object at 0x113992510> != <stable_baselines3.common.vec_env.dummy_vec_env.DummyVecEnv object at 0x1151981a0>
+  warnings.warn("Training and eval env are not of the same type" f"{self.training_env} != {self.eval_env}")
+[ETA] step   10,000 / 2,000,000 (0.5%)  elapsed 0.2m  ETA 00:42:01  fps 789
+[ETA] step   20,000 / 2,000,000 (1.0%)  elapsed 0.4m  ETA 00:42:24  fps 778
+[ETA] step   30,000 / 2,000,000 (1.5%)  elapsed 0.6m  ETA 00:40:49  fps 804
+[ETA] step   40,000 / 2,000,000 (2.0%)  elapsed 0.8m  ETA 00:39:27  fps 828
+[ETA] step   50,000 / 2,000,000 (2.5%)  elapsed 1.0m  ETA 00:38:23  fps 847
+[ETA] step   60,000 / 2,000,000 (3.0%)  elapsed 1.2m  ETA 00:37:27  fps 863
+[ETA] step   70,000 / 2,000,000 (3.5%)  elapsed 1.3m  ETA 00:36:27  fps 882
+[ETA] step   80,000 / 2,000,000 (4.0%)  elapsed 1.5m  ETA 00:35:47  fps 894
+[ETA] step   90,000 / 2,000,000 (4.5%)  elapsed 1.7m  ETA 00:35:07  fps 906
+[ETA] step  100,000 / 2,000,000 (5.0%)  elapsed 1.8m  ETA 00:34:51  fps 908
+[ETA] step  110,000 / 2,000,000 (5.5%)  elapsed 2.1m  ETA 00:35:25  fps 889
+[ETA] step  120,000 / 2,000,000 (6.0%)  elapsed 2.3m  ETA 00:36:19  fps 863
+[ETA] step  130,000 / 2,000,000 (6.5%)  elapsed 2.6m  ETA 00:37:05  fps 840
+[ETA] step  140,000 / 2,000,000 (7.0%)  elapsed 2.9m  ETA 00:38:29  fps 805
+[ETA] step  150,000 / 2,000,000 (7.5%)  elapsed 3.2m  ETA 00:39:26  fps 782
+[ETA] step  160,000 / 2,000,000 (8.0%)  elapsed 3.4m  ETA 00:39:39  fps 773
+[ETA] step  170,000 / 2,000,000 (8.5%)  elapsed 3.7m  ETA 00:39:46  fps 767
+[ETA] step  180,000 / 2,000,000 (9.0%)  elapsed 4.0m  ETA 00:40:34  fps 747
+[ETA] step  190,000 / 2,000,000 (9.5%)  elapsed 4.3m  ETA 00:40:43  fps 741
+[ETA] step  200,000 / 2,000,000 (10.0%)  elapsed 4.7m  ETA 00:42:01  fps 714
+[ETA] step  210,000 / 2,000,000 (10.5%)  elapsed 4.9m  ETA 00:42:02  fps 710
+[ETA] step  220,000 / 2,000,000 (11.0%)  elapsed 5.2m  ETA 00:41:53  fps 708
+[ETA] step  230,000 / 2,000,000 (11.5%)  elapsed 5.4m  ETA 00:41:48  fps 706
+[ETA] step  240,000 / 2,000,000 (12.0%)  elapsed 5.7m  ETA 00:41:44  fps 703
+[ETA] step  250,000 / 2,000,000 (12.5%)  elapsed 6.0m  ETA 00:41:59  fps 695
+[ETA] step  260,000 / 2,000,000 (13.0%)  elapsed 6.3m  ETA 00:41:55  fps 692
+[ETA] step  270,000 / 2,000,000 (13.5%)  elapsed 6.6m  ETA 00:42:02  fps 686
+[ETA] step  280,000 / 2,000,000 (14.0%)  elapsed 6.9m  ETA 00:42:13  fps 679
+[ETA] step  290,000 / 2,000,000 (14.5%)  elapsed 7.1m  ETA 00:41:57  fps 679
+[ETA] step  300,000 / 2,000,000 (15.0%)  elapsed 7.4m  ETA 00:41:42  fps 679
+[ETA] step  310,000 / 2,000,000 (15.5%)  elapsed 7.6m  ETA 00:41:30  fps 679
+[ETA] step  320,000 / 2,000,000 (16.0%)  elapsed 7.9m  ETA 00:41:25  fps 676
+[ETA] step  330,000 / 2,000,000 (16.5%)  elapsed 8.1m  ETA 00:41:08  fps 677
+[ETA] step  340,000 / 2,000,000 (17.0%)  elapsed 8.4m  ETA 00:40:58  fps 675
+[ETA] step  350,000 / 2,000,000 (17.5%)  elapsed 8.6m  ETA 00:40:40  fps 676
+[ETA] step  360,000 / 2,000,000 (18.0%)  elapsed 9.0m  ETA 00:40:52  fps 669
+[ETA] step  370,000 / 2,000,000 (18.5%)  elapsed 9.2m  ETA 00:40:34  fps 670
+[ETA] step  380,000 / 2,000,000 (19.0%)  elapsed 9.4m  ETA 00:40:16  fps 670
+[ETA] step  390,000 / 2,000,000 (19.5%)  elapsed 9.7m  ETA 00:40:04  fps 669
+[ETA] step  400,000 / 2,000,000 (20.0%)  elapsed 10.0m  ETA 00:39:51  fps 669
+[ETA] step  410,000 / 2,000,000 (20.5%)  elapsed 10.2m  ETA 00:39:33  fps 670
+[ETA] step  420,000 / 2,000,000 (21.0%)  elapsed 10.4m  ETA 00:39:16  fps 671
+[ETA] step  430,000 / 2,000,000 (21.5%)  elapsed 10.7m  ETA 00:38:58  fps 671
+[ETA] step  440,000 / 2,000,000 (22.0%)  elapsed 10.9m  ETA 00:38:41  fps 672
+[ETA] step  450,000 / 2,000,000 (22.5%)  elapsed 11.2m  ETA 00:38:24  fps 673
+[ETA] step  460,000 / 2,000,000 (23.0%)  elapsed 11.4m  ETA 00:38:07  fps 673
+[ETA] step  470,000 / 2,000,000 (23.5%)  elapsed 11.7m  ETA 00:38:00  fps 671
+[ETA] step  480,000 / 2,000,000 (24.0%)  elapsed 11.9m  ETA 00:37:44  fps 671
+[ETA] step  490,000 / 2,000,000 (24.5%)  elapsed 12.2m  ETA 00:37:34  fps 670
+[ETA] step  500,000 / 2,000,000 (25.0%)  elapsed 12.4m  ETA 00:37:18  fps 670
+[ETA] step  510,000 / 2,000,000 (25.5%)  elapsed 12.7m  ETA 00:37:03  fps 670
+[ETA] step  520,000 / 2,000,000 (26.0%)  elapsed 12.9m  ETA 00:36:47  fps 670
+[ETA] step  530,000 / 2,000,000 (26.5%)  elapsed 13.2m  ETA 00:36:34  fps 670
+[ETA] step  540,000 / 2,000,000 (27.0%)  elapsed 13.6m  ETA 00:36:46  fps 662
+[ETA] step  550,000 / 2,000,000 (27.5%)  elapsed 13.8m  ETA 00:36:28  fps 662
+[ETA] step  560,000 / 2,000,000 (28.0%)  elapsed 14.1m  ETA 00:36:11  fps 663
+[ETA] step  570,000 / 2,000,000 (28.5%)  elapsed 14.3m  ETA 00:35:57  fps 663
+[ETA] step  580,000 / 2,000,000 (29.0%)  elapsed 14.6m  ETA 00:35:40  fps 663
+[ETA] step  590,000 / 2,000,000 (29.5%)  elapsed 14.8m  ETA 00:35:24  fps 664
+[ETA] step  600,000 / 2,000,000 (30.0%)  elapsed 15.2m  ETA 00:35:24  fps 659
+[ETA] step  610,000 / 2,000,000 (30.5%)  elapsed 15.5m  ETA 00:35:12  fps 658
+[ETA] step  620,000 / 2,000,000 (31.0%)  elapsed 15.7m  ETA 00:34:55  fps 659
+[ETA] step  630,000 / 2,000,000 (31.5%)  elapsed 15.9m  ETA 00:34:38  fps 659
+[ETA] step  640,000 / 2,000,000 (32.0%)  elapsed 16.2m  ETA 00:34:21  fps 660
+[ETA] step  650,000 / 2,000,000 (32.5%)  elapsed 16.4m  ETA 00:34:04  fps 660
+[ETA] step  660,000 / 2,000,000 (33.0%)  elapsed 16.6m  ETA 00:33:47  fps 661
+[ETA] step  670,000 / 2,000,000 (33.5%)  elapsed 16.9m  ETA 00:33:30  fps 662
+[ETA] step  680,000 / 2,000,000 (34.0%)  elapsed 17.1m  ETA 00:33:17  fps 661
+[ETA] step  690,000 / 2,000,000 (34.5%)  elapsed 17.4m  ETA 00:33:00  fps 662
+[ETA] step  700,000 / 2,000,000 (35.0%)  elapsed 17.6m  ETA 00:32:45  fps 662
+[ETA] step  710,000 / 2,000,000 (35.5%)  elapsed 17.9m  ETA 00:32:28  fps 662
+[ETA] step  720,000 / 2,000,000 (36.0%)  elapsed 18.1m  ETA 00:32:14  fps 662
+[ETA] step  730,000 / 2,000,000 (36.5%)  elapsed 18.4m  ETA 00:31:57  fps 662
+[ETA] step  740,000 / 2,000,000 (37.0%)  elapsed 18.6m  ETA 00:31:41  fps 663
+[ETA] step  750,000 / 2,000,000 (37.5%)  elapsed 18.8m  ETA 00:31:24  fps 663
+[ETA] step  760,000 / 2,000,000 (38.0%)  elapsed 19.1m  ETA 00:31:08  fps 664
+[ETA] step  770,000 / 2,000,000 (38.5%)  elapsed 19.3m  ETA 00:30:51  fps 664
+[ETA] step  780,000 / 2,000,000 (39.0%)  elapsed 19.6m  ETA 00:30:37  fps 664
+[ETA] step  790,000 / 2,000,000 (39.5%)  elapsed 19.8m  ETA 00:30:21  fps 664
+[ETA] step  800,000 / 2,000,000 (40.0%)  elapsed 20.1m  ETA 00:30:05  fps 665
+[ETA] step  810,000 / 2,000,000 (40.5%)  elapsed 20.3m  ETA 00:29:49  fps 665
+[ETA] step  820,000 / 2,000,000 (41.0%)  elapsed 20.6m  ETA 00:29:34  fps 665
+[ETA] step  830,000 / 2,000,000 (41.5%)  elapsed 20.8m  ETA 00:29:19  fps 665
+[ETA] step  840,000 / 2,000,000 (42.0%)  elapsed 21.1m  ETA 00:29:06  fps 664
+[ETA] step  850,000 / 2,000,000 (42.5%)  elapsed 21.3m  ETA 00:28:50  fps 665
+[ETA] step  860,000 / 2,000,000 (43.0%)  elapsed 21.6m  ETA 00:28:34  fps 665
+[ETA] step  870,000 / 2,000,000 (43.5%)  elapsed 21.8m  ETA 00:28:18  fps 665
+[ETA] step  880,000 / 2,000,000 (44.0%)  elapsed 22.0m  ETA 00:28:03  fps 665
+[ETA] step  890,000 / 2,000,000 (44.5%)  elapsed 22.3m  ETA 00:27:49  fps 665
+[ETA] step  900,000 / 2,000,000 (45.0%)  elapsed 22.7m  ETA 00:27:42  fps 662
+[ETA] step  910,000 / 2,000,000 (45.5%)  elapsed 22.9m  ETA 00:27:26  fps 662
+[ETA] step  920,000 / 2,000,000 (46.0%)  elapsed 23.1m  ETA 00:27:10  fps 663
+[ETA] step  930,000 / 2,000,000 (46.5%)  elapsed 23.4m  ETA 00:26:58  fps 661
+[ETA] step  940,000 / 2,000,000 (47.0%)  elapsed 23.7m  ETA 00:26:41  fps 662
+[ETA] step  950,000 / 2,000,000 (47.5%)  elapsed 24.1m  ETA 00:26:38  fps 657
+[ETA] step  960,000 / 2,000,000 (48.0%)  elapsed 24.3m  ETA 00:26:22  fps 657
+[ETA] step  970,000 / 2,000,000 (48.5%)  elapsed 24.6m  ETA 00:26:05  fps 658
+[ETA] step  980,000 / 2,000,000 (49.0%)  elapsed 24.8m  ETA 00:25:49  fps 658
+[ETA] step  990,000 / 2,000,000 (49.5%)  elapsed 25.1m  ETA 00:25:33  fps 659
+[ETA] step 1,000,000 / 2,000,000 (50.0%)  elapsed 25.3m  ETA 00:25:17  fps 659
+[ETA] step 1,010,000 / 2,000,000 (50.5%)  elapsed 25.5m  ETA 00:25:02  fps 659
+[ETA] step 1,020,000 / 2,000,000 (51.0%)  elapsed 25.8m  ETA 00:24:46  fps 659
+[ETA] step 1,030,000 / 2,000,000 (51.5%)  elapsed 26.0m  ETA 00:24:30  fps 660
+[ETA] step 1,040,000 / 2,000,000 (52.0%)  elapsed 26.3m  ETA 00:24:14  fps 660
+[ETA] step 1,050,000 / 2,000,000 (52.5%)  elapsed 26.5m  ETA 00:23:58  fps 660
+[ETA] step 1,060,000 / 2,000,000 (53.0%)  elapsed 26.7m  ETA 00:23:42  fps 661
+[ETA] step 1,070,000 / 2,000,000 (53.5%)  elapsed 27.0m  ETA 00:23:26  fps 661
+[ETA] step 1,080,000 / 2,000,000 (54.0%)  elapsed 27.2m  ETA 00:23:11  fps 661
+[ETA] step 1,090,000 / 2,000,000 (54.5%)  elapsed 27.5m  ETA 00:22:55  fps 662
+[ETA] step 1,100,000 / 2,000,000 (55.0%)  elapsed 27.7m  ETA 00:22:39  fps 662
+[ETA] step 1,110,000 / 2,000,000 (55.5%)  elapsed 28.1m  ETA 00:22:32  fps 658
+[ETA] step 1,120,000 / 2,000,000 (56.0%)  elapsed 28.4m  ETA 00:22:18  fps 657
+[ETA] step 1,130,000 / 2,000,000 (56.5%)  elapsed 28.6m  ETA 00:22:03  fps 658
+[ETA] step 1,140,000 / 2,000,000 (57.0%)  elapsed 28.9m  ETA 00:21:47  fps 658
+[ETA] step 1,150,000 / 2,000,000 (57.5%)  elapsed 29.1m  ETA 00:21:31  fps 658
+[ETA] step 1,160,000 / 2,000,000 (58.0%)  elapsed 29.4m  ETA 00:21:15  fps 658
+[ETA] step 1,170,000 / 2,000,000 (58.5%)  elapsed 29.6m  ETA 00:20:59  fps 659
+[ETA] step 1,180,000 / 2,000,000 (59.0%)  elapsed 29.8m  ETA 00:20:44  fps 659
+[ETA] step 1,190,000 / 2,000,000 (59.5%)  elapsed 30.1m  ETA 00:20:28  fps 659
+[ETA] step 1,200,000 / 2,000,000 (60.0%)  elapsed 30.5m  ETA 00:20:18  fps 656
+[ETA] step 1,210,000 / 2,000,000 (60.5%)  elapsed 30.7m  ETA 00:20:02  fps 657
+[ETA] step 1,220,000 / 2,000,000 (61.0%)  elapsed 31.0m  ETA 00:19:47  fps 657
+[ETA] step 1,230,000 / 2,000,000 (61.5%)  elapsed 31.2m  ETA 00:19:31  fps 657
+[ETA] step 1,240,000 / 2,000,000 (62.0%)  elapsed 31.4m  ETA 00:19:15  fps 657
+[ETA] step 1,250,000 / 2,000,000 (62.5%)  elapsed 31.7m  ETA 00:19:00  fps 658
+[ETA] step 1,260,000 / 2,000,000 (63.0%)  elapsed 31.9m  ETA 00:18:44  fps 658
+[ETA] step 1,270,000 / 2,000,000 (63.5%)  elapsed 32.2m  ETA 00:18:31  fps 657
+[ETA] step 1,280,000 / 2,000,000 (64.0%)  elapsed 32.5m  ETA 00:18:15  fps 657
+[ETA] step 1,290,000 / 2,000,000 (64.5%)  elapsed 32.7m  ETA 00:17:59  fps 658
+[ETA] step 1,300,000 / 2,000,000 (65.0%)  elapsed 32.9m  ETA 00:17:44  fps 658
+[ETA] step 1,310,000 / 2,000,000 (65.5%)  elapsed 33.2m  ETA 00:17:28  fps 658
+[ETA] step 1,320,000 / 2,000,000 (66.0%)  elapsed 33.4m  ETA 00:17:12  fps 659
+[ETA] step 1,330,000 / 2,000,000 (66.5%)  elapsed 33.6m  ETA 00:16:56  fps 659
+[ETA] step 1,340,000 / 2,000,000 (67.0%)  elapsed 34.0m  ETA 00:16:45  fps 657
+[ETA] step 1,350,000 / 2,000,000 (67.5%)  elapsed 34.3m  ETA 00:16:29  fps 657
+[ETA] step 1,360,000 / 2,000,000 (68.0%)  elapsed 34.5m  ETA 00:16:15  fps 656
+[ETA] step 1,370,000 / 2,000,000 (68.5%)  elapsed 34.8m  ETA 00:15:59  fps 657
+/Users/yj/Documents/billiards-rl/.venv/lib/python3.13/site-packages/pooltool/ptmath/roots/core.py:46: RuntimeWarning: invalid value encountered in divide
+  small_keep1 = (real_mag > 0) & ((imag_mag / real_mag) < rtol)
+[ETA] step 1,380,000 / 2,000,000 (69.0%)  elapsed 35.0m  ETA 00:15:43  fps 657
+[ETA] step 1,390,000 / 2,000,000 (69.5%)  elapsed 35.3m  ETA 00:15:29  fps 656
+[ETA] step 1,400,000 / 2,000,000 (70.0%)  elapsed 35.5m  ETA 00:15:13  fps 657
+[ETA] step 1,410,000 / 2,000,000 (70.5%)  elapsed 35.8m  ETA 00:14:58  fps 656
+[ETA] step 1,420,000 / 2,000,000 (71.0%)  elapsed 36.0m  ETA 00:14:43  fps 657
+[ETA] step 1,430,000 / 2,000,000 (71.5%)  elapsed 36.3m  ETA 00:14:27  fps 657
+[ETA] step 1,440,000 / 2,000,000 (72.0%)  elapsed 36.6m  ETA 00:14:13  fps 657
+[ETA] step 1,450,000 / 2,000,000 (72.5%)  elapsed 36.8m  ETA 00:13:57  fps 657
+[ETA] step 1,460,000 / 2,000,000 (73.0%)  elapsed 37.0m  ETA 00:13:41  fps 657
+[ETA] step 1,470,000 / 2,000,000 (73.5%)  elapsed 37.3m  ETA 00:13:27  fps 656
+[ETA] step 1,480,000 / 2,000,000 (74.0%)  elapsed 37.6m  ETA 00:13:12  fps 656
+[ETA] step 1,490,000 / 2,000,000 (74.5%)  elapsed 37.9m  ETA 00:12:58  fps 655
+[ETA] step 1,500,000 / 2,000,000 (75.0%)  elapsed 38.2m  ETA 00:12:43  fps 655
+[ETA] step 1,510,000 / 2,000,000 (75.5%)  elapsed 38.4m  ETA 00:12:27  fps 656
+[ETA] step 1,520,000 / 2,000,000 (76.0%)  elapsed 38.6m  ETA 00:12:11  fps 656
+[ETA] step 1,530,000 / 2,000,000 (76.5%)  elapsed 38.9m  ETA 00:11:56  fps 656
+[ETA] step 1,540,000 / 2,000,000 (77.0%)  elapsed 39.1m  ETA 00:11:40  fps 656
+[ETA] step 1,550,000 / 2,000,000 (77.5%)  elapsed 39.3m  ETA 00:11:25  fps 657
+[ETA] step 1,560,000 / 2,000,000 (78.0%)  elapsed 39.6m  ETA 00:11:09  fps 657
+[ETA] step 1,570,000 / 2,000,000 (78.5%)  elapsed 39.9m  ETA 00:10:55  fps 656
+[ETA] step 1,580,000 / 2,000,000 (79.0%)  elapsed 40.1m  ETA 00:10:39  fps 656
+[ETA] step 1,590,000 / 2,000,000 (79.5%)  elapsed 40.4m  ETA 00:10:24  fps 657
+[ETA] step 1,600,000 / 2,000,000 (80.0%)  elapsed 40.6m  ETA 00:10:08  fps 657
+[ETA] step 1,610,000 / 2,000,000 (80.5%)  elapsed 41.0m  ETA 00:09:55  fps 655
+[ETA] step 1,620,000 / 2,000,000 (81.0%)  elapsed 41.2m  ETA 00:09:39  fps 655
+[ETA] step 1,630,000 / 2,000,000 (81.5%)  elapsed 41.4m  ETA 00:09:24  fps 656
+[ETA] step 1,640,000 / 2,000,000 (82.0%)  elapsed 41.7m  ETA 00:09:09  fps 656
+[ETA] step 1,650,000 / 2,000,000 (82.5%)  elapsed 42.0m  ETA 00:08:54  fps 655
+[ETA] step 1,660,000 / 2,000,000 (83.0%)  elapsed 42.2m  ETA 00:08:38  fps 655
+[ETA] step 1,670,000 / 2,000,000 (83.5%)  elapsed 42.5m  ETA 00:08:24  fps 654
+[ETA] step 1,680,000 / 2,000,000 (84.0%)  elapsed 42.8m  ETA 00:08:08  fps 655
+[ETA] step 1,690,000 / 2,000,000 (84.5%)  elapsed 43.0m  ETA 00:07:53  fps 655
+[ETA] step 1,700,000 / 2,000,000 (85.0%)  elapsed 43.3m  ETA 00:07:38  fps 654
+[ETA] step 1,710,000 / 2,000,000 (85.5%)  elapsed 43.6m  ETA 00:07:23  fps 654
+[ETA] step 1,720,000 / 2,000,000 (86.0%)  elapsed 43.8m  ETA 00:07:07  fps 654
+[ETA] step 1,730,000 / 2,000,000 (86.5%)  elapsed 44.2m  ETA 00:06:53  fps 652
+[ETA] step 1,740,000 / 2,000,000 (87.0%)  elapsed 44.5m  ETA 00:06:38  fps 652
+[ETA] step 1,750,000 / 2,000,000 (87.5%)  elapsed 44.8m  ETA 00:06:23  fps 652
+[ETA] step 1,760,000 / 2,000,000 (88.0%)  elapsed 45.0m  ETA 00:06:08  fps 652
+[ETA] step 1,770,000 / 2,000,000 (88.5%)  elapsed 45.3m  ETA 00:05:52  fps 652
+[ETA] step 1,780,000 / 2,000,000 (89.0%)  elapsed 45.5m  ETA 00:05:37  fps 652
+[ETA] step 1,790,000 / 2,000,000 (89.5%)  elapsed 45.8m  ETA 00:05:22  fps 652
+[ETA] step 1,800,000 / 2,000,000 (90.0%)  elapsed 46.0m  ETA 00:05:06  fps 652
+[ETA] step 1,810,000 / 2,000,000 (90.5%)  elapsed 46.2m  ETA 00:04:51  fps 652
+[ETA] step 1,820,000 / 2,000,000 (91.0%)  elapsed 46.5m  ETA 00:04:35  fps 653
+[ETA] step 1,830,000 / 2,000,000 (91.5%)  elapsed 46.7m  ETA 00:04:20  fps 653
+[ETA] step 1,840,000 / 2,000,000 (92.0%)  elapsed 47.0m  ETA 00:04:05  fps 653
+[ETA] step 1,850,000 / 2,000,000 (92.5%)  elapsed 47.3m  ETA 00:03:49  fps 652
+[ETA] step 1,860,000 / 2,000,000 (93.0%)  elapsed 47.5m  ETA 00:03:34  fps 653
+[ETA] step 1,870,000 / 2,000,000 (93.5%)  elapsed 47.7m  ETA 00:03:19  fps 653
+[ETA] step 1,880,000 / 2,000,000 (94.0%)  elapsed 48.0m  ETA 00:03:03  fps 653
+[ETA] step 1,890,000 / 2,000,000 (94.5%)  elapsed 48.2m  ETA 00:02:48  fps 653
+[ETA] step 1,900,000 / 2,000,000 (95.0%)  elapsed 48.4m  ETA 00:02:32  fps 654
+[ETA] step 1,910,000 / 2,000,000 (95.5%)  elapsed 48.7m  ETA 00:02:17  fps 654
+[ETA] step 1,920,000 / 2,000,000 (96.0%)  elapsed 48.9m  ETA 00:02:02  fps 654
+[ETA] step 1,930,000 / 2,000,000 (96.5%)  elapsed 49.4m  ETA 00:01:47  fps 652
+[ETA] step 1,940,000 / 2,000,000 (97.0%)  elapsed 49.6m  ETA 00:01:32  fps 652
+[ETA] step 1,950,000 / 2,000,000 (97.5%)  elapsed 49.9m  ETA 00:01:16  fps 651
+[ETA] step 1,960,000 / 2,000,000 (98.0%)  elapsed 50.2m  ETA 00:01:01  fps 650
+[ETA] step 1,970,000 / 2,000,000 (98.5%)  elapsed 50.5m  ETA 00:00:46  fps 650
+[ETA] step 1,980,000 / 2,000,000 (99.0%)  elapsed 50.7m  ETA 00:00:30  fps 651
+[ETA] step 1,990,000 / 2,000,000 (99.5%)  elapsed 51.0m  ETA 00:00:15  fps 651
+[ETA] step 2,000,000 / 2,000,000 (100.0%)  elapsed 51.2m  ETA 00:00:00  fps 651
+
+[3/3] Evaluating best SAC checkpoint (500 episodes)...
+
+  ─────────────────────────────────────────────
+  SAC pocket rate  : 41.5%
+  Clear rate (all 3): 8.2%
+  Random            : 8.8%
+  Improvement       : +32.7pp
+  Training time     : 51.2 min  (651 fps)
+  Saved → logs/experiments/SAC_2000k_s0_multi3_ms3_sp0.1_tp1.0_20260302_151021
+  TensorBoard → tensorboard --logdir logs/tensorboard
+  -> saved: logs/experiments/SAC_2000k_s0_multi3_ms3_sp0.1_tp1.0_20260302_151021
+
+--------------------------------------------------------
+  [2/9]  SAC  seed=1
+  16:01:44
+--------------------------------------------------------
+
+=======================================================
+  billiards-rl — SAC  |  2,000,000 steps  |  seed 1  |  env multi3(ms=3)
+  exp_dir : logs/experiments/SAC_2000k_s1_multi3_ms3_sp0.1_tp1.0_20260302_160144
+=======================================================
+
+[1/3] Random agent baseline (500 episodes)...
+      Random pocket rate: 10.2%  (avg 0.31/3 balls)
+
+[2/3] Training SAC — 2,000,000 steps × 10 envs ...
+/Users/yj/Documents/billiards-rl/.venv/lib/python3.13/site-packages/stable_baselines3/common/callbacks.py:418: UserWarning: Training and eval env are not of the same type<stable_baselines3.common.vec_env.subproc_vec_env.SubprocVecEnv object at 0x10ef9e5d0> != <stable_baselines3.common.vec_env.dummy_vec_env.DummyVecEnv object at 0x113a10910>
+  warnings.warn("Training and eval env are not of the same type" f"{self.training_env} != {self.eval_env}")
+[ETA] step   10,000 / 2,000,000 (0.5%)  elapsed 0.2m  ETA 00:30:50  fps 1076
+[ETA] step   20,000 / 2,000,000 (1.0%)  elapsed 0.3m  ETA 00:33:43  fps 978
+[ETA] step   30,000 / 2,000,000 (1.5%)  elapsed 0.5m  ETA 00:34:12  fps 960
+[ETA] step   40,000 / 2,000,000 (2.0%)  elapsed 0.7m  ETA 00:34:48  fps 939
+[ETA] step   50,000 / 2,000,000 (2.5%)  elapsed 0.9m  ETA 00:34:32  fps 941
+[ETA] step   60,000 / 2,000,000 (3.0%)  elapsed 1.1m  ETA 00:34:01  fps 950
+[ETA] step   70,000 / 2,000,000 (3.5%)  elapsed 1.2m  ETA 00:33:23  fps 963
+[ETA] step   80,000 / 2,000,000 (4.0%)  elapsed 1.4m  ETA 00:32:42  fps 979
+[ETA] step   90,000 / 2,000,000 (4.5%)  elapsed 1.5m  ETA 00:32:03  fps 993
+[ETA] step  100,000 / 2,000,000 (5.0%)  elapsed 1.7m  ETA 00:31:34  fps 1003
+[ETA] step  110,000 / 2,000,000 (5.5%)  elapsed 1.8m  ETA 00:31:39  fps 995
+[ETA] step  120,000 / 2,000,000 (6.0%)  elapsed 2.1m  ETA 00:32:14  fps 972
+[ETA] step  130,000 / 2,000,000 (6.5%)  elapsed 2.3m  ETA 00:32:53  fps 947
+[ETA] step  140,000 / 2,000,000 (7.0%)  elapsed 2.5m  ETA 00:33:32  fps 924
+[ETA] step  150,000 / 2,000,000 (7.5%)  elapsed 2.8m  ETA 00:34:00  fps 907
+[ETA] step  160,000 / 2,000,000 (8.0%)  elapsed 3.0m  ETA 00:34:24  fps 891
+[ETA] step  170,000 / 2,000,000 (8.5%)  elapsed 3.3m  ETA 00:35:50  fps 851
+[ETA] step  180,000 / 2,000,000 (9.0%)  elapsed 3.6m  ETA 00:36:14  fps 837
+[ETA] step  190,000 / 2,000,000 (9.5%)  elapsed 4.0m  ETA 00:37:49  fps 798
+[ETA] step  200,000 / 2,000,000 (10.0%)  elapsed 4.2m  ETA 00:37:51  fps 792
+[ETA] step  210,000 / 2,000,000 (10.5%)  elapsed 4.4m  ETA 00:37:53  fps 787
+[ETA] step  220,000 / 2,000,000 (11.0%)  elapsed 4.8m  ETA 00:39:08  fps 758
+[ETA] step  230,000 / 2,000,000 (11.5%)  elapsed 5.1m  ETA 00:39:27  fps 748
+[ETA] step  240,000 / 2,000,000 (12.0%)  elapsed 5.4m  ETA 00:39:50  fps 736
+[ETA] step  250,000 / 2,000,000 (12.5%)  elapsed 5.7m  ETA 00:39:41  fps 735
+[ETA] step  260,000 / 2,000,000 (13.0%)  elapsed 5.9m  ETA 00:39:48  fps 729
+[ETA] step  270,000 / 2,000,000 (13.5%)  elapsed 6.2m  ETA 00:39:44  fps 726
+[ETA] step  280,000 / 2,000,000 (14.0%)  elapsed 6.5m  ETA 00:40:00  fps 716
+[ETA] step  290,000 / 2,000,000 (14.5%)  elapsed 6.8m  ETA 00:39:48  fps 716
+[ETA] step  300,000 / 2,000,000 (15.0%)  elapsed 7.0m  ETA 00:39:35  fps 716
+[ETA] step  310,000 / 2,000,000 (15.5%)  elapsed 7.2m  ETA 00:39:23  fps 715
+[ETA] step  320,000 / 2,000,000 (16.0%)  elapsed 7.5m  ETA 00:39:10  fps 715
+[ETA] step  330,000 / 2,000,000 (16.5%)  elapsed 7.7m  ETA 00:39:05  fps 712
+[ETA] step  340,000 / 2,000,000 (17.0%)  elapsed 8.0m  ETA 00:38:56  fps 710
+[ETA] step  350,000 / 2,000,000 (17.5%)  elapsed 8.2m  ETA 00:38:45  fps 710
+[ETA] step  360,000 / 2,000,000 (18.0%)  elapsed 8.5m  ETA 00:38:41  fps 706
+[ETA] step  370,000 / 2,000,000 (18.5%)  elapsed 8.8m  ETA 00:38:49  fps 700
+[ETA] step  380,000 / 2,000,000 (19.0%)  elapsed 9.1m  ETA 00:38:45  fps 697
+[ETA] step  390,000 / 2,000,000 (19.5%)  elapsed 9.3m  ETA 00:38:30  fps 697
+[ETA] step  400,000 / 2,000,000 (20.0%)  elapsed 9.6m  ETA 00:38:15  fps 697
+[ETA] step  410,000 / 2,000,000 (20.5%)  elapsed 9.8m  ETA 00:38:09  fps 695
+[ETA] step  420,000 / 2,000,000 (21.0%)  elapsed 10.1m  ETA 00:37:53  fps 695
+[ETA] step  430,000 / 2,000,000 (21.5%)  elapsed 10.3m  ETA 00:37:38  fps 695
+[ETA] step  440,000 / 2,000,000 (22.0%)  elapsed 10.5m  ETA 00:37:24  fps 695
+[ETA] step  450,000 / 2,000,000 (22.5%)  elapsed 10.8m  ETA 00:37:08  fps 695
+[ETA] step  460,000 / 2,000,000 (23.0%)  elapsed 11.1m  ETA 00:37:09  fps 691
+[ETA] step  470,000 / 2,000,000 (23.5%)  elapsed 11.4m  ETA 00:36:57  fps 690
+[ETA] step  480,000 / 2,000,000 (24.0%)  elapsed 11.6m  ETA 00:36:41  fps 690
+[ETA] step  490,000 / 2,000,000 (24.5%)  elapsed 11.8m  ETA 00:36:26  fps 691
+[ETA] step  500,000 / 2,000,000 (25.0%)  elapsed 12.1m  ETA 00:36:10  fps 691
+[ETA] step  510,000 / 2,000,000 (25.5%)  elapsed 12.3m  ETA 00:35:57  fps 691
+[ETA] step  520,000 / 2,000,000 (26.0%)  elapsed 12.5m  ETA 00:35:41  fps 691
+[ETA] step  530,000 / 2,000,000 (26.5%)  elapsed 12.8m  ETA 00:35:26  fps 691
+[ETA] step  540,000 / 2,000,000 (27.0%)  elapsed 13.1m  ETA 00:35:24  fps 687
+[ETA] step  550,000 / 2,000,000 (27.5%)  elapsed 13.4m  ETA 00:35:15  fps 686
+[ETA] step  560,000 / 2,000,000 (28.0%)  elapsed 13.6m  ETA 00:34:59  fps 686
+[ETA] step  570,000 / 2,000,000 (28.5%)  elapsed 13.9m  ETA 00:34:49  fps 684
+[ETA] step  580,000 / 2,000,000 (29.0%)  elapsed 14.1m  ETA 00:34:34  fps 685
+[ETA] step  590,000 / 2,000,000 (29.5%)  elapsed 14.4m  ETA 00:34:29  fps 681
+[ETA] step  600,000 / 2,000,000 (30.0%)  elapsed 14.7m  ETA 00:34:16  fps 681
+[ETA] step  610,000 / 2,000,000 (30.5%)  elapsed 15.0m  ETA 00:34:12  fps 677
+[ETA] step  620,000 / 2,000,000 (31.0%)  elapsed 15.3m  ETA 00:33:57  fps 677
+[ETA] step  630,000 / 2,000,000 (31.5%)  elapsed 15.5m  ETA 00:33:46  fps 676
+[ETA] step  640,000 / 2,000,000 (32.0%)  elapsed 15.8m  ETA 00:33:37  fps 674
+[ETA] step  650,000 / 2,000,000 (32.5%)  elapsed 16.1m  ETA 00:33:22  fps 674
+[ETA] step  660,000 / 2,000,000 (33.0%)  elapsed 16.3m  ETA 00:33:10  fps 673
+[ETA] step  670,000 / 2,000,000 (33.5%)  elapsed 16.7m  ETA 00:33:06  fps 670
+[ETA] step  680,000 / 2,000,000 (34.0%)  elapsed 17.0m  ETA 00:32:59  fps 667
+[ETA] step  690,000 / 2,000,000 (34.5%)  elapsed 17.3m  ETA 00:32:45  fps 666
+[ETA] step  700,000 / 2,000,000 (35.0%)  elapsed 17.5m  ETA 00:32:29  fps 667
+[ETA] step  710,000 / 2,000,000 (35.5%)  elapsed 17.7m  ETA 00:32:12  fps 667
+[ETA] step  720,000 / 2,000,000 (36.0%)  elapsed 18.0m  ETA 00:31:57  fps 667
+[ETA] step  730,000 / 2,000,000 (36.5%)  elapsed 18.2m  ETA 00:31:41  fps 668
+[ETA] step  740,000 / 2,000,000 (37.0%)  elapsed 18.5m  ETA 00:31:25  fps 668
+[ETA] step  750,000 / 2,000,000 (37.5%)  elapsed 18.7m  ETA 00:31:09  fps 669
+[ETA] step  760,000 / 2,000,000 (38.0%)  elapsed 18.9m  ETA 00:30:52  fps 669
+[ETA] step  770,000 / 2,000,000 (38.5%)  elapsed 19.2m  ETA 00:30:36  fps 670
+[ETA] step  780,000 / 2,000,000 (39.0%)  elapsed 19.4m  ETA 00:30:20  fps 670
+[ETA] step  790,000 / 2,000,000 (39.5%)  elapsed 19.6m  ETA 00:30:04  fps 670
+[ETA] step  800,000 / 2,000,000 (40.0%)  elapsed 19.9m  ETA 00:29:54  fps 669
+[ETA] step  810,000 / 2,000,000 (40.5%)  elapsed 20.2m  ETA 00:29:38  fps 669
+[ETA] step  820,000 / 2,000,000 (41.0%)  elapsed 20.4m  ETA 00:29:22  fps 669
+[ETA] step  830,000 / 2,000,000 (41.5%)  elapsed 20.7m  ETA 00:29:14  fps 667
+[ETA] step  840,000 / 2,000,000 (42.0%)  elapsed 21.1m  ETA 00:29:09  fps 663
+[ETA] step  850,000 / 2,000,000 (42.5%)  elapsed 21.3m  ETA 00:28:52  fps 664
+[ETA] step  860,000 / 2,000,000 (43.0%)  elapsed 21.6m  ETA 00:28:36  fps 664
+[ETA] step  870,000 / 2,000,000 (43.5%)  elapsed 21.8m  ETA 00:28:20  fps 664
+[ETA] step  880,000 / 2,000,000 (44.0%)  elapsed 22.1m  ETA 00:28:04  fps 665
+[ETA] step  890,000 / 2,000,000 (44.5%)  elapsed 22.3m  ETA 00:27:50  fps 665
+[ETA] step  900,000 / 2,000,000 (45.0%)  elapsed 22.6m  ETA 00:27:34  fps 665
+[ETA] step  910,000 / 2,000,000 (45.5%)  elapsed 22.8m  ETA 00:27:18  fps 665
+[ETA] step  920,000 / 2,000,000 (46.0%)  elapsed 23.0m  ETA 00:27:02  fps 666
+[ETA] step  930,000 / 2,000,000 (46.5%)  elapsed 23.3m  ETA 00:26:46  fps 666
+[ETA] step  940,000 / 2,000,000 (47.0%)  elapsed 23.5m  ETA 00:26:30  fps 666
+[ETA] step  950,000 / 2,000,000 (47.5%)  elapsed 23.7m  ETA 00:26:14  fps 667
+[ETA] step  960,000 / 2,000,000 (48.0%)  elapsed 24.0m  ETA 00:25:58  fps 667
+[ETA] step  970,000 / 2,000,000 (48.5%)  elapsed 24.2m  ETA 00:25:43  fps 667
+[ETA] step  980,000 / 2,000,000 (49.0%)  elapsed 24.5m  ETA 00:25:28  fps 667
+[ETA] step  990,000 / 2,000,000 (49.5%)  elapsed 24.7m  ETA 00:25:12  fps 668
+[ETA] step 1,000,000 / 2,000,000 (50.0%)  elapsed 24.9m  ETA 00:24:56  fps 668
+[ETA] step 1,010,000 / 2,000,000 (50.5%)  elapsed 25.2m  ETA 00:24:41  fps 668
+[ETA] step 1,020,000 / 2,000,000 (51.0%)  elapsed 25.4m  ETA 00:24:25  fps 669
+[ETA] step 1,030,000 / 2,000,000 (51.5%)  elapsed 25.7m  ETA 00:24:09  fps 669
+[ETA] step 1,040,000 / 2,000,000 (52.0%)  elapsed 25.9m  ETA 00:23:54  fps 669
+[ETA] step 1,050,000 / 2,000,000 (52.5%)  elapsed 26.1m  ETA 00:23:38  fps 670
+[ETA] step 1,060,000 / 2,000,000 (53.0%)  elapsed 26.4m  ETA 00:23:23  fps 670
+[ETA] step 1,070,000 / 2,000,000 (53.5%)  elapsed 26.6m  ETA 00:23:07  fps 670
+[ETA] step 1,080,000 / 2,000,000 (54.0%)  elapsed 27.0m  ETA 00:22:57  fps 668
+[ETA] step 1,090,000 / 2,000,000 (54.5%)  elapsed 27.2m  ETA 00:22:42  fps 668
+[ETA] step 1,100,000 / 2,000,000 (55.0%)  elapsed 27.4m  ETA 00:22:26  fps 668
+[ETA] step 1,110,000 / 2,000,000 (55.5%)  elapsed 27.7m  ETA 00:22:11  fps 669
+[ETA] step 1,120,000 / 2,000,000 (56.0%)  elapsed 27.9m  ETA 00:21:55  fps 669
+[ETA] step 1,130,000 / 2,000,000 (56.5%)  elapsed 28.2m  ETA 00:21:43  fps 667
+[ETA] step 1,140,000 / 2,000,000 (57.0%)  elapsed 28.5m  ETA 00:21:28  fps 668
+[ETA] step 1,150,000 / 2,000,000 (57.5%)  elapsed 28.7m  ETA 00:21:12  fps 668
+[ETA] step 1,160,000 / 2,000,000 (58.0%)  elapsed 28.9m  ETA 00:20:57  fps 668
+[ETA] step 1,170,000 / 2,000,000 (58.5%)  elapsed 29.2m  ETA 00:20:41  fps 668
+[ETA] step 1,180,000 / 2,000,000 (59.0%)  elapsed 29.4m  ETA 00:20:26  fps 669
+[ETA] step 1,190,000 / 2,000,000 (59.5%)  elapsed 29.7m  ETA 00:20:10  fps 669
+[ETA] step 1,200,000 / 2,000,000 (60.0%)  elapsed 29.9m  ETA 00:19:55  fps 669
+[ETA] step 1,210,000 / 2,000,000 (60.5%)  elapsed 30.2m  ETA 00:19:41  fps 669
+[ETA] step 1,220,000 / 2,000,000 (61.0%)  elapsed 30.4m  ETA 00:19:26  fps 669
+[ETA] step 1,230,000 / 2,000,000 (61.5%)  elapsed 30.7m  ETA 00:19:11  fps 669
+[ETA] step 1,240,000 / 2,000,000 (62.0%)  elapsed 30.9m  ETA 00:18:57  fps 668
+[ETA] step 1,250,000 / 2,000,000 (62.5%)  elapsed 31.2m  ETA 00:18:42  fps 668
+[ETA] step 1,260,000 / 2,000,000 (63.0%)  elapsed 31.5m  ETA 00:18:29  fps 667
+[ETA] step 1,270,000 / 2,000,000 (63.5%)  elapsed 31.7m  ETA 00:18:14  fps 667
+[ETA] step 1,280,000 / 2,000,000 (64.0%)  elapsed 32.0m  ETA 00:17:59  fps 667
+[ETA] step 1,290,000 / 2,000,000 (64.5%)  elapsed 32.2m  ETA 00:17:44  fps 667
+[ETA] step 1,300,000 / 2,000,000 (65.0%)  elapsed 32.5m  ETA 00:17:29  fps 667
+[ETA] step 1,310,000 / 2,000,000 (65.5%)  elapsed 32.7m  ETA 00:17:14  fps 667
+[ETA] step 1,320,000 / 2,000,000 (66.0%)  elapsed 33.0m  ETA 00:16:59  fps 667
+[ETA] step 1,330,000 / 2,000,000 (66.5%)  elapsed 33.2m  ETA 00:16:44  fps 667
+[ETA] step 1,340,000 / 2,000,000 (67.0%)  elapsed 33.5m  ETA 00:16:31  fps 666
+[ETA] step 1,350,000 / 2,000,000 (67.5%)  elapsed 33.9m  ETA 00:16:19  fps 664
+[ETA] step 1,360,000 / 2,000,000 (68.0%)  elapsed 34.2m  ETA 00:16:04  fps 663
+[ETA] step 1,370,000 / 2,000,000 (68.5%)  elapsed 34.4m  ETA 00:15:49  fps 663
+[ETA] step 1,380,000 / 2,000,000 (69.0%)  elapsed 34.7m  ETA 00:15:35  fps 663
+[ETA] step 1,390,000 / 2,000,000 (69.5%)  elapsed 35.0m  ETA 00:15:20  fps 662
+[ETA] step 1,400,000 / 2,000,000 (70.0%)  elapsed 35.2m  ETA 00:15:05  fps 662
+[ETA] step 1,410,000 / 2,000,000 (70.5%)  elapsed 35.5m  ETA 00:14:50  fps 662
+[ETA] step 1,420,000 / 2,000,000 (71.0%)  elapsed 35.7m  ETA 00:14:35  fps 662
+[ETA] step 1,430,000 / 2,000,000 (71.5%)  elapsed 36.0m  ETA 00:14:21  fps 661
+[ETA] step 1,440,000 / 2,000,000 (72.0%)  elapsed 36.4m  ETA 00:14:08  fps 660
+[ETA] step 1,450,000 / 2,000,000 (72.5%)  elapsed 36.6m  ETA 00:13:53  fps 660
+[ETA] step 1,460,000 / 2,000,000 (73.0%)  elapsed 36.9m  ETA 00:13:39  fps 659
+[ETA] step 1,470,000 / 2,000,000 (73.5%)  elapsed 37.3m  ETA 00:13:27  fps 657
+[ETA] step 1,480,000 / 2,000,000 (74.0%)  elapsed 37.6m  ETA 00:13:12  fps 656
+[ETA] step 1,490,000 / 2,000,000 (74.5%)  elapsed 37.8m  ETA 00:12:57  fps 656
+[ETA] step 1,500,000 / 2,000,000 (75.0%)  elapsed 38.1m  ETA 00:12:42  fps 656
+[ETA] step 1,510,000 / 2,000,000 (75.5%)  elapsed 38.4m  ETA 00:12:27  fps 655
+[ETA] step 1,520,000 / 2,000,000 (76.0%)  elapsed 38.6m  ETA 00:12:12  fps 656
+[ETA] step 1,530,000 / 2,000,000 (76.5%)  elapsed 38.9m  ETA 00:11:56  fps 656
+[ETA] step 1,540,000 / 2,000,000 (77.0%)  elapsed 39.2m  ETA 00:11:41  fps 655
+[ETA] step 1,550,000 / 2,000,000 (77.5%)  elapsed 39.4m  ETA 00:11:26  fps 656
+[ETA] step 1,560,000 / 2,000,000 (78.0%)  elapsed 39.7m  ETA 00:11:11  fps 656
+[ETA] step 1,570,000 / 2,000,000 (78.5%)  elapsed 39.9m  ETA 00:10:56  fps 655
+[ETA] step 1,580,000 / 2,000,000 (79.0%)  elapsed 40.2m  ETA 00:10:40  fps 655
+[ETA] step 1,590,000 / 2,000,000 (79.5%)  elapsed 40.5m  ETA 00:10:25  fps 655
+[ETA] step 1,600,000 / 2,000,000 (80.0%)  elapsed 40.7m  ETA 00:10:10  fps 655
+[ETA] step 1,610,000 / 2,000,000 (80.5%)  elapsed 41.0m  ETA 00:09:56  fps 654
+[ETA] step 1,620,000 / 2,000,000 (81.0%)  elapsed 41.3m  ETA 00:09:41  fps 654
+[ETA] step 1,630,000 / 2,000,000 (81.5%)  elapsed 41.5m  ETA 00:09:25  fps 654
+[ETA] step 1,640,000 / 2,000,000 (82.0%)  elapsed 41.8m  ETA 00:09:10  fps 654
+[ETA] step 1,650,000 / 2,000,000 (82.5%)  elapsed 42.1m  ETA 00:08:55  fps 654
+[ETA] step 1,660,000 / 2,000,000 (83.0%)  elapsed 42.3m  ETA 00:08:40  fps 654
+[ETA] step 1,670,000 / 2,000,000 (83.5%)  elapsed 42.6m  ETA 00:08:24  fps 654
+[ETA] step 1,680,000 / 2,000,000 (84.0%)  elapsed 42.9m  ETA 00:08:10  fps 652
+[ETA] step 1,690,000 / 2,000,000 (84.5%)  elapsed 43.2m  ETA 00:07:55  fps 652
+[ETA] step 1,700,000 / 2,000,000 (85.0%)  elapsed 43.6m  ETA 00:07:41  fps 650
+[ETA] step 1,710,000 / 2,000,000 (85.5%)  elapsed 44.0m  ETA 00:07:27  fps 648
+[ETA] step 1,720,000 / 2,000,000 (86.0%)  elapsed 44.2m  ETA 00:07:11  fps 648
+[ETA] step 1,730,000 / 2,000,000 (86.5%)  elapsed 44.6m  ETA 00:06:57  fps 647
+[ETA] step 1,740,000 / 2,000,000 (87.0%)  elapsed 44.8m  ETA 00:06:41  fps 647
+[ETA] step 1,750,000 / 2,000,000 (87.5%)  elapsed 45.1m  ETA 00:06:26  fps 646
+[ETA] step 1,760,000 / 2,000,000 (88.0%)  elapsed 45.4m  ETA 00:06:11  fps 646
+[ETA] step 1,770,000 / 2,000,000 (88.5%)  elapsed 45.7m  ETA 00:05:56  fps 646
+[ETA] step 1,780,000 / 2,000,000 (89.0%)  elapsed 45.9m  ETA 00:05:40  fps 646
+[ETA] step 1,790,000 / 2,000,000 (89.5%)  elapsed 46.2m  ETA 00:05:25  fps 646
+[ETA] step 1,800,000 / 2,000,000 (90.0%)  elapsed 46.4m  ETA 00:05:09  fps 646
+[ETA] step 1,810,000 / 2,000,000 (90.5%)  elapsed 46.8m  ETA 00:04:54  fps 645
+[ETA] step 1,820,000 / 2,000,000 (91.0%)  elapsed 47.1m  ETA 00:04:39  fps 644
+[ETA] step 1,830,000 / 2,000,000 (91.5%)  elapsed 47.4m  ETA 00:04:24  fps 644
+[ETA] step 1,840,000 / 2,000,000 (92.0%)  elapsed 47.6m  ETA 00:04:08  fps 644
+[ETA] step 1,850,000 / 2,000,000 (92.5%)  elapsed 47.9m  ETA 00:03:53  fps 643
+[ETA] step 1,860,000 / 2,000,000 (93.0%)  elapsed 48.2m  ETA 00:03:37  fps 643
+[ETA] step 1,870,000 / 2,000,000 (93.5%)  elapsed 48.4m  ETA 00:03:21  fps 644
+[ETA] step 1,880,000 / 2,000,000 (94.0%)  elapsed 48.7m  ETA 00:03:06  fps 644
+[ETA] step 1,890,000 / 2,000,000 (94.5%)  elapsed 49.0m  ETA 00:02:51  fps 643
+[ETA] step 1,900,000 / 2,000,000 (95.0%)  elapsed 49.3m  ETA 00:02:35  fps 643
+[ETA] step 1,910,000 / 2,000,000 (95.5%)  elapsed 49.5m  ETA 00:02:20  fps 643
+[ETA] step 1,920,000 / 2,000,000 (96.0%)  elapsed 49.8m  ETA 00:02:04  fps 643
+[ETA] step 1,930,000 / 2,000,000 (96.5%)  elapsed 50.0m  ETA 00:01:48  fps 643
+[ETA] step 1,940,000 / 2,000,000 (97.0%)  elapsed 50.3m  ETA 00:01:33  fps 643
+[ETA] step 1,950,000 / 2,000,000 (97.5%)  elapsed 50.6m  ETA 00:01:17  fps 642
+[ETA] step 1,960,000 / 2,000,000 (98.0%)  elapsed 50.9m  ETA 00:01:02  fps 642
+[ETA] step 1,970,000 / 2,000,000 (98.5%)  elapsed 51.3m  ETA 00:00:46  fps 640
+[ETA] step 1,980,000 / 2,000,000 (99.0%)  elapsed 51.6m  ETA 00:00:31  fps 640
+[ETA] step 1,990,000 / 2,000,000 (99.5%)  elapsed 51.9m  ETA 00:00:15  fps 640
+[ETA] step 2,000,000 / 2,000,000 (100.0%)  elapsed 52.2m  ETA 00:00:00  fps 639
+
+[3/3] Evaluating best SAC checkpoint (500 episodes)...
+
+  ─────────────────────────────────────────────
+  SAC pocket rate  : 41.9%
+  Clear rate (all 3): 8.6%
+  Random            : 10.2%
+  Improvement       : +31.7pp
+  Training time     : 52.2 min  (639 fps)
+  Saved → logs/experiments/SAC_2000k_s1_multi3_ms3_sp0.1_tp1.0_20260302_160144
+  TensorBoard → tensorboard --logdir logs/tensorboard
+  -> saved: logs/experiments/SAC_2000k_s1_multi3_ms3_sp0.1_tp1.0_20260302_160144
+
+--------------------------------------------------------
+  [3/9]  SAC  seed=42
+  16:54:06
+--------------------------------------------------------
+
+=======================================================
+  billiards-rl — SAC  |  2,000,000 steps  |  seed 42  |  env multi3(ms=3)
+  exp_dir : logs/experiments/SAC_2000k_s42_multi3_ms3_sp0.1_tp1.0_20260302_165406
+=======================================================
+
+[1/3] Random agent baseline (500 episodes)...
+      Random pocket rate: 8.2%  (avg 0.25/3 balls)
+
+[2/3] Training SAC — 2,000,000 steps × 10 envs ...
+/Users/yj/Documents/billiards-rl/.venv/lib/python3.13/site-packages/stable_baselines3/common/callbacks.py:418: UserWarning: Training and eval env are not of the same type<stable_baselines3.common.vec_env.subproc_vec_env.SubprocVecEnv object at 0x12b25bed0> != <stable_baselines3.common.vec_env.dummy_vec_env.DummyVecEnv object at 0x137b24410>
+  warnings.warn("Training and eval env are not of the same type" f"{self.training_env} != {self.eval_env}")
+[ETA] step   10,000 / 2,000,000 (0.5%)  elapsed 0.2m  ETA 00:36:56  fps 898
+[ETA] step   20,000 / 2,000,000 (1.0%)  elapsed 0.4m  ETA 00:40:08  fps 822
+[ETA] step   30,000 / 2,000,000 (1.5%)  elapsed 0.6m  ETA 00:40:03  fps 820
+[ETA] step   40,000 / 2,000,000 (2.0%)  elapsed 0.8m  ETA 00:39:13  fps 833
+[ETA] step   50,000 / 2,000,000 (2.5%)  elapsed 1.0m  ETA 00:38:20  fps 848
+[ETA] step   60,000 / 2,000,000 (3.0%)  elapsed 1.2m  ETA 00:37:32  fps 861
+[ETA] step   70,000 / 2,000,000 (3.5%)  elapsed 1.3m  ETA 00:36:48  fps 874
+[ETA] step   80,000 / 2,000,000 (4.0%)  elapsed 1.5m  ETA 00:36:13  fps 883
+[ETA] step   90,000 / 2,000,000 (4.5%)  elapsed 1.7m  ETA 00:35:14  fps 903
+[ETA] step  100,000 / 2,000,000 (5.0%)  elapsed 1.8m  ETA 00:34:33  fps 916
+[ETA] step  110,000 / 2,000,000 (5.5%)  elapsed 2.0m  ETA 00:34:04  fps 924
+[ETA] step  120,000 / 2,000,000 (6.0%)  elapsed 2.2m  ETA 00:34:28  fps 909
+[ETA] step  130,000 / 2,000,000 (6.5%)  elapsed 2.5m  ETA 00:35:58  fps 866
+[ETA] step  140,000 / 2,000,000 (7.0%)  elapsed 2.8m  ETA 00:36:53  fps 840
+[ETA] step  150,000 / 2,000,000 (7.5%)  elapsed 3.0m  ETA 00:37:22  fps 825
+[ETA] step  160,000 / 2,000,000 (8.0%)  elapsed 3.3m  ETA 00:37:36  fps 815
+[ETA] step  170,000 / 2,000,000 (8.5%)  elapsed 3.5m  ETA 00:38:08  fps 800
+[ETA] step  180,000 / 2,000,000 (9.0%)  elapsed 3.8m  ETA 00:38:21  fps 791
+[ETA] step  190,000 / 2,000,000 (9.5%)  elapsed 4.1m  ETA 00:38:42  fps 779
+[ETA] step  200,000 / 2,000,000 (10.0%)  elapsed 4.3m  ETA 00:39:02  fps 768
+[ETA] step  210,000 / 2,000,000 (10.5%)  elapsed 4.6m  ETA 00:39:18  fps 759
+[ETA] step  220,000 / 2,000,000 (11.0%)  elapsed 4.9m  ETA 00:39:20  fps 754
+[ETA] step  230,000 / 2,000,000 (11.5%)  elapsed 5.1m  ETA 00:39:32  fps 746
+[ETA] step  240,000 / 2,000,000 (12.0%)  elapsed 5.4m  ETA 00:39:37  fps 740
+[ETA] step  250,000 / 2,000,000 (12.5%)  elapsed 5.7m  ETA 00:39:33  fps 737
+[ETA] step  260,000 / 2,000,000 (13.0%)  elapsed 6.0m  ETA 00:40:05  fps 723
+[ETA] step  270,000 / 2,000,000 (13.5%)  elapsed 6.2m  ETA 00:40:01  fps 720
+[ETA] step  280,000 / 2,000,000 (14.0%)  elapsed 6.5m  ETA 00:39:52  fps 719
+[ETA] step  290,000 / 2,000,000 (14.5%)  elapsed 6.7m  ETA 00:39:45  fps 717
+[ETA] step  300,000 / 2,000,000 (15.0%)  elapsed 7.0m  ETA 00:39:37  fps 715
+[ETA] step  310,000 / 2,000,000 (15.5%)  elapsed 7.3m  ETA 00:39:36  fps 711
+[ETA] step  320,000 / 2,000,000 (16.0%)  elapsed 7.5m  ETA 00:39:30  fps 709
+[ETA] step  330,000 / 2,000,000 (16.5%)  elapsed 7.8m  ETA 00:39:23  fps 707
+[ETA] step  340,000 / 2,000,000 (17.0%)  elapsed 8.0m  ETA 00:39:14  fps 705
+[ETA] step  350,000 / 2,000,000 (17.5%)  elapsed 8.4m  ETA 00:39:38  fps 694
+[ETA] step  360,000 / 2,000,000 (18.0%)  elapsed 8.7m  ETA 00:39:50  fps 686
+[ETA] step  370,000 / 2,000,000 (18.5%)  elapsed 9.0m  ETA 00:39:43  fps 684
+[ETA] step  380,000 / 2,000,000 (19.0%)  elapsed 9.3m  ETA 00:39:33  fps 683
+[ETA] step  390,000 / 2,000,000 (19.5%)  elapsed 9.6m  ETA 00:39:42  fps 676
+[ETA] step  400,000 / 2,000,000 (20.0%)  elapsed 9.9m  ETA 00:39:30  fps 675
+[ETA] step  410,000 / 2,000,000 (20.5%)  elapsed 10.1m  ETA 00:39:17  fps 674
+[ETA] step  420,000 / 2,000,000 (21.0%)  elapsed 10.4m  ETA 00:39:04  fps 674
+[ETA] step  430,000 / 2,000,000 (21.5%)  elapsed 10.6m  ETA 00:38:47  fps 674
+[ETA] step  440,000 / 2,000,000 (22.0%)  elapsed 10.9m  ETA 00:38:31  fps 675
+[ETA] step  450,000 / 2,000,000 (22.5%)  elapsed 11.1m  ETA 00:38:15  fps 675
+[ETA] step  460,000 / 2,000,000 (23.0%)  elapsed 11.3m  ETA 00:37:59  fps 676
+[ETA] step  470,000 / 2,000,000 (23.5%)  elapsed 11.6m  ETA 00:37:48  fps 674
+[ETA] step  480,000 / 2,000,000 (24.0%)  elapsed 11.9m  ETA 00:37:31  fps 675
+[ETA] step  490,000 / 2,000,000 (24.5%)  elapsed 12.1m  ETA 00:37:20  fps 674
+[ETA] step  500,000 / 2,000,000 (25.0%)  elapsed 12.4m  ETA 00:37:04  fps 674
+[ETA] step  510,000 / 2,000,000 (25.5%)  elapsed 12.6m  ETA 00:36:47  fps 675
+[ETA] step  520,000 / 2,000,000 (26.0%)  elapsed 12.8m  ETA 00:36:31  fps 675
+[ETA] step  530,000 / 2,000,000 (26.5%)  elapsed 13.1m  ETA 00:36:15  fps 676
+[ETA] step  540,000 / 2,000,000 (27.0%)  elapsed 13.3m  ETA 00:35:59  fps 676
+[ETA] step  550,000 / 2,000,000 (27.5%)  elapsed 13.6m  ETA 00:35:43  fps 676
+[ETA] step  560,000 / 2,000,000 (28.0%)  elapsed 13.8m  ETA 00:35:27  fps 677
+[ETA] step  570,000 / 2,000,000 (28.5%)  elapsed 14.0m  ETA 00:35:11  fps 677
+[ETA] step  580,000 / 2,000,000 (29.0%)  elapsed 14.3m  ETA 00:34:56  fps 677
+[ETA] step  590,000 / 2,000,000 (29.5%)  elapsed 14.5m  ETA 00:34:40  fps 678
+[ETA] step  600,000 / 2,000,000 (30.0%)  elapsed 14.7m  ETA 00:34:24  fps 678
+[ETA] step  610,000 / 2,000,000 (30.5%)  elapsed 15.0m  ETA 00:34:09  fps 678
+[ETA] step  620,000 / 2,000,000 (31.0%)  elapsed 15.3m  ETA 00:33:59  fps 677
+[ETA] step  630,000 / 2,000,000 (31.5%)  elapsed 15.5m  ETA 00:33:43  fps 677
+[ETA] step  640,000 / 2,000,000 (32.0%)  elapsed 15.7m  ETA 00:33:27  fps 677
+[ETA] step  650,000 / 2,000,000 (32.5%)  elapsed 16.0m  ETA 00:33:12  fps 678
+[ETA] step  660,000 / 2,000,000 (33.0%)  elapsed 16.2m  ETA 00:32:56  fps 678
+[ETA] step  670,000 / 2,000,000 (33.5%)  elapsed 16.5m  ETA 00:32:41  fps 678
+[ETA] step  680,000 / 2,000,000 (34.0%)  elapsed 16.7m  ETA 00:32:25  fps 678
+[ETA] step  690,000 / 2,000,000 (34.5%)  elapsed 16.9m  ETA 00:32:10  fps 679
+[ETA] step  700,000 / 2,000,000 (35.0%)  elapsed 17.3m  ETA 00:32:02  fps 676
+[ETA] step  710,000 / 2,000,000 (35.5%)  elapsed 17.5m  ETA 00:31:48  fps 676
+[ETA] step  720,000 / 2,000,000 (36.0%)  elapsed 17.7m  ETA 00:31:32  fps 676
+[ETA] step  730,000 / 2,000,000 (36.5%)  elapsed 18.0m  ETA 00:31:16  fps 677
+[ETA] step  740,000 / 2,000,000 (37.0%)  elapsed 18.2m  ETA 00:31:03  fps 676
+[ETA] step  750,000 / 2,000,000 (37.5%)  elapsed 18.5m  ETA 00:30:47  fps 677
+[ETA] step  760,000 / 2,000,000 (38.0%)  elapsed 18.8m  ETA 00:30:42  fps 673
+[ETA] step  770,000 / 2,000,000 (38.5%)  elapsed 19.1m  ETA 00:30:29  fps 672
+[ETA] step  780,000 / 2,000,000 (39.0%)  elapsed 19.3m  ETA 00:30:14  fps 672
+[ETA] step  790,000 / 2,000,000 (39.5%)  elapsed 19.6m  ETA 00:29:59  fps 672
+[ETA] step  800,000 / 2,000,000 (40.0%)  elapsed 19.8m  ETA 00:29:44  fps 672
+[ETA] step  810,000 / 2,000,000 (40.5%)  elapsed 20.1m  ETA 00:29:31  fps 672
+[ETA] step  820,000 / 2,000,000 (41.0%)  elapsed 20.5m  ETA 00:29:27  fps 668
+[ETA] step  830,000 / 2,000,000 (41.5%)  elapsed 20.7m  ETA 00:29:14  fps 667
+[ETA] step  840,000 / 2,000,000 (42.0%)  elapsed 21.0m  ETA 00:29:00  fps 667
+[ETA] step  850,000 / 2,000,000 (42.5%)  elapsed 21.3m  ETA 00:28:47  fps 666
+[ETA] step  860,000 / 2,000,000 (43.0%)  elapsed 21.5m  ETA 00:28:33  fps 665
+[ETA] step  870,000 / 2,000,000 (43.5%)  elapsed 21.8m  ETA 00:28:18  fps 665
+[ETA] step  880,000 / 2,000,000 (44.0%)  elapsed 22.0m  ETA 00:28:02  fps 666
+[ETA] step  890,000 / 2,000,000 (44.5%)  elapsed 22.3m  ETA 00:27:48  fps 665
+[ETA] step  900,000 / 2,000,000 (45.0%)  elapsed 22.6m  ETA 00:27:33  fps 665
+[ETA] step  910,000 / 2,000,000 (45.5%)  elapsed 22.8m  ETA 00:27:20  fps 665
+[ETA] step  920,000 / 2,000,000 (46.0%)  elapsed 23.1m  ETA 00:27:04  fps 665
+[ETA] step  930,000 / 2,000,000 (46.5%)  elapsed 23.3m  ETA 00:26:49  fps 665
+[ETA] step  940,000 / 2,000,000 (47.0%)  elapsed 23.6m  ETA 00:26:34  fps 665
+[ETA] step  950,000 / 2,000,000 (47.5%)  elapsed 23.9m  ETA 00:26:22  fps 664
+[ETA] step  960,000 / 2,000,000 (48.0%)  elapsed 24.1m  ETA 00:26:08  fps 663
+[ETA] step  970,000 / 2,000,000 (48.5%)  elapsed 24.4m  ETA 00:25:53  fps 663
+[ETA] step  980,000 / 2,000,000 (49.0%)  elapsed 24.7m  ETA 00:25:42  fps 661
+[ETA] step  990,000 / 2,000,000 (49.5%)  elapsed 24.9m  ETA 00:25:27  fps 661
+[ETA] step 1,000,000 / 2,000,000 (50.0%)  elapsed 25.2m  ETA 00:25:11  fps 662
+[ETA] step 1,010,000 / 2,000,000 (50.5%)  elapsed 25.4m  ETA 00:24:56  fps 662
+[ETA] step 1,020,000 / 2,000,000 (51.0%)  elapsed 25.7m  ETA 00:24:41  fps 661
+[ETA] step 1,030,000 / 2,000,000 (51.5%)  elapsed 26.0m  ETA 00:24:27  fps 661
+[ETA] step 1,040,000 / 2,000,000 (52.0%)  elapsed 26.2m  ETA 00:24:11  fps 661
+[ETA] step 1,050,000 / 2,000,000 (52.5%)  elapsed 26.5m  ETA 00:23:59  fps 660
+[ETA] step 1,060,000 / 2,000,000 (53.0%)  elapsed 26.8m  ETA 00:23:44  fps 660
+[ETA] step 1,070,000 / 2,000,000 (53.5%)  elapsed 27.0m  ETA 00:23:29  fps 660
+[ETA] step 1,080,000 / 2,000,000 (54.0%)  elapsed 27.3m  ETA 00:23:13  fps 660
+[ETA] step 1,090,000 / 2,000,000 (54.5%)  elapsed 27.5m  ETA 00:22:57  fps 661
+[ETA] step 1,100,000 / 2,000,000 (55.0%)  elapsed 27.7m  ETA 00:22:41  fps 661
+[ETA] step 1,110,000 / 2,000,000 (55.5%)  elapsed 28.0m  ETA 00:22:26  fps 661
+[ETA] step 1,120,000 / 2,000,000 (56.0%)  elapsed 28.4m  ETA 00:22:17  fps 658
+[ETA] step 1,130,000 / 2,000,000 (56.5%)  elapsed 28.6m  ETA 00:22:01  fps 658
+[ETA] step 1,140,000 / 2,000,000 (57.0%)  elapsed 28.9m  ETA 00:21:47  fps 658
+[ETA] step 1,150,000 / 2,000,000 (57.5%)  elapsed 29.2m  ETA 00:21:33  fps 657
+[ETA] step 1,160,000 / 2,000,000 (58.0%)  elapsed 29.4m  ETA 00:21:19  fps 657
+[ETA] step 1,170,000 / 2,000,000 (58.5%)  elapsed 29.7m  ETA 00:21:04  fps 656
+[ETA] step 1,180,000 / 2,000,000 (59.0%)  elapsed 30.1m  ETA 00:20:54  fps 654
+[ETA] step 1,190,000 / 2,000,000 (59.5%)  elapsed 30.4m  ETA 00:20:39  fps 653
+[ETA] step 1,200,000 / 2,000,000 (60.0%)  elapsed 30.7m  ETA 00:20:28  fps 651
+[ETA] step 1,210,000 / 2,000,000 (60.5%)  elapsed 31.0m  ETA 00:20:12  fps 651
+[ETA] step 1,220,000 / 2,000,000 (61.0%)  elapsed 31.2m  ETA 00:19:58  fps 651
+[ETA] step 1,230,000 / 2,000,000 (61.5%)  elapsed 31.6m  ETA 00:19:45  fps 649
+[ETA] step 1,240,000 / 2,000,000 (62.0%)  elapsed 31.8m  ETA 00:19:30  fps 649
+[ETA] step 1,250,000 / 2,000,000 (62.5%)  elapsed 32.1m  ETA 00:19:14  fps 649
+[ETA] step 1,260,000 / 2,000,000 (63.0%)  elapsed 32.4m  ETA 00:19:00  fps 649
+[ETA] step 1,270,000 / 2,000,000 (63.5%)  elapsed 32.6m  ETA 00:18:45  fps 649
+[ETA] step 1,280,000 / 2,000,000 (64.0%)  elapsed 32.9m  ETA 00:18:31  fps 648
+[ETA] step 1,290,000 / 2,000,000 (64.5%)  elapsed 33.2m  ETA 00:18:16  fps 647
+[ETA] step 1,300,000 / 2,000,000 (65.0%)  elapsed 33.5m  ETA 00:18:01  fps 647
+[ETA] step 1,310,000 / 2,000,000 (65.5%)  elapsed 33.8m  ETA 00:17:46  fps 647
+[ETA] step 1,320,000 / 2,000,000 (66.0%)  elapsed 34.1m  ETA 00:17:32  fps 646
+[ETA] step 1,330,000 / 2,000,000 (66.5%)  elapsed 34.3m  ETA 00:17:18  fps 645
+[ETA] step 1,340,000 / 2,000,000 (67.0%)  elapsed 34.6m  ETA 00:17:03  fps 645
+[ETA] step 1,350,000 / 2,000,000 (67.5%)  elapsed 34.9m  ETA 00:16:48  fps 644
+[ETA] step 1,360,000 / 2,000,000 (68.0%)  elapsed 35.2m  ETA 00:16:33  fps 644
+[ETA] step 1,370,000 / 2,000,000 (68.5%)  elapsed 35.5m  ETA 00:16:18  fps 644
+[ETA] step 1,380,000 / 2,000,000 (69.0%)  elapsed 35.8m  ETA 00:16:04  fps 643
+[ETA] step 1,390,000 / 2,000,000 (69.5%)  elapsed 36.0m  ETA 00:15:48  fps 643
+[ETA] step 1,400,000 / 2,000,000 (70.0%)  elapsed 36.3m  ETA 00:15:32  fps 643
+[ETA] step 1,410,000 / 2,000,000 (70.5%)  elapsed 36.5m  ETA 00:15:17  fps 643
+[ETA] step 1,420,000 / 2,000,000 (71.0%)  elapsed 36.8m  ETA 00:15:01  fps 644
+[ETA] step 1,430,000 / 2,000,000 (71.5%)  elapsed 37.1m  ETA 00:14:47  fps 642
+[ETA] step 1,440,000 / 2,000,000 (72.0%)  elapsed 37.4m  ETA 00:14:32  fps 642
+[ETA] step 1,450,000 / 2,000,000 (72.5%)  elapsed 37.6m  ETA 00:14:16  fps 642
+[ETA] step 1,460,000 / 2,000,000 (73.0%)  elapsed 37.9m  ETA 00:14:01  fps 642
+[ETA] step 1,470,000 / 2,000,000 (73.5%)  elapsed 38.2m  ETA 00:13:46  fps 642
+[ETA] step 1,480,000 / 2,000,000 (74.0%)  elapsed 38.5m  ETA 00:13:32  fps 640
+[ETA] step 1,490,000 / 2,000,000 (74.5%)  elapsed 38.8m  ETA 00:13:16  fps 640
+[ETA] step 1,500,000 / 2,000,000 (75.0%)  elapsed 39.0m  ETA 00:13:00  fps 640
+[ETA] step 1,510,000 / 2,000,000 (75.5%)  elapsed 39.3m  ETA 00:12:44  fps 641
+[ETA] step 1,520,000 / 2,000,000 (76.0%)  elapsed 39.6m  ETA 00:12:29  fps 641
+[ETA] step 1,530,000 / 2,000,000 (76.5%)  elapsed 39.8m  ETA 00:12:13  fps 641
+[ETA] step 1,540,000 / 2,000,000 (77.0%)  elapsed 40.1m  ETA 00:11:58  fps 640
+[ETA] step 1,550,000 / 2,000,000 (77.5%)  elapsed 40.4m  ETA 00:11:44  fps 639
+[ETA] step 1,560,000 / 2,000,000 (78.0%)  elapsed 40.7m  ETA 00:11:28  fps 639
+[ETA] step 1,570,000 / 2,000,000 (78.5%)  elapsed 41.0m  ETA 00:11:13  fps 638
+[ETA] step 1,580,000 / 2,000,000 (79.0%)  elapsed 41.3m  ETA 00:10:58  fps 638
+[ETA] step 1,590,000 / 2,000,000 (79.5%)  elapsed 41.5m  ETA 00:10:42  fps 638
+[ETA] step 1,600,000 / 2,000,000 (80.0%)  elapsed 42.0m  ETA 00:10:29  fps 636
+[ETA] step 1,610,000 / 2,000,000 (80.5%)  elapsed 42.2m  ETA 00:10:13  fps 636
+[ETA] step 1,620,000 / 2,000,000 (81.0%)  elapsed 42.5m  ETA 00:09:57  fps 636
+[ETA] step 1,630,000 / 2,000,000 (81.5%)  elapsed 42.8m  ETA 00:09:42  fps 635
+[ETA] step 1,640,000 / 2,000,000 (82.0%)  elapsed 43.0m  ETA 00:09:26  fps 635
+[ETA] step 1,650,000 / 2,000,000 (82.5%)  elapsed 43.3m  ETA 00:09:10  fps 635
+[ETA] step 1,660,000 / 2,000,000 (83.0%)  elapsed 43.6m  ETA 00:08:55  fps 635
+[ETA] step 1,670,000 / 2,000,000 (83.5%)  elapsed 43.8m  ETA 00:08:39  fps 635
+[ETA] step 1,680,000 / 2,000,000 (84.0%)  elapsed 44.1m  ETA 00:08:23  fps 635
+[ETA] step 1,690,000 / 2,000,000 (84.5%)  elapsed 44.3m  ETA 00:08:07  fps 636
+[ETA] step 1,700,000 / 2,000,000 (85.0%)  elapsed 44.6m  ETA 00:07:51  fps 636
+[ETA] step 1,710,000 / 2,000,000 (85.5%)  elapsed 44.8m  ETA 00:07:36  fps 636
+[ETA] step 1,720,000 / 2,000,000 (86.0%)  elapsed 45.1m  ETA 00:07:20  fps 636
+[ETA] step 1,730,000 / 2,000,000 (86.5%)  elapsed 45.4m  ETA 00:07:05  fps 635
+[ETA] step 1,740,000 / 2,000,000 (87.0%)  elapsed 45.8m  ETA 00:06:50  fps 633
+[ETA] step 1,750,000 / 2,000,000 (87.5%)  elapsed 46.1m  ETA 00:06:35  fps 632
+[ETA] step 1,760,000 / 2,000,000 (88.0%)  elapsed 46.4m  ETA 00:06:19  fps 632
+[ETA] step 1,770,000 / 2,000,000 (88.5%)  elapsed 46.7m  ETA 00:06:04  fps 632
+[ETA] step 1,780,000 / 2,000,000 (89.0%)  elapsed 47.0m  ETA 00:05:48  fps 631
+[ETA] step 1,790,000 / 2,000,000 (89.5%)  elapsed 47.2m  ETA 00:05:32  fps 631
+[ETA] step 1,800,000 / 2,000,000 (90.0%)  elapsed 47.5m  ETA 00:05:16  fps 631
+[ETA] step 1,810,000 / 2,000,000 (90.5%)  elapsed 48.0m  ETA 00:05:02  fps 629
+[ETA] step 1,820,000 / 2,000,000 (91.0%)  elapsed 48.2m  ETA 00:04:46  fps 629
+[ETA] step 1,830,000 / 2,000,000 (91.5%)  elapsed 48.5m  ETA 00:04:30  fps 629
+[ETA] step 1,840,000 / 2,000,000 (92.0%)  elapsed 48.8m  ETA 00:04:14  fps 629
+[ETA] step 1,850,000 / 2,000,000 (92.5%)  elapsed 49.0m  ETA 00:03:58  fps 629
+[ETA] step 1,860,000 / 2,000,000 (93.0%)  elapsed 49.3m  ETA 00:03:42  fps 629
+[ETA] step 1,870,000 / 2,000,000 (93.5%)  elapsed 49.6m  ETA 00:03:26  fps 629
+  ERROR in SAC seed=42: 
+
+--------------------------------------------------------
+  [4/9]  TQC  seed=0
+  19:59:40
+--------------------------------------------------------
+
+=======================================================
+  billiards-rl — TQC  |  2,000,000 steps  |  seed 0  |  env multi3(ms=3)
+  exp_dir : logs/experiments/TQC_2000k_s0_multi3_ms3_sp0.1_tp1.0_20260302_195940
+=======================================================
+
+[1/3] Random agent baseline (500 episodes)...
+      Random pocket rate: 9.2%  (avg 0.28/3 balls)
+
+[2/3] Training TQC — 2,000,000 steps × 10 envs ...
+/Users/yj/Documents/billiards-rl/.venv/lib/python3.13/site-packages/stable_baselines3/common/callbacks.py:418: UserWarning: Training and eval env are not of the same type<stable_baselines3.common.vec_env.subproc_vec_env.SubprocVecEnv object at 0x112e93100> != <stable_baselines3.common.vec_env.dummy_vec_env.DummyVecEnv object at 0x1151ae8b0>
+  warnings.warn("Training and eval env are not of the same type" f"{self.training_env} != {self.eval_env}")
+[ETA] step   10,000 / 2,000,000 (0.5%)  elapsed 0.2m  ETA 00:42:18  fps 784
+[ETA] step   20,000 / 2,000,000 (1.0%)  elapsed 0.5m  ETA 00:47:25  fps 696
+[ETA] step   30,000 / 2,000,000 (1.5%)  elapsed 0.8m  ETA 00:49:26  fps 664
+[ETA] step   40,000 / 2,000,000 (2.0%)  elapsed 1.0m  ETA 00:49:08  fps 665
+[ETA] step   50,000 / 2,000,000 (2.5%)  elapsed 1.3m  ETA 00:48:56  fps 664
+[ETA] step   60,000 / 2,000,000 (3.0%)  elapsed 1.5m  ETA 00:48:38  fps 665
+[ETA] step   70,000 / 2,000,000 (3.5%)  elapsed 1.7m  ETA 00:47:53  fps 672
+[ETA] step   80,000 / 2,000,000 (4.0%)  elapsed 2.0m  ETA 00:46:54  fps 682
+[ETA] step   90,000 / 2,000,000 (4.5%)  elapsed 2.2m  ETA 00:45:54  fps 693
+[ETA] step  100,000 / 2,000,000 (5.0%)  elapsed 2.4m  ETA 00:44:55  fps 705
+[ETA] step  110,000 / 2,000,000 (5.5%)  elapsed 2.6m  ETA 00:43:59  fps 716
+[ETA] step  120,000 / 2,000,000 (6.0%)  elapsed 2.8m  ETA 00:43:07  fps 727
+[ETA] step  130,000 / 2,000,000 (6.5%)  elapsed 2.9m  ETA 00:42:18  fps 737
+[ETA] step  140,000 / 2,000,000 (7.0%)  elapsed 3.1m  ETA 00:41:33  fps 746
+[ETA] step  150,000 / 2,000,000 (7.5%)  elapsed 3.3m  ETA 00:40:54  fps 754
+[ETA] step  160,000 / 2,000,000 (8.0%)  elapsed 3.5m  ETA 00:40:19  fps 760
+[ETA] step  170,000 / 2,000,000 (8.5%)  elapsed 3.7m  ETA 00:39:50  fps 766
+[ETA] step  180,000 / 2,000,000 (9.0%)  elapsed 3.9m  ETA 00:39:19  fps 771
+[ETA] step  190,000 / 2,000,000 (9.5%)  elapsed 4.1m  ETA 00:38:51  fps 776
+[ETA] step  200,000 / 2,000,000 (10.0%)  elapsed 4.3m  ETA 00:38:24  fps 781
+[ETA] step  210,000 / 2,000,000 (10.5%)  elapsed 4.5m  ETA 00:37:59  fps 785
+[ETA] step  220,000 / 2,000,000 (11.0%)  elapsed 4.6m  ETA 00:37:35  fps 789
+[ETA] step  230,000 / 2,000,000 (11.5%)  elapsed 4.8m  ETA 00:37:13  fps 793
+[ETA] step  240,000 / 2,000,000 (12.0%)  elapsed 5.0m  ETA 00:36:51  fps 796
+[ETA] step  250,000 / 2,000,000 (12.5%)  elapsed 5.2m  ETA 00:36:30  fps 799
+[ETA] step  260,000 / 2,000,000 (13.0%)  elapsed 5.4m  ETA 00:36:20  fps 798
+[ETA] step  270,000 / 2,000,000 (13.5%)  elapsed 5.6m  ETA 00:36:10  fps 797
+[ETA] step  280,000 / 2,000,000 (14.0%)  elapsed 5.9m  ETA 00:35:57  fps 797
+[ETA] step  290,000 / 2,000,000 (14.5%)  elapsed 6.0m  ETA 00:35:38  fps 800
+[ETA] step  300,000 / 2,000,000 (15.0%)  elapsed 6.2m  ETA 00:35:19  fps 802
+[ETA] step  310,000 / 2,000,000 (15.5%)  elapsed 6.4m  ETA 00:35:01  fps 804
+[ETA] step  320,000 / 2,000,000 (16.0%)  elapsed 6.6m  ETA 00:34:43  fps 806
+[ETA] step  330,000 / 2,000,000 (16.5%)  elapsed 6.8m  ETA 00:34:25  fps 808
+[ETA] step  340,000 / 2,000,000 (17.0%)  elapsed 7.0m  ETA 00:34:08  fps 810
+[ETA] step  350,000 / 2,000,000 (17.5%)  elapsed 7.2m  ETA 00:33:52  fps 812
+[ETA] step  360,000 / 2,000,000 (18.0%)  elapsed 7.4m  ETA 00:33:35  fps 814
+[ETA] step  370,000 / 2,000,000 (18.5%)  elapsed 7.6m  ETA 00:33:19  fps 815
+[ETA] step  380,000 / 2,000,000 (19.0%)  elapsed 7.8m  ETA 00:33:03  fps 817
+[ETA] step  390,000 / 2,000,000 (19.5%)  elapsed 7.9m  ETA 00:32:47  fps 818
+[ETA] step  400,000 / 2,000,000 (20.0%)  elapsed 8.1m  ETA 00:32:32  fps 820
+[ETA] step  410,000 / 2,000,000 (20.5%)  elapsed 8.3m  ETA 00:32:16  fps 821
+[ETA] step  420,000 / 2,000,000 (21.0%)  elapsed 8.5m  ETA 00:32:01  fps 822
+[ETA] step  430,000 / 2,000,000 (21.5%)  elapsed 8.7m  ETA 00:31:46  fps 824
+[ETA] step  440,000 / 2,000,000 (22.0%)  elapsed 8.9m  ETA 00:31:31  fps 825
+[ETA] step  450,000 / 2,000,000 (22.5%)  elapsed 9.1m  ETA 00:31:16  fps 826
+[ETA] step  460,000 / 2,000,000 (23.0%)  elapsed 9.3m  ETA 00:31:02  fps 827
+[ETA] step  470,000 / 2,000,000 (23.5%)  elapsed 9.5m  ETA 00:30:47  fps 828
+[ETA] step  480,000 / 2,000,000 (24.0%)  elapsed 9.7m  ETA 00:30:33  fps 829
+[ETA] step  490,000 / 2,000,000 (24.5%)  elapsed 9.8m  ETA 00:30:19  fps 830
+[ETA] step  500,000 / 2,000,000 (25.0%)  elapsed 10.0m  ETA 00:30:05  fps 831
+[ETA] step  510,000 / 2,000,000 (25.5%)  elapsed 10.2m  ETA 00:29:51  fps 832
+[ETA] step  520,000 / 2,000,000 (26.0%)  elapsed 10.4m  ETA 00:29:37  fps 833
+[ETA] step  530,000 / 2,000,000 (26.5%)  elapsed 10.6m  ETA 00:29:24  fps 833
+[ETA] step  540,000 / 2,000,000 (27.0%)  elapsed 10.8m  ETA 00:29:13  fps 833
+[ETA] step  550,000 / 2,000,000 (27.5%)  elapsed 11.0m  ETA 00:29:04  fps 831
+[ETA] step  560,000 / 2,000,000 (28.0%)  elapsed 11.2m  ETA 00:28:55  fps 830
+[ETA] step  570,000 / 2,000,000 (28.5%)  elapsed 11.5m  ETA 00:28:45  fps 829
+[ETA] step  580,000 / 2,000,000 (29.0%)  elapsed 11.7m  ETA 00:28:31  fps 830
+[ETA] step  590,000 / 2,000,000 (29.5%)  elapsed 11.8m  ETA 00:28:18  fps 830
+[ETA] step  600,000 / 2,000,000 (30.0%)  elapsed 12.0m  ETA 00:28:04  fps 831
+[ETA] step  610,000 / 2,000,000 (30.5%)  elapsed 12.2m  ETA 00:27:51  fps 832
+[ETA] step  620,000 / 2,000,000 (31.0%)  elapsed 12.4m  ETA 00:27:38  fps 832
+[ETA] step  630,000 / 2,000,000 (31.5%)  elapsed 12.6m  ETA 00:27:25  fps 833
+[ETA] step  640,000 / 2,000,000 (32.0%)  elapsed 12.8m  ETA 00:27:12  fps 833
+[ETA] step  650,000 / 2,000,000 (32.5%)  elapsed 13.0m  ETA 00:26:59  fps 834
+[ETA] step  660,000 / 2,000,000 (33.0%)  elapsed 13.2m  ETA 00:26:46  fps 834
+[ETA] step  670,000 / 2,000,000 (33.5%)  elapsed 13.4m  ETA 00:26:33  fps 835
+[ETA] step  680,000 / 2,000,000 (34.0%)  elapsed 13.6m  ETA 00:26:20  fps 835
+[ETA] step  690,000 / 2,000,000 (34.5%)  elapsed 13.8m  ETA 00:26:08  fps 835
+[ETA] step  700,000 / 2,000,000 (35.0%)  elapsed 14.0m  ETA 00:25:56  fps 835
+[ETA] step  710,000 / 2,000,000 (35.5%)  elapsed 14.2m  ETA 00:25:44  fps 835
+[ETA] step  720,000 / 2,000,000 (36.0%)  elapsed 14.4m  ETA 00:25:31  fps 836
+[ETA] step  730,000 / 2,000,000 (36.5%)  elapsed 14.6m  ETA 00:25:19  fps 836
+[ETA] step  740,000 / 2,000,000 (37.0%)  elapsed 14.8m  ETA 00:25:07  fps 836
+[ETA] step  750,000 / 2,000,000 (37.5%)  elapsed 15.0m  ETA 00:24:55  fps 836
+[ETA] step  760,000 / 2,000,000 (38.0%)  elapsed 15.2m  ETA 00:24:43  fps 836
+[ETA] step  770,000 / 2,000,000 (38.5%)  elapsed 15.4m  ETA 00:24:31  fps 836
+[ETA] step  780,000 / 2,000,000 (39.0%)  elapsed 15.5m  ETA 00:24:19  fps 836
+[ETA] step  790,000 / 2,000,000 (39.5%)  elapsed 15.7m  ETA 00:24:06  fps 836
+[ETA] step  800,000 / 2,000,000 (40.0%)  elapsed 15.9m  ETA 00:23:54  fps 837
+[ETA] step  810,000 / 2,000,000 (40.5%)  elapsed 16.1m  ETA 00:23:41  fps 837
+[ETA] step  820,000 / 2,000,000 (41.0%)  elapsed 16.3m  ETA 00:23:29  fps 837
+[ETA] step  830,000 / 2,000,000 (41.5%)  elapsed 16.5m  ETA 00:23:17  fps 837
+[ETA] step  840,000 / 2,000,000 (42.0%)  elapsed 16.7m  ETA 00:23:04  fps 838
+[ETA] step  850,000 / 2,000,000 (42.5%)  elapsed 16.9m  ETA 00:22:52  fps 838
+[ETA] step  860,000 / 2,000,000 (43.0%)  elapsed 17.1m  ETA 00:22:39  fps 838
+[ETA] step  870,000 / 2,000,000 (43.5%)  elapsed 17.3m  ETA 00:22:27  fps 838
+[ETA] step  880,000 / 2,000,000 (44.0%)  elapsed 17.5m  ETA 00:22:15  fps 839
+[ETA] step  890,000 / 2,000,000 (44.5%)  elapsed 17.7m  ETA 00:22:04  fps 838
+[ETA] step  900,000 / 2,000,000 (45.0%)  elapsed 17.9m  ETA 00:21:53  fps 838
+[ETA] step  910,000 / 2,000,000 (45.5%)  elapsed 18.1m  ETA 00:21:40  fps 838
+[ETA] step  920,000 / 2,000,000 (46.0%)  elapsed 18.3m  ETA 00:21:29  fps 838
+[ETA] step  930,000 / 2,000,000 (46.5%)  elapsed 18.5m  ETA 00:21:18  fps 837
+[ETA] step  940,000 / 2,000,000 (47.0%)  elapsed 18.7m  ETA 00:21:05  fps 838
+[ETA] step  950,000 / 2,000,000 (47.5%)  elapsed 18.9m  ETA 00:20:54  fps 837
+[ETA] step  960,000 / 2,000,000 (48.0%)  elapsed 19.1m  ETA 00:20:42  fps 837
+[ETA] step  970,000 / 2,000,000 (48.5%)  elapsed 19.3m  ETA 00:20:29  fps 838
+[ETA] step  980,000 / 2,000,000 (49.0%)  elapsed 19.5m  ETA 00:20:17  fps 838
+[ETA] step  990,000 / 2,000,000 (49.5%)  elapsed 19.7m  ETA 00:20:05  fps 838
+[ETA] step 1,000,000 / 2,000,000 (50.0%)  elapsed 19.9m  ETA 00:19:52  fps 838
+[ETA] step 1,010,000 / 2,000,000 (50.5%)  elapsed 20.1m  ETA 00:19:40  fps 839
+[ETA] step 1,020,000 / 2,000,000 (51.0%)  elapsed 20.3m  ETA 00:19:27  fps 839
+[ETA] step 1,030,000 / 2,000,000 (51.5%)  elapsed 20.4m  ETA 00:19:15  fps 839
+[ETA] step 1,040,000 / 2,000,000 (52.0%)  elapsed 20.6m  ETA 00:19:03  fps 840
+[ETA] step 1,050,000 / 2,000,000 (52.5%)  elapsed 20.8m  ETA 00:18:50  fps 840
+[ETA] step 1,060,000 / 2,000,000 (53.0%)  elapsed 21.0m  ETA 00:18:38  fps 840
+[ETA] step 1,070,000 / 2,000,000 (53.5%)  elapsed 21.2m  ETA 00:18:26  fps 841
+[ETA] step 1,080,000 / 2,000,000 (54.0%)  elapsed 21.4m  ETA 00:18:13  fps 841
+[ETA] step 1,090,000 / 2,000,000 (54.5%)  elapsed 21.6m  ETA 00:18:01  fps 841
+[ETA] step 1,100,000 / 2,000,000 (55.0%)  elapsed 21.8m  ETA 00:17:49  fps 842
+[ETA] step 1,110,000 / 2,000,000 (55.5%)  elapsed 22.0m  ETA 00:17:37  fps 842
+[ETA] step 1,120,000 / 2,000,000 (56.0%)  elapsed 22.2m  ETA 00:17:24  fps 842
+[ETA] step 1,130,000 / 2,000,000 (56.5%)  elapsed 22.4m  ETA 00:17:12  fps 842
+[ETA] step 1,140,000 / 2,000,000 (57.0%)  elapsed 22.5m  ETA 00:17:00  fps 843
+[ETA] step 1,150,000 / 2,000,000 (57.5%)  elapsed 22.7m  ETA 00:16:48  fps 843
+[ETA] step 1,160,000 / 2,000,000 (58.0%)  elapsed 22.9m  ETA 00:16:36  fps 843
+[ETA] step 1,170,000 / 2,000,000 (58.5%)  elapsed 23.1m  ETA 00:16:24  fps 843
+[ETA] step 1,180,000 / 2,000,000 (59.0%)  elapsed 23.3m  ETA 00:16:12  fps 844
+[ETA] step 1,190,000 / 2,000,000 (59.5%)  elapsed 23.5m  ETA 00:15:59  fps 844
+[ETA] step 1,200,000 / 2,000,000 (60.0%)  elapsed 23.7m  ETA 00:15:47  fps 844
+[ETA] step 1,210,000 / 2,000,000 (60.5%)  elapsed 23.9m  ETA 00:15:35  fps 844
+[ETA] step 1,220,000 / 2,000,000 (61.0%)  elapsed 24.1m  ETA 00:15:23  fps 844
+[ETA] step 1,230,000 / 2,000,000 (61.5%)  elapsed 24.3m  ETA 00:15:11  fps 845
+[ETA] step 1,240,000 / 2,000,000 (62.0%)  elapsed 24.5m  ETA 00:14:59  fps 845
+[ETA] step 1,250,000 / 2,000,000 (62.5%)  elapsed 24.7m  ETA 00:14:47  fps 845
+[ETA] step 1,260,000 / 2,000,000 (63.0%)  elapsed 24.8m  ETA 00:14:35  fps 845
+[ETA] step 1,270,000 / 2,000,000 (63.5%)  elapsed 25.0m  ETA 00:14:23  fps 845
+[ETA] step 1,280,000 / 2,000,000 (64.0%)  elapsed 25.2m  ETA 00:14:11  fps 846
+[ETA] step 1,290,000 / 2,000,000 (64.5%)  elapsed 25.4m  ETA 00:13:59  fps 846
+[ETA] step 1,300,000 / 2,000,000 (65.0%)  elapsed 25.6m  ETA 00:13:47  fps 846
+[ETA] step 1,310,000 / 2,000,000 (65.5%)  elapsed 25.8m  ETA 00:13:35  fps 846
+[ETA] step 1,320,000 / 2,000,000 (66.0%)  elapsed 26.0m  ETA 00:13:23  fps 846
+[ETA] step 1,330,000 / 2,000,000 (66.5%)  elapsed 26.2m  ETA 00:13:11  fps 846
+[ETA] step 1,340,000 / 2,000,000 (67.0%)  elapsed 26.4m  ETA 00:12:59  fps 847
+[ETA] step 1,350,000 / 2,000,000 (67.5%)  elapsed 26.6m  ETA 00:12:47  fps 847
+[ETA] step 1,360,000 / 2,000,000 (68.0%)  elapsed 26.8m  ETA 00:12:36  fps 846
+[ETA] step 1,370,000 / 2,000,000 (68.5%)  elapsed 27.0m  ETA 00:12:24  fps 846
+[ETA] step 1,380,000 / 2,000,000 (69.0%)  elapsed 27.2m  ETA 00:12:13  fps 846
+[ETA] step 1,390,000 / 2,000,000 (69.5%)  elapsed 27.4m  ETA 00:12:01  fps 846
+[ETA] step 1,400,000 / 2,000,000 (70.0%)  elapsed 27.6m  ETA 00:11:48  fps 846
+[ETA] step 1,410,000 / 2,000,000 (70.5%)  elapsed 27.8m  ETA 00:11:36  fps 847
+[ETA] step 1,420,000 / 2,000,000 (71.0%)  elapsed 28.0m  ETA 00:11:25  fps 846
+[ETA] step 1,430,000 / 2,000,000 (71.5%)  elapsed 28.2m  ETA 00:11:13  fps 846
+[ETA] step 1,440,000 / 2,000,000 (72.0%)  elapsed 28.4m  ETA 00:11:02  fps 846
+[ETA] step 1,450,000 / 2,000,000 (72.5%)  elapsed 28.6m  ETA 00:10:51  fps 844
+[ETA] step 1,460,000 / 2,000,000 (73.0%)  elapsed 28.8m  ETA 00:10:40  fps 844
+[ETA] step 1,470,000 / 2,000,000 (73.5%)  elapsed 29.0m  ETA 00:10:28  fps 844
+[ETA] step 1,480,000 / 2,000,000 (74.0%)  elapsed 29.2m  ETA 00:10:16  fps 844
+[ETA] step 1,490,000 / 2,000,000 (74.5%)  elapsed 29.4m  ETA 00:10:04  fps 844
+[ETA] step 1,500,000 / 2,000,000 (75.0%)  elapsed 29.6m  ETA 00:09:52  fps 844
+[ETA] step 1,510,000 / 2,000,000 (75.5%)  elapsed 29.8m  ETA 00:09:40  fps 844
+[ETA] step 1,520,000 / 2,000,000 (76.0%)  elapsed 30.0m  ETA 00:09:28  fps 844
+[ETA] step 1,530,000 / 2,000,000 (76.5%)  elapsed 30.2m  ETA 00:09:16  fps 844
+[ETA] step 1,540,000 / 2,000,000 (77.0%)  elapsed 30.4m  ETA 00:09:05  fps 844
+[ETA] step 1,550,000 / 2,000,000 (77.5%)  elapsed 30.6m  ETA 00:08:53  fps 844
+[ETA] step 1,560,000 / 2,000,000 (78.0%)  elapsed 30.8m  ETA 00:08:41  fps 844
+[ETA] step 1,570,000 / 2,000,000 (78.5%)  elapsed 31.0m  ETA 00:08:29  fps 844
+[ETA] step 1,580,000 / 2,000,000 (79.0%)  elapsed 31.2m  ETA 00:08:17  fps 843
+[ETA] step 1,590,000 / 2,000,000 (79.5%)  elapsed 31.4m  ETA 00:08:06  fps 843
+[ETA] step 1,600,000 / 2,000,000 (80.0%)  elapsed 31.6m  ETA 00:07:54  fps 843
+[ETA] step 1,610,000 / 2,000,000 (80.5%)  elapsed 31.9m  ETA 00:07:43  fps 842
+[ETA] step 1,620,000 / 2,000,000 (81.0%)  elapsed 32.1m  ETA 00:07:31  fps 842
+[ETA] step 1,630,000 / 2,000,000 (81.5%)  elapsed 32.3m  ETA 00:07:19  fps 841
+[ETA] step 1,640,000 / 2,000,000 (82.0%)  elapsed 32.5m  ETA 00:07:08  fps 840
+[ETA] step 1,650,000 / 2,000,000 (82.5%)  elapsed 32.8m  ETA 00:06:57  fps 839
+[ETA] step 1,660,000 / 2,000,000 (83.0%)  elapsed 33.0m  ETA 00:06:45  fps 838
+[ETA] step 1,670,000 / 2,000,000 (83.5%)  elapsed 33.2m  ETA 00:06:33  fps 838
+[ETA] step 1,680,000 / 2,000,000 (84.0%)  elapsed 33.4m  ETA 00:06:22  fps 837
+[ETA] step 1,690,000 / 2,000,000 (84.5%)  elapsed 33.7m  ETA 00:06:10  fps 837
+[ETA] step 1,700,000 / 2,000,000 (85.0%)  elapsed 33.9m  ETA 00:05:58  fps 837
+[ETA] step 1,710,000 / 2,000,000 (85.5%)  elapsed 34.1m  ETA 00:05:46  fps 836
+[ETA] step 1,720,000 / 2,000,000 (86.0%)  elapsed 34.3m  ETA 00:05:34  fps 836
+[ETA] step 1,730,000 / 2,000,000 (86.5%)  elapsed 34.5m  ETA 00:05:23  fps 835
+[ETA] step 1,740,000 / 2,000,000 (87.0%)  elapsed 34.8m  ETA 00:05:11  fps 834
+[ETA] step 1,750,000 / 2,000,000 (87.5%)  elapsed 35.0m  ETA 00:04:59  fps 833
+[ETA] step 1,760,000 / 2,000,000 (88.0%)  elapsed 35.2m  ETA 00:04:48  fps 833
+[ETA] step 1,770,000 / 2,000,000 (88.5%)  elapsed 35.4m  ETA 00:04:36  fps 832
+[ETA] step 1,780,000 / 2,000,000 (89.0%)  elapsed 35.7m  ETA 00:04:24  fps 831
+[ETA] step 1,790,000 / 2,000,000 (89.5%)  elapsed 35.9m  ETA 00:04:12  fps 831
+[ETA] step 1,800,000 / 2,000,000 (90.0%)  elapsed 36.1m  ETA 00:04:00  fps 831
+[ETA] step 1,810,000 / 2,000,000 (90.5%)  elapsed 36.3m  ETA 00:03:48  fps 830
+[ETA] step 1,820,000 / 2,000,000 (91.0%)  elapsed 36.6m  ETA 00:03:36  fps 830
+[ETA] step 1,830,000 / 2,000,000 (91.5%)  elapsed 36.8m  ETA 00:03:24  fps 830
+[ETA] step 1,840,000 / 2,000,000 (92.0%)  elapsed 37.0m  ETA 00:03:12  fps 830
+[ETA] step 1,850,000 / 2,000,000 (92.5%)  elapsed 37.2m  ETA 00:03:00  fps 830
+[ETA] step 1,860,000 / 2,000,000 (93.0%)  elapsed 37.4m  ETA 00:02:48  fps 829
+[ETA] step 1,870,000 / 2,000,000 (93.5%)  elapsed 37.6m  ETA 00:02:36  fps 829
+[ETA] step 1,880,000 / 2,000,000 (94.0%)  elapsed 37.8m  ETA 00:02:24  fps 829
+[ETA] step 1,890,000 / 2,000,000 (94.5%)  elapsed 38.0m  ETA 00:02:12  fps 828
+[ETA] step 1,900,000 / 2,000,000 (95.0%)  elapsed 38.2m  ETA 00:02:00  fps 828
+[ETA] step 1,910,000 / 2,000,000 (95.5%)  elapsed 38.5m  ETA 00:01:48  fps 828
+[ETA] step 1,920,000 / 2,000,000 (96.0%)  elapsed 38.7m  ETA 00:01:36  fps 827
+[ETA] step 1,930,000 / 2,000,000 (96.5%)  elapsed 38.9m  ETA 00:01:24  fps 827
+[ETA] step 1,940,000 / 2,000,000 (97.0%)  elapsed 39.1m  ETA 00:01:12  fps 826
+[ETA] step 1,950,000 / 2,000,000 (97.5%)  elapsed 39.3m  ETA 00:01:00  fps 826
+[ETA] step 1,960,000 / 2,000,000 (98.0%)  elapsed 39.5m  ETA 00:00:48  fps 826
+[ETA] step 1,970,000 / 2,000,000 (98.5%)  elapsed 39.7m  ETA 00:00:36  fps 826
+[ETA] step 1,980,000 / 2,000,000 (99.0%)  elapsed 40.0m  ETA 00:00:24  fps 825
+[ETA] step 1,990,000 / 2,000,000 (99.5%)  elapsed 40.2m  ETA 00:00:12  fps 825
+[ETA] step 2,000,000 / 2,000,000 (100.0%)  elapsed 40.4m  ETA 00:00:00  fps 825
+
+[3/3] Evaluating best TQC checkpoint (500 episodes)...
+
+  ─────────────────────────────────────────────
+  TQC pocket rate  : 24.6%
+  Clear rate (all 3): 2.2%
+  Random            : 9.2%
+  Improvement       : +15.4pp
+  Training time     : 40.4 min  (825 fps)
+  Saved → logs/experiments/TQC_2000k_s0_multi3_ms3_sp0.1_tp1.0_20260302_195940
+  TensorBoard → tensorboard --logdir logs/tensorboard
+  -> saved: logs/experiments/TQC_2000k_s0_multi3_ms3_sp0.1_tp1.0_20260302_195940
+
+--------------------------------------------------------
+  [5/9]  TQC  seed=1
+  20:40:14
+--------------------------------------------------------
+
+=======================================================
+  billiards-rl — TQC  |  2,000,000 steps  |  seed 1  |  env multi3(ms=3)
+  exp_dir : logs/experiments/TQC_2000k_s1_multi3_ms3_sp0.1_tp1.0_20260302_204014
+=======================================================
+
+[1/3] Random agent baseline (500 episodes)...
+      Random pocket rate: 9.9%  (avg 0.30/3 balls)
+
+[2/3] Training TQC — 2,000,000 steps × 10 envs ...
+/Users/yj/Documents/billiards-rl/.venv/lib/python3.13/site-packages/stable_baselines3/common/callbacks.py:418: UserWarning: Training and eval env are not of the same type<stable_baselines3.common.vec_env.subproc_vec_env.SubprocVecEnv object at 0x12b1f2c40> != <stable_baselines3.common.vec_env.dummy_vec_env.DummyVecEnv object at 0x12b1f3ce0>
+  warnings.warn("Training and eval env are not of the same type" f"{self.training_env} != {self.eval_env}")
+[ETA] step   10,000 / 2,000,000 (0.5%)  elapsed 0.2m  ETA 00:46:54  fps 707
+[ETA] step   20,000 / 2,000,000 (1.0%)  elapsed 0.5m  ETA 00:51:51  fps 636
+[ETA] step   30,000 / 2,000,000 (1.5%)  elapsed 0.8m  ETA 00:51:52  fps 633
+[ETA] step   40,000 / 2,000,000 (2.0%)  elapsed 1.0m  ETA 00:51:16  fps 637
+[ETA] step   50,000 / 2,000,000 (2.5%)  elapsed 1.3m  ETA 00:50:30  fps 644
+[ETA] step   60,000 / 2,000,000 (3.0%)  elapsed 1.5m  ETA 00:49:34  fps 652
+[ETA] step   70,000 / 2,000,000 (3.5%)  elapsed 1.8m  ETA 00:48:37  fps 661
+[ETA] step   80,000 / 2,000,000 (4.0%)  elapsed 2.0m  ETA 00:47:45  fps 670
+[ETA] step   90,000 / 2,000,000 (4.5%)  elapsed 2.2m  ETA 00:46:58  fps 678
+[ETA] step  100,000 / 2,000,000 (5.0%)  elapsed 2.4m  ETA 00:46:09  fps 686
+[ETA] step  110,000 / 2,000,000 (5.5%)  elapsed 2.7m  ETA 00:45:34  fps 691
+[ETA] step  120,000 / 2,000,000 (6.0%)  elapsed 2.9m  ETA 00:45:07  fps 694
+[ETA] step  130,000 / 2,000,000 (6.5%)  elapsed 3.1m  ETA 00:44:27  fps 701
+[ETA] step  140,000 / 2,000,000 (7.0%)  elapsed 3.3m  ETA 00:43:32  fps 712
+[ETA] step  150,000 / 2,000,000 (7.5%)  elapsed 3.5m  ETA 00:43:39  fps 706
+[ETA] step  160,000 / 2,000,000 (8.0%)  elapsed 3.7m  ETA 00:43:06  fps 711
+[ETA] step  170,000 / 2,000,000 (8.5%)  elapsed 3.9m  ETA 00:42:24  fps 719
+[ETA] step  180,000 / 2,000,000 (9.0%)  elapsed 4.1m  ETA 00:41:47  fps 726
+[ETA] step  190,000 / 2,000,000 (9.5%)  elapsed 4.3m  ETA 00:41:11  fps 732
+[ETA] step  200,000 / 2,000,000 (10.0%)  elapsed 4.5m  ETA 00:40:40  fps 737
+[ETA] step  210,000 / 2,000,000 (10.5%)  elapsed 4.7m  ETA 00:40:12  fps 742
+[ETA] step  220,000 / 2,000,000 (11.0%)  elapsed 4.9m  ETA 00:39:42  fps 747
+[ETA] step  230,000 / 2,000,000 (11.5%)  elapsed 5.1m  ETA 00:39:24  fps 748
+[ETA] step  240,000 / 2,000,000 (12.0%)  elapsed 5.3m  ETA 00:39:06  fps 750
+[ETA] step  250,000 / 2,000,000 (12.5%)  elapsed 5.5m  ETA 00:38:50  fps 751
+[ETA] step  260,000 / 2,000,000 (13.0%)  elapsed 5.7m  ETA 00:38:28  fps 754
+[ETA] step  270,000 / 2,000,000 (13.5%)  elapsed 5.9m  ETA 00:38:06  fps 757
+[ETA] step  280,000 / 2,000,000 (14.0%)  elapsed 6.2m  ETA 00:37:49  fps 758
+[ETA] step  290,000 / 2,000,000 (14.5%)  elapsed 6.4m  ETA 00:37:37  fps 757
+[ETA] step  300,000 / 2,000,000 (15.0%)  elapsed 6.6m  ETA 00:37:18  fps 759
+[ETA] step  310,000 / 2,000,000 (15.5%)  elapsed 6.8m  ETA 00:37:09  fps 758
+[ETA] step  320,000 / 2,000,000 (16.0%)  elapsed 7.0m  ETA 00:36:57  fps 758
+[ETA] step  330,000 / 2,000,000 (16.5%)  elapsed 7.3m  ETA 00:36:50  fps 755
+[ETA] step  340,000 / 2,000,000 (17.0%)  elapsed 7.5m  ETA 00:36:37  fps 756
+[ETA] step  350,000 / 2,000,000 (17.5%)  elapsed 7.7m  ETA 00:36:26  fps 754
+[ETA] step  360,000 / 2,000,000 (18.0%)  elapsed 7.9m  ETA 00:36:11  fps 755
+[ETA] step  370,000 / 2,000,000 (18.5%)  elapsed 8.2m  ETA 00:35:58  fps 755
+[ETA] step  380,000 / 2,000,000 (19.0%)  elapsed 8.4m  ETA 00:35:39  fps 757
+[ETA] step  390,000 / 2,000,000 (19.5%)  elapsed 8.6m  ETA 00:35:28  fps 756
+[ETA] step  400,000 / 2,000,000 (20.0%)  elapsed 8.8m  ETA 00:35:09  fps 758
+[ETA] step  410,000 / 2,000,000 (20.5%)  elapsed 9.0m  ETA 00:34:57  fps 758
+[ETA] step  420,000 / 2,000,000 (21.0%)  elapsed 9.2m  ETA 00:34:46  fps 757
+[ETA] step  430,000 / 2,000,000 (21.5%)  elapsed 9.4m  ETA 00:34:28  fps 759
+[ETA] step  440,000 / 2,000,000 (22.0%)  elapsed 9.6m  ETA 00:34:12  fps 760
+[ETA] step  450,000 / 2,000,000 (22.5%)  elapsed 9.9m  ETA 00:33:56  fps 761
+[ETA] step  460,000 / 2,000,000 (23.0%)  elapsed 10.1m  ETA 00:33:41  fps 762
+[ETA] step  470,000 / 2,000,000 (23.5%)  elapsed 10.3m  ETA 00:33:22  fps 764
+[ETA] step  480,000 / 2,000,000 (24.0%)  elapsed 10.4m  ETA 00:33:03  fps 766
+[ETA] step  490,000 / 2,000,000 (24.5%)  elapsed 10.6m  ETA 00:32:43  fps 769
+[ETA] step  500,000 / 2,000,000 (25.0%)  elapsed 10.8m  ETA 00:32:24  fps 771
+[ETA] step  510,000 / 2,000,000 (25.5%)  elapsed 11.0m  ETA 00:32:06  fps 773
+[ETA] step  520,000 / 2,000,000 (26.0%)  elapsed 11.2m  ETA 00:31:51  fps 774
+[ETA] step  530,000 / 2,000,000 (26.5%)  elapsed 11.4m  ETA 00:31:34  fps 776
+[ETA] step  540,000 / 2,000,000 (27.0%)  elapsed 11.6m  ETA 00:31:19  fps 777
+[ETA] step  550,000 / 2,000,000 (27.5%)  elapsed 11.8m  ETA 00:31:06  fps 777
+[ETA] step  560,000 / 2,000,000 (28.0%)  elapsed 12.0m  ETA 00:30:53  fps 777
+[ETA] step  570,000 / 2,000,000 (28.5%)  elapsed 12.2m  ETA 00:30:36  fps 779
+[ETA] step  580,000 / 2,000,000 (29.0%)  elapsed 12.4m  ETA 00:30:19  fps 781
+[ETA] step  590,000 / 2,000,000 (29.5%)  elapsed 12.6m  ETA 00:30:03  fps 782
+[ETA] step  600,000 / 2,000,000 (30.0%)  elapsed 12.8m  ETA 00:29:49  fps 783
+[ETA] step  610,000 / 2,000,000 (30.5%)  elapsed 13.0m  ETA 00:29:35  fps 783
+[ETA] step  620,000 / 2,000,000 (31.0%)  elapsed 13.2m  ETA 00:29:22  fps 783
+[ETA] step  630,000 / 2,000,000 (31.5%)  elapsed 13.4m  ETA 00:29:10  fps 783
+[ETA] step  640,000 / 2,000,000 (32.0%)  elapsed 13.6m  ETA 00:28:57  fps 783
+[ETA] step  650,000 / 2,000,000 (32.5%)  elapsed 13.8m  ETA 00:28:44  fps 783
+[ETA] step  660,000 / 2,000,000 (33.0%)  elapsed 14.0m  ETA 00:28:29  fps 784
+[ETA] step  670,000 / 2,000,000 (33.5%)  elapsed 14.2m  ETA 00:28:14  fps 785
+[ETA] step  680,000 / 2,000,000 (34.0%)  elapsed 14.4m  ETA 00:28:02  fps 784
+[ETA] step  690,000 / 2,000,000 (34.5%)  elapsed 14.7m  ETA 00:27:50  fps 784
+[ETA] step  700,000 / 2,000,000 (35.0%)  elapsed 14.9m  ETA 00:27:38  fps 784
+[ETA] step  710,000 / 2,000,000 (35.5%)  elapsed 15.1m  ETA 00:27:26  fps 783
+[ETA] step  720,000 / 2,000,000 (36.0%)  elapsed 15.3m  ETA 00:27:13  fps 783
+[ETA] step  730,000 / 2,000,000 (36.5%)  elapsed 15.5m  ETA 00:26:59  fps 784
+[ETA] step  740,000 / 2,000,000 (37.0%)  elapsed 15.7m  ETA 00:26:46  fps 784
+[ETA] step  750,000 / 2,000,000 (37.5%)  elapsed 15.9m  ETA 00:26:33  fps 784
+[ETA] step  760,000 / 2,000,000 (38.0%)  elapsed 16.2m  ETA 00:26:21  fps 784
+[ETA] step  770,000 / 2,000,000 (38.5%)  elapsed 16.3m  ETA 00:26:06  fps 785
+[ETA] step  780,000 / 2,000,000 (39.0%)  elapsed 16.6m  ETA 00:25:53  fps 785
+[ETA] step  790,000 / 2,000,000 (39.5%)  elapsed 16.8m  ETA 00:25:40  fps 785
+[ETA] step  800,000 / 2,000,000 (40.0%)  elapsed 17.0m  ETA 00:25:29  fps 785
+[ETA] step  810,000 / 2,000,000 (40.5%)  elapsed 17.2m  ETA 00:25:15  fps 785
+[ETA] step  820,000 / 2,000,000 (41.0%)  elapsed 17.4m  ETA 00:25:01  fps 786
+[ETA] step  830,000 / 2,000,000 (41.5%)  elapsed 17.6m  ETA 00:24:48  fps 786
+[ETA] step  840,000 / 2,000,000 (42.0%)  elapsed 17.8m  ETA 00:24:35  fps 786
+[ETA] step  850,000 / 2,000,000 (42.5%)  elapsed 18.0m  ETA 00:24:22  fps 787
+[ETA] step  860,000 / 2,000,000 (43.0%)  elapsed 18.2m  ETA 00:24:10  fps 786
+[ETA] step  870,000 / 2,000,000 (43.5%)  elapsed 18.4m  ETA 00:23:56  fps 787
+[ETA] step  880,000 / 2,000,000 (44.0%)  elapsed 18.6m  ETA 00:23:43  fps 787
+[ETA] step  890,000 / 2,000,000 (44.5%)  elapsed 18.8m  ETA 00:23:29  fps 787
+[ETA] step  900,000 / 2,000,000 (45.0%)  elapsed 19.0m  ETA 00:23:16  fps 788
+[ETA] step  910,000 / 2,000,000 (45.5%)  elapsed 19.2m  ETA 00:23:02  fps 789
+[ETA] step  920,000 / 2,000,000 (46.0%)  elapsed 19.4m  ETA 00:22:49  fps 789
+[ETA] step  930,000 / 2,000,000 (46.5%)  elapsed 19.6m  ETA 00:22:35  fps 789
+[ETA] step  940,000 / 2,000,000 (47.0%)  elapsed 19.8m  ETA 00:22:22  fps 789
+[ETA] step  950,000 / 2,000,000 (47.5%)  elapsed 20.1m  ETA 00:22:11  fps 789
+[ETA] step  960,000 / 2,000,000 (48.0%)  elapsed 20.3m  ETA 00:21:58  fps 789
+[ETA] step  970,000 / 2,000,000 (48.5%)  elapsed 20.5m  ETA 00:21:45  fps 789
+[ETA] step  980,000 / 2,000,000 (49.0%)  elapsed 20.7m  ETA 00:21:32  fps 789
+[ETA] step  990,000 / 2,000,000 (49.5%)  elapsed 20.9m  ETA 00:21:18  fps 790
+[ETA] step 1,000,000 / 2,000,000 (50.0%)  elapsed 21.1m  ETA 00:21:04  fps 791
+[ETA] step 1,010,000 / 2,000,000 (50.5%)  elapsed 21.3m  ETA 00:20:50  fps 791
+[ETA] step 1,020,000 / 2,000,000 (51.0%)  elapsed 21.5m  ETA 00:20:37  fps 792
+[ETA] step 1,030,000 / 2,000,000 (51.5%)  elapsed 21.7m  ETA 00:20:24  fps 792
+[ETA] step 1,040,000 / 2,000,000 (52.0%)  elapsed 21.9m  ETA 00:20:10  fps 793
+[ETA] step 1,050,000 / 2,000,000 (52.5%)  elapsed 22.0m  ETA 00:19:56  fps 794
+[ETA] step 1,060,000 / 2,000,000 (53.0%)  elapsed 22.2m  ETA 00:19:43  fps 795
+[ETA] step 1,070,000 / 2,000,000 (53.5%)  elapsed 22.4m  ETA 00:19:29  fps 795
+[ETA] step 1,080,000 / 2,000,000 (54.0%)  elapsed 22.6m  ETA 00:19:15  fps 796
+[ETA] step 1,090,000 / 2,000,000 (54.5%)  elapsed 22.8m  ETA 00:19:02  fps 797
+[ETA] step 1,100,000 / 2,000,000 (55.0%)  elapsed 23.0m  ETA 00:18:49  fps 797
+[ETA] step 1,110,000 / 2,000,000 (55.5%)  elapsed 23.2m  ETA 00:18:35  fps 798
+[ETA] step 1,120,000 / 2,000,000 (56.0%)  elapsed 23.4m  ETA 00:18:22  fps 798
+[ETA] step 1,130,000 / 2,000,000 (56.5%)  elapsed 23.6m  ETA 00:18:08  fps 799
+[ETA] step 1,140,000 / 2,000,000 (57.0%)  elapsed 23.8m  ETA 00:17:55  fps 800
+[ETA] step 1,150,000 / 2,000,000 (57.5%)  elapsed 24.0m  ETA 00:17:42  fps 800
+[ETA] step 1,160,000 / 2,000,000 (58.0%)  elapsed 24.1m  ETA 00:17:28  fps 801
+[ETA] step 1,170,000 / 2,000,000 (58.5%)  elapsed 24.3m  ETA 00:17:15  fps 801
+[ETA] step 1,180,000 / 2,000,000 (59.0%)  elapsed 24.5m  ETA 00:17:02  fps 802
+[ETA] step 1,190,000 / 2,000,000 (59.5%)  elapsed 24.7m  ETA 00:16:49  fps 803
+[ETA] step 1,200,000 / 2,000,000 (60.0%)  elapsed 24.9m  ETA 00:16:36  fps 803
+[ETA] step 1,210,000 / 2,000,000 (60.5%)  elapsed 25.1m  ETA 00:16:22  fps 804
+[ETA] step 1,220,000 / 2,000,000 (61.0%)  elapsed 25.3m  ETA 00:16:09  fps 804
+[ETA] step 1,230,000 / 2,000,000 (61.5%)  elapsed 25.5m  ETA 00:15:56  fps 805
+[ETA] step 1,240,000 / 2,000,000 (62.0%)  elapsed 25.7m  ETA 00:15:43  fps 805
+[ETA] step 1,250,000 / 2,000,000 (62.5%)  elapsed 25.9m  ETA 00:15:30  fps 806
+[ETA] step 1,260,000 / 2,000,000 (63.0%)  elapsed 26.0m  ETA 00:15:17  fps 806
+[ETA] step 1,270,000 / 2,000,000 (63.5%)  elapsed 26.2m  ETA 00:15:04  fps 807
+[ETA] step 1,280,000 / 2,000,000 (64.0%)  elapsed 26.4m  ETA 00:14:51  fps 807
+[ETA] step 1,290,000 / 2,000,000 (64.5%)  elapsed 26.6m  ETA 00:14:39  fps 808
+[ETA] step 1,300,000 / 2,000,000 (65.0%)  elapsed 26.8m  ETA 00:14:26  fps 808
+[ETA] step 1,310,000 / 2,000,000 (65.5%)  elapsed 27.0m  ETA 00:14:13  fps 808
+[ETA] step 1,320,000 / 2,000,000 (66.0%)  elapsed 27.2m  ETA 00:14:01  fps 808
+[ETA] step 1,330,000 / 2,000,000 (66.5%)  elapsed 27.4m  ETA 00:13:48  fps 808
+[ETA] step 1,340,000 / 2,000,000 (67.0%)  elapsed 27.6m  ETA 00:13:35  fps 809
+[ETA] step 1,350,000 / 2,000,000 (67.5%)  elapsed 27.8m  ETA 00:13:22  fps 809
+[ETA] step 1,360,000 / 2,000,000 (68.0%)  elapsed 28.0m  ETA 00:13:09  fps 810
+[ETA] step 1,370,000 / 2,000,000 (68.5%)  elapsed 28.2m  ETA 00:12:56  fps 811
+[ETA] step 1,380,000 / 2,000,000 (69.0%)  elapsed 28.3m  ETA 00:12:44  fps 811
+[ETA] step 1,390,000 / 2,000,000 (69.5%)  elapsed 28.5m  ETA 00:12:31  fps 812
+[ETA] step 1,400,000 / 2,000,000 (70.0%)  elapsed 28.7m  ETA 00:12:18  fps 813
+[ETA] step 1,410,000 / 2,000,000 (70.5%)  elapsed 28.9m  ETA 00:12:05  fps 813
+[ETA] step 1,420,000 / 2,000,000 (71.0%)  elapsed 29.1m  ETA 00:11:52  fps 814
+[ETA] step 1,430,000 / 2,000,000 (71.5%)  elapsed 29.3m  ETA 00:11:39  fps 815
+[ETA] step 1,440,000 / 2,000,000 (72.0%)  elapsed 29.4m  ETA 00:11:26  fps 815
+[ETA] step 1,450,000 / 2,000,000 (72.5%)  elapsed 29.6m  ETA 00:11:14  fps 816
+[ETA] step 1,460,000 / 2,000,000 (73.0%)  elapsed 29.8m  ETA 00:11:01  fps 816
+[ETA] step 1,470,000 / 2,000,000 (73.5%)  elapsed 30.0m  ETA 00:10:48  fps 817
+[ETA] step 1,480,000 / 2,000,000 (74.0%)  elapsed 30.2m  ETA 00:10:36  fps 817
+[ETA] step 1,490,000 / 2,000,000 (74.5%)  elapsed 30.4m  ETA 00:10:24  fps 817
+[ETA] step 1,500,000 / 2,000,000 (75.0%)  elapsed 30.6m  ETA 00:10:11  fps 817
+[ETA] step 1,510,000 / 2,000,000 (75.5%)  elapsed 30.8m  ETA 00:09:59  fps 818
+[ETA] step 1,520,000 / 2,000,000 (76.0%)  elapsed 31.0m  ETA 00:09:46  fps 818
+[ETA] step 1,530,000 / 2,000,000 (76.5%)  elapsed 31.1m  ETA 00:09:33  fps 819
+[ETA] step 1,540,000 / 2,000,000 (77.0%)  elapsed 31.3m  ETA 00:09:21  fps 819
+[ETA] step 1,550,000 / 2,000,000 (77.5%)  elapsed 31.5m  ETA 00:09:08  fps 820
+[ETA] step 1,560,000 / 2,000,000 (78.0%)  elapsed 31.7m  ETA 00:08:56  fps 820
+[ETA] step 1,570,000 / 2,000,000 (78.5%)  elapsed 31.9m  ETA 00:08:43  fps 821
+[ETA] step 1,580,000 / 2,000,000 (79.0%)  elapsed 32.1m  ETA 00:08:31  fps 822
+[ETA] step 1,590,000 / 2,000,000 (79.5%)  elapsed 32.2m  ETA 00:08:18  fps 822
+[ETA] step 1,600,000 / 2,000,000 (80.0%)  elapsed 32.4m  ETA 00:08:06  fps 822
+[ETA] step 1,610,000 / 2,000,000 (80.5%)  elapsed 32.6m  ETA 00:07:53  fps 823
+[ETA] step 1,620,000 / 2,000,000 (81.0%)  elapsed 32.8m  ETA 00:07:41  fps 823
+[ETA] step 1,630,000 / 2,000,000 (81.5%)  elapsed 33.0m  ETA 00:07:29  fps 824
+[ETA] step 1,640,000 / 2,000,000 (82.0%)  elapsed 33.2m  ETA 00:07:16  fps 824
+[ETA] step 1,650,000 / 2,000,000 (82.5%)  elapsed 33.4m  ETA 00:07:04  fps 824
+[ETA] step 1,660,000 / 2,000,000 (83.0%)  elapsed 33.5m  ETA 00:06:52  fps 825
+[ETA] step 1,670,000 / 2,000,000 (83.5%)  elapsed 33.7m  ETA 00:06:40  fps 825
+[ETA] step 1,680,000 / 2,000,000 (84.0%)  elapsed 33.9m  ETA 00:06:27  fps 825
+[ETA] step 1,690,000 / 2,000,000 (84.5%)  elapsed 34.1m  ETA 00:06:15  fps 826
+[ETA] step 1,700,000 / 2,000,000 (85.0%)  elapsed 34.3m  ETA 00:06:02  fps 827
+[ETA] step 1,710,000 / 2,000,000 (85.5%)  elapsed 34.5m  ETA 00:05:50  fps 827
+[ETA] step 1,720,000 / 2,000,000 (86.0%)  elapsed 34.6m  ETA 00:05:38  fps 828
+[ETA] step 1,730,000 / 2,000,000 (86.5%)  elapsed 34.8m  ETA 00:05:26  fps 828
+[ETA] step 1,740,000 / 2,000,000 (87.0%)  elapsed 35.0m  ETA 00:05:14  fps 828
+[ETA] step 1,750,000 / 2,000,000 (87.5%)  elapsed 35.2m  ETA 00:05:01  fps 828
+[ETA] step 1,760,000 / 2,000,000 (88.0%)  elapsed 35.4m  ETA 00:04:49  fps 828
+[ETA] step 1,770,000 / 2,000,000 (88.5%)  elapsed 35.6m  ETA 00:04:37  fps 828
+[ETA] step 1,780,000 / 2,000,000 (89.0%)  elapsed 35.8m  ETA 00:04:25  fps 829
+[ETA] step 1,790,000 / 2,000,000 (89.5%)  elapsed 36.0m  ETA 00:04:13  fps 829
+[ETA] step 1,800,000 / 2,000,000 (90.0%)  elapsed 36.2m  ETA 00:04:01  fps 829
+[ETA] step 1,810,000 / 2,000,000 (90.5%)  elapsed 36.4m  ETA 00:03:49  fps 830
+[ETA] step 1,820,000 / 2,000,000 (91.0%)  elapsed 36.5m  ETA 00:03:36  fps 830
+[ETA] step 1,830,000 / 2,000,000 (91.5%)  elapsed 36.7m  ETA 00:03:24  fps 830
+[ETA] step 1,840,000 / 2,000,000 (92.0%)  elapsed 36.9m  ETA 00:03:12  fps 831
+[ETA] step 1,850,000 / 2,000,000 (92.5%)  elapsed 37.1m  ETA 00:03:00  fps 831
+[ETA] step 1,860,000 / 2,000,000 (93.0%)  elapsed 37.3m  ETA 00:02:48  fps 832
+[ETA] step 1,870,000 / 2,000,000 (93.5%)  elapsed 37.5m  ETA 00:02:36  fps 831
+[ETA] step 1,880,000 / 2,000,000 (94.0%)  elapsed 37.7m  ETA 00:02:24  fps 831
+[ETA] step 1,890,000 / 2,000,000 (94.5%)  elapsed 37.9m  ETA 00:02:12  fps 831
+[ETA] step 1,900,000 / 2,000,000 (95.0%)  elapsed 38.1m  ETA 00:02:00  fps 832
+[ETA] step 1,910,000 / 2,000,000 (95.5%)  elapsed 38.3m  ETA 00:01:48  fps 832
+[ETA] step 1,920,000 / 2,000,000 (96.0%)  elapsed 38.4m  ETA 00:01:36  fps 832
+[ETA] step 1,930,000 / 2,000,000 (96.5%)  elapsed 38.6m  ETA 00:01:24  fps 832
+[ETA] step 1,940,000 / 2,000,000 (97.0%)  elapsed 38.8m  ETA 00:01:12  fps 833
+[ETA] step 1,950,000 / 2,000,000 (97.5%)  elapsed 39.0m  ETA 00:01:00  fps 833
+[ETA] step 1,960,000 / 2,000,000 (98.0%)  elapsed 39.2m  ETA 00:00:47  fps 834
+[ETA] step 1,970,000 / 2,000,000 (98.5%)  elapsed 39.4m  ETA 00:00:35  fps 834
+[ETA] step 1,980,000 / 2,000,000 (99.0%)  elapsed 39.6m  ETA 00:00:23  fps 834
+[ETA] step 1,990,000 / 2,000,000 (99.5%)  elapsed 39.7m  ETA 00:00:11  fps 835
+[ETA] step 2,000,000 / 2,000,000 (100.0%)  elapsed 39.9m  ETA 00:00:00  fps 835
+
+[3/3] Evaluating best TQC checkpoint (500 episodes)...
+
+  ─────────────────────────────────────────────
+  TQC pocket rate  : 24.9%
+  Clear rate (all 3): 0.4%
+  Random            : 9.9%
+  Improvement       : +15.0pp
+  Training time     : 39.9 min  (835 fps)
+  Saved → logs/experiments/TQC_2000k_s1_multi3_ms3_sp0.1_tp1.0_20260302_204014
+  TensorBoard → tensorboard --logdir logs/tensorboard
+  -> saved: logs/experiments/TQC_2000k_s1_multi3_ms3_sp0.1_tp1.0_20260302_204014
+
+--------------------------------------------------------
+  [6/9]  TQC  seed=42
+  21:20:19
+--------------------------------------------------------
+
+=======================================================
+  billiards-rl — TQC  |  2,000,000 steps  |  seed 42  |  env multi3(ms=3)
+  exp_dir : logs/experiments/TQC_2000k_s42_multi3_ms3_sp0.1_tp1.0_20260302_212019
+=======================================================
+
+[1/3] Random agent baseline (500 episodes)...
+      Random pocket rate: 8.7%  (avg 0.26/3 balls)
+
+[2/3] Training TQC — 2,000,000 steps × 10 envs ...
+/Users/yj/Documents/billiards-rl/.venv/lib/python3.13/site-packages/stable_baselines3/common/callbacks.py:418: UserWarning: Training and eval env are not of the same type<stable_baselines3.common.vec_env.subproc_vec_env.SubprocVecEnv object at 0x12b331d90> != <stable_baselines3.common.vec_env.dummy_vec_env.DummyVecEnv object at 0x12b331c70>
+  warnings.warn("Training and eval env are not of the same type" f"{self.training_env} != {self.eval_env}")
+[ETA] step   10,000 / 2,000,000 (0.5%)  elapsed 0.2m  ETA 00:37:49  fps 877
+[ETA] step   20,000 / 2,000,000 (1.0%)  elapsed 0.4m  ETA 00:43:24  fps 760
+[ETA] step   30,000 / 2,000,000 (1.5%)  elapsed 0.7m  ETA 00:44:45  fps 734
+[ETA] step   40,000 / 2,000,000 (2.0%)  elapsed 0.9m  ETA 00:45:06  fps 724
+[ETA] step   50,000 / 2,000,000 (2.5%)  elapsed 1.2m  ETA 00:45:02  fps 722
+[ETA] step   60,000 / 2,000,000 (3.0%)  elapsed 1.4m  ETA 00:44:46  fps 722
+[ETA] step   70,000 / 2,000,000 (3.5%)  elapsed 1.6m  ETA 00:44:16  fps 727
+[ETA] step   80,000 / 2,000,000 (4.0%)  elapsed 1.8m  ETA 00:43:35  fps 734
+[ETA] step   90,000 / 2,000,000 (4.5%)  elapsed 2.0m  ETA 00:42:44  fps 745
+[ETA] step  100,000 / 2,000,000 (5.0%)  elapsed 2.2m  ETA 00:41:54  fps 756
+[ETA] step  110,000 / 2,000,000 (5.5%)  elapsed 2.4m  ETA 00:41:13  fps 764
+[ETA] step  120,000 / 2,000,000 (6.0%)  elapsed 2.6m  ETA 00:40:29  fps 774
+[ETA] step  130,000 / 2,000,000 (6.5%)  elapsed 2.8m  ETA 00:39:46  fps 784
+[ETA] step  140,000 / 2,000,000 (7.0%)  elapsed 2.9m  ETA 00:39:05  fps 793
+[ETA] step  150,000 / 2,000,000 (7.5%)  elapsed 3.1m  ETA 00:38:30  fps 801
+[ETA] step  160,000 / 2,000,000 (8.0%)  elapsed 3.3m  ETA 00:37:59  fps 807
+[ETA] step  170,000 / 2,000,000 (8.5%)  elapsed 3.5m  ETA 00:37:32  fps 813
+[ETA] step  180,000 / 2,000,000 (9.0%)  elapsed 3.7m  ETA 00:37:05  fps 818
+[ETA] step  190,000 / 2,000,000 (9.5%)  elapsed 3.8m  ETA 00:36:39  fps 823
+[ETA] step  200,000 / 2,000,000 (10.0%)  elapsed 4.0m  ETA 00:36:18  fps 826
+[ETA] step  210,000 / 2,000,000 (10.5%)  elapsed 4.2m  ETA 00:35:57  fps 830
+[ETA] step  220,000 / 2,000,000 (11.0%)  elapsed 4.4m  ETA 00:35:35  fps 833
+[ETA] step  230,000 / 2,000,000 (11.5%)  elapsed 4.6m  ETA 00:35:14  fps 837
+[ETA] step  240,000 / 2,000,000 (12.0%)  elapsed 4.8m  ETA 00:34:54  fps 840
+[ETA] step  250,000 / 2,000,000 (12.5%)  elapsed 5.0m  ETA 00:34:40  fps 841
+[ETA] step  260,000 / 2,000,000 (13.0%)  elapsed 5.1m  ETA 00:34:20  fps 844
+[ETA] step  270,000 / 2,000,000 (13.5%)  elapsed 5.3m  ETA 00:34:02  fps 847
+[ETA] step  280,000 / 2,000,000 (14.0%)  elapsed 5.5m  ETA 00:33:44  fps 849
+[ETA] step  290,000 / 2,000,000 (14.5%)  elapsed 5.7m  ETA 00:33:28  fps 851
+[ETA] step  300,000 / 2,000,000 (15.0%)  elapsed 5.9m  ETA 00:33:12  fps 853
+[ETA] step  310,000 / 2,000,000 (15.5%)  elapsed 6.0m  ETA 00:32:55  fps 855
+[ETA] step  320,000 / 2,000,000 (16.0%)  elapsed 6.2m  ETA 00:32:39  fps 857
+[ETA] step  330,000 / 2,000,000 (16.5%)  elapsed 6.4m  ETA 00:32:23  fps 859
+[ETA] step  340,000 / 2,000,000 (17.0%)  elapsed 6.6m  ETA 00:32:07  fps 861
+[ETA] step  350,000 / 2,000,000 (17.5%)  elapsed 6.8m  ETA 00:31:55  fps 861
+[ETA] step  360,000 / 2,000,000 (18.0%)  elapsed 7.0m  ETA 00:31:42  fps 862
+[ETA] step  370,000 / 2,000,000 (18.5%)  elapsed 7.1m  ETA 00:31:29  fps 862
+[ETA] step  380,000 / 2,000,000 (19.0%)  elapsed 7.3m  ETA 00:31:17  fps 863
+[ETA] step  390,000 / 2,000,000 (19.5%)  elapsed 7.5m  ETA 00:31:04  fps 863
+[ETA] step  400,000 / 2,000,000 (20.0%)  elapsed 7.7m  ETA 00:30:52  fps 864
+[ETA] step  410,000 / 2,000,000 (20.5%)  elapsed 7.9m  ETA 00:30:39  fps 864
+[ETA] step  420,000 / 2,000,000 (21.0%)  elapsed 8.1m  ETA 00:30:27  fps 865
+[ETA] step  430,000 / 2,000,000 (21.5%)  elapsed 8.3m  ETA 00:30:15  fps 865
+[ETA] step  440,000 / 2,000,000 (22.0%)  elapsed 8.5m  ETA 00:30:02  fps 865
+[ETA] step  450,000 / 2,000,000 (22.5%)  elapsed 8.7m  ETA 00:29:50  fps 866
+[ETA] step  460,000 / 2,000,000 (23.0%)  elapsed 8.9m  ETA 00:29:38  fps 866
+[ETA] step  470,000 / 2,000,000 (23.5%)  elapsed 9.0m  ETA 00:29:26  fps 866
+[ETA] step  480,000 / 2,000,000 (24.0%)  elapsed 9.2m  ETA 00:29:14  fps 867
+[ETA] step  490,000 / 2,000,000 (24.5%)  elapsed 9.4m  ETA 00:29:02  fps 867
+[ETA] step  500,000 / 2,000,000 (25.0%)  elapsed 9.6m  ETA 00:28:51  fps 867
+[ETA] step  510,000 / 2,000,000 (25.5%)  elapsed 9.8m  ETA 00:28:38  fps 867
+[ETA] step  520,000 / 2,000,000 (26.0%)  elapsed 10.0m  ETA 00:28:26  fps 867
+[ETA] step  530,000 / 2,000,000 (26.5%)  elapsed 10.2m  ETA 00:28:14  fps 867
+[ETA] step  540,000 / 2,000,000 (27.0%)  elapsed 10.4m  ETA 00:28:02  fps 868
+[ETA] step  550,000 / 2,000,000 (27.5%)  elapsed 10.6m  ETA 00:27:50  fps 868
+[ETA] step  560,000 / 2,000,000 (28.0%)  elapsed 10.8m  ETA 00:27:38  fps 868
+[ETA] step  570,000 / 2,000,000 (28.5%)  elapsed 10.9m  ETA 00:27:26  fps 868
+[ETA] step  580,000 / 2,000,000 (29.0%)  elapsed 11.1m  ETA 00:27:14  fps 869
+[ETA] step  590,000 / 2,000,000 (29.5%)  elapsed 11.3m  ETA 00:27:02  fps 869
+[ETA] step  600,000 / 2,000,000 (30.0%)  elapsed 11.5m  ETA 00:26:51  fps 869
+[ETA] step  610,000 / 2,000,000 (30.5%)  elapsed 11.7m  ETA 00:26:39  fps 869
+[ETA] step  620,000 / 2,000,000 (31.0%)  elapsed 11.9m  ETA 00:26:27  fps 869
+[ETA] step  630,000 / 2,000,000 (31.5%)  elapsed 12.1m  ETA 00:26:15  fps 870
+[ETA] step  640,000 / 2,000,000 (32.0%)  elapsed 12.3m  ETA 00:26:03  fps 870
+[ETA] step  650,000 / 2,000,000 (32.5%)  elapsed 12.5m  ETA 00:25:52  fps 870
+[ETA] step  660,000 / 2,000,000 (33.0%)  elapsed 12.6m  ETA 00:25:40  fps 870
+[ETA] step  670,000 / 2,000,000 (33.5%)  elapsed 12.8m  ETA 00:25:28  fps 870
+[ETA] step  680,000 / 2,000,000 (34.0%)  elapsed 13.0m  ETA 00:25:16  fps 870
+[ETA] step  690,000 / 2,000,000 (34.5%)  elapsed 13.2m  ETA 00:25:05  fps 870
+[ETA] step  700,000 / 2,000,000 (35.0%)  elapsed 13.4m  ETA 00:24:53  fps 870
+[ETA] step  710,000 / 2,000,000 (35.5%)  elapsed 13.6m  ETA 00:24:41  fps 870
+[ETA] step  720,000 / 2,000,000 (36.0%)  elapsed 13.8m  ETA 00:24:30  fps 871
+[ETA] step  730,000 / 2,000,000 (36.5%)  elapsed 14.0m  ETA 00:24:18  fps 871
+[ETA] step  740,000 / 2,000,000 (37.0%)  elapsed 14.2m  ETA 00:24:07  fps 871
+[ETA] step  750,000 / 2,000,000 (37.5%)  elapsed 14.4m  ETA 00:23:55  fps 871
+[ETA] step  760,000 / 2,000,000 (38.0%)  elapsed 14.5m  ETA 00:23:43  fps 871
+[ETA] step  770,000 / 2,000,000 (38.5%)  elapsed 14.7m  ETA 00:23:32  fps 871
+[ETA] step  780,000 / 2,000,000 (39.0%)  elapsed 14.9m  ETA 00:23:21  fps 871
+[ETA] step  790,000 / 2,000,000 (39.5%)  elapsed 15.1m  ETA 00:23:10  fps 870
+[ETA] step  800,000 / 2,000,000 (40.0%)  elapsed 15.3m  ETA 00:22:59  fps 870
+[ETA] step  810,000 / 2,000,000 (40.5%)  elapsed 15.5m  ETA 00:22:47  fps 870
+[ETA] step  820,000 / 2,000,000 (41.0%)  elapsed 15.7m  ETA 00:22:36  fps 870
+[ETA] step  830,000 / 2,000,000 (41.5%)  elapsed 15.9m  ETA 00:22:25  fps 870
+[ETA] step  840,000 / 2,000,000 (42.0%)  elapsed 16.1m  ETA 00:22:13  fps 870
+[ETA] step  850,000 / 2,000,000 (42.5%)  elapsed 16.3m  ETA 00:22:02  fps 870
+[ETA] step  860,000 / 2,000,000 (43.0%)  elapsed 16.5m  ETA 00:21:50  fps 870
+[ETA] step  870,000 / 2,000,000 (43.5%)  elapsed 16.7m  ETA 00:21:39  fps 870
+[ETA] step  880,000 / 2,000,000 (44.0%)  elapsed 16.9m  ETA 00:21:27  fps 870
+[ETA] step  890,000 / 2,000,000 (44.5%)  elapsed 17.1m  ETA 00:21:15  fps 870
+[ETA] step  900,000 / 2,000,000 (45.0%)  elapsed 17.2m  ETA 00:21:04  fps 870
+[ETA] step  910,000 / 2,000,000 (45.5%)  elapsed 17.4m  ETA 00:20:52  fps 870
+[ETA] step  920,000 / 2,000,000 (46.0%)  elapsed 17.6m  ETA 00:20:41  fps 870
+[ETA] step  930,000 / 2,000,000 (46.5%)  elapsed 17.8m  ETA 00:20:29  fps 870
+[ETA] step  940,000 / 2,000,000 (47.0%)  elapsed 18.0m  ETA 00:20:18  fps 870
+[ETA] step  950,000 / 2,000,000 (47.5%)  elapsed 18.2m  ETA 00:20:06  fps 870
+[ETA] step  960,000 / 2,000,000 (48.0%)  elapsed 18.4m  ETA 00:19:55  fps 870
+[ETA] step  970,000 / 2,000,000 (48.5%)  elapsed 18.6m  ETA 00:19:43  fps 870
+[ETA] step  980,000 / 2,000,000 (49.0%)  elapsed 18.8m  ETA 00:19:32  fps 870
+[ETA] step  990,000 / 2,000,000 (49.5%)  elapsed 19.0m  ETA 00:19:20  fps 870
+[ETA] step 1,000,000 / 2,000,000 (50.0%)  elapsed 19.1m  ETA 00:19:08  fps 870
+[ETA] step 1,010,000 / 2,000,000 (50.5%)  elapsed 19.3m  ETA 00:18:57  fps 870
+[ETA] step 1,020,000 / 2,000,000 (51.0%)  elapsed 19.5m  ETA 00:18:45  fps 870
+[ETA] step 1,030,000 / 2,000,000 (51.5%)  elapsed 19.7m  ETA 00:18:34  fps 870
+[ETA] step 1,040,000 / 2,000,000 (52.0%)  elapsed 19.9m  ETA 00:18:22  fps 870
+[ETA] step 1,050,000 / 2,000,000 (52.5%)  elapsed 20.1m  ETA 00:18:11  fps 870
+[ETA] step 1,060,000 / 2,000,000 (53.0%)  elapsed 20.3m  ETA 00:17:59  fps 871
+[ETA] step 1,070,000 / 2,000,000 (53.5%)  elapsed 20.5m  ETA 00:17:48  fps 871
+[ETA] step 1,080,000 / 2,000,000 (54.0%)  elapsed 20.7m  ETA 00:17:36  fps 871
+[ETA] step 1,090,000 / 2,000,000 (54.5%)  elapsed 20.9m  ETA 00:17:25  fps 871
+[ETA] step 1,100,000 / 2,000,000 (55.0%)  elapsed 21.1m  ETA 00:17:13  fps 871
+[ETA] step 1,110,000 / 2,000,000 (55.5%)  elapsed 21.2m  ETA 00:17:01  fps 871
+[ETA] step 1,120,000 / 2,000,000 (56.0%)  elapsed 21.4m  ETA 00:16:49  fps 871
+[ETA] step 1,130,000 / 2,000,000 (56.5%)  elapsed 21.6m  ETA 00:16:38  fps 872
+[ETA] step 1,140,000 / 2,000,000 (57.0%)  elapsed 21.8m  ETA 00:16:26  fps 872
+[ETA] step 1,150,000 / 2,000,000 (57.5%)  elapsed 22.0m  ETA 00:16:14  fps 872
+[ETA] step 1,160,000 / 2,000,000 (58.0%)  elapsed 22.2m  ETA 00:16:02  fps 873
+[ETA] step 1,170,000 / 2,000,000 (58.5%)  elapsed 22.3m  ETA 00:15:50  fps 873
+[ETA] step 1,180,000 / 2,000,000 (59.0%)  elapsed 22.5m  ETA 00:15:38  fps 873
+[ETA] step 1,190,000 / 2,000,000 (59.5%)  elapsed 22.7m  ETA 00:15:27  fps 874
+[ETA] step 1,200,000 / 2,000,000 (60.0%)  elapsed 22.9m  ETA 00:15:15  fps 874
+[ETA] step 1,210,000 / 2,000,000 (60.5%)  elapsed 23.1m  ETA 00:15:03  fps 874
+[ETA] step 1,220,000 / 2,000,000 (61.0%)  elapsed 23.2m  ETA 00:14:51  fps 875
+[ETA] step 1,230,000 / 2,000,000 (61.5%)  elapsed 23.4m  ETA 00:14:39  fps 875
+[ETA] step 1,240,000 / 2,000,000 (62.0%)  elapsed 23.6m  ETA 00:14:28  fps 875
+[ETA] step 1,250,000 / 2,000,000 (62.5%)  elapsed 23.8m  ETA 00:14:17  fps 875
+[ETA] step 1,260,000 / 2,000,000 (63.0%)  elapsed 24.0m  ETA 00:14:05  fps 875
+[ETA] step 1,270,000 / 2,000,000 (63.5%)  elapsed 24.2m  ETA 00:13:53  fps 876
+[ETA] step 1,280,000 / 2,000,000 (64.0%)  elapsed 24.4m  ETA 00:13:41  fps 876
+[ETA] step 1,290,000 / 2,000,000 (64.5%)  elapsed 24.5m  ETA 00:13:30  fps 876
+[ETA] step 1,300,000 / 2,000,000 (65.0%)  elapsed 24.7m  ETA 00:13:19  fps 876
+[ETA] step 1,310,000 / 2,000,000 (65.5%)  elapsed 24.9m  ETA 00:13:08  fps 875
+[ETA] step 1,320,000 / 2,000,000 (66.0%)  elapsed 25.1m  ETA 00:12:56  fps 875
+[ETA] step 1,330,000 / 2,000,000 (66.5%)  elapsed 25.3m  ETA 00:12:45  fps 875
+[ETA] step 1,340,000 / 2,000,000 (67.0%)  elapsed 25.5m  ETA 00:12:33  fps 876
+[ETA] step 1,350,000 / 2,000,000 (67.5%)  elapsed 25.7m  ETA 00:12:22  fps 876
+[ETA] step 1,360,000 / 2,000,000 (68.0%)  elapsed 25.9m  ETA 00:12:10  fps 876
+[ETA] step 1,370,000 / 2,000,000 (68.5%)  elapsed 26.1m  ETA 00:11:58  fps 876
+[ETA] step 1,380,000 / 2,000,000 (69.0%)  elapsed 26.2m  ETA 00:11:47  fps 876
+[ETA] step 1,390,000 / 2,000,000 (69.5%)  elapsed 26.4m  ETA 00:11:35  fps 877
+[ETA] step 1,400,000 / 2,000,000 (70.0%)  elapsed 26.6m  ETA 00:11:24  fps 877
+[ETA] step 1,410,000 / 2,000,000 (70.5%)  elapsed 26.8m  ETA 00:11:12  fps 877
+[ETA] step 1,420,000 / 2,000,000 (71.0%)  elapsed 27.0m  ETA 00:11:01  fps 877
+[ETA] step 1,430,000 / 2,000,000 (71.5%)  elapsed 27.2m  ETA 00:10:49  fps 877
+[ETA] step 1,440,000 / 2,000,000 (72.0%)  elapsed 27.4m  ETA 00:10:38  fps 877
+[ETA] step 1,450,000 / 2,000,000 (72.5%)  elapsed 27.5m  ETA 00:10:26  fps 877
+[ETA] step 1,460,000 / 2,000,000 (73.0%)  elapsed 27.7m  ETA 00:10:15  fps 878
+[ETA] step 1,470,000 / 2,000,000 (73.5%)  elapsed 27.9m  ETA 00:10:03  fps 878
+[ETA] step 1,480,000 / 2,000,000 (74.0%)  elapsed 28.1m  ETA 00:09:52  fps 878
+[ETA] step 1,490,000 / 2,000,000 (74.5%)  elapsed 28.3m  ETA 00:09:40  fps 878
+[ETA] step 1,500,000 / 2,000,000 (75.0%)  elapsed 28.5m  ETA 00:09:29  fps 879
+[ETA] step 1,510,000 / 2,000,000 (75.5%)  elapsed 28.6m  ETA 00:09:17  fps 879
+[ETA] step 1,520,000 / 2,000,000 (76.0%)  elapsed 28.8m  ETA 00:09:06  fps 879
+[ETA] step 1,530,000 / 2,000,000 (76.5%)  elapsed 29.0m  ETA 00:08:54  fps 879
+[ETA] step 1,540,000 / 2,000,000 (77.0%)  elapsed 29.2m  ETA 00:08:43  fps 879
+[ETA] step 1,550,000 / 2,000,000 (77.5%)  elapsed 29.4m  ETA 00:08:31  fps 879
+[ETA] step 1,560,000 / 2,000,000 (78.0%)  elapsed 29.6m  ETA 00:08:20  fps 880
+[ETA] step 1,570,000 / 2,000,000 (78.5%)  elapsed 29.7m  ETA 00:08:08  fps 880
+[ETA] step 1,580,000 / 2,000,000 (79.0%)  elapsed 29.9m  ETA 00:07:57  fps 880
+[ETA] step 1,590,000 / 2,000,000 (79.5%)  elapsed 30.1m  ETA 00:07:45  fps 881
+[ETA] step 1,600,000 / 2,000,000 (80.0%)  elapsed 30.3m  ETA 00:07:34  fps 881
+[ETA] step 1,610,000 / 2,000,000 (80.5%)  elapsed 30.4m  ETA 00:07:22  fps 881
+[ETA] step 1,620,000 / 2,000,000 (81.0%)  elapsed 30.6m  ETA 00:07:11  fps 881
+[ETA] step 1,630,000 / 2,000,000 (81.5%)  elapsed 30.8m  ETA 00:06:59  fps 881
+[ETA] step 1,640,000 / 2,000,000 (82.0%)  elapsed 31.0m  ETA 00:06:48  fps 882
+[ETA] step 1,650,000 / 2,000,000 (82.5%)  elapsed 31.2m  ETA 00:06:37  fps 881
+[ETA] step 1,660,000 / 2,000,000 (83.0%)  elapsed 31.4m  ETA 00:06:25  fps 881
+[ETA] step 1,670,000 / 2,000,000 (83.5%)  elapsed 31.6m  ETA 00:06:14  fps 881
+[ETA] step 1,680,000 / 2,000,000 (84.0%)  elapsed 31.8m  ETA 00:06:03  fps 881
+[ETA] step 1,690,000 / 2,000,000 (84.5%)  elapsed 32.0m  ETA 00:05:51  fps 881
+[ETA] step 1,700,000 / 2,000,000 (85.0%)  elapsed 32.1m  ETA 00:05:40  fps 881
+[ETA] step 1,710,000 / 2,000,000 (85.5%)  elapsed 32.3m  ETA 00:05:28  fps 882
+[ETA] step 1,720,000 / 2,000,000 (86.0%)  elapsed 32.5m  ETA 00:05:17  fps 882
+[ETA] step 1,730,000 / 2,000,000 (86.5%)  elapsed 32.7m  ETA 00:05:06  fps 882
+[ETA] step 1,740,000 / 2,000,000 (87.0%)  elapsed 32.9m  ETA 00:04:54  fps 882
+[ETA] step 1,750,000 / 2,000,000 (87.5%)  elapsed 33.1m  ETA 00:04:43  fps 882
+[ETA] step 1,760,000 / 2,000,000 (88.0%)  elapsed 33.3m  ETA 00:04:32  fps 882
+[ETA] step 1,770,000 / 2,000,000 (88.5%)  elapsed 33.4m  ETA 00:04:20  fps 882
+[ETA] step 1,780,000 / 2,000,000 (89.0%)  elapsed 33.6m  ETA 00:04:09  fps 882
+[ETA] step 1,790,000 / 2,000,000 (89.5%)  elapsed 33.8m  ETA 00:03:58  fps 882
+[ETA] step 1,800,000 / 2,000,000 (90.0%)  elapsed 34.0m  ETA 00:03:46  fps 883
+[ETA] step 1,810,000 / 2,000,000 (90.5%)  elapsed 34.2m  ETA 00:03:35  fps 883
+[ETA] step 1,820,000 / 2,000,000 (91.0%)  elapsed 34.4m  ETA 00:03:23  fps 883
+[ETA] step 1,830,000 / 2,000,000 (91.5%)  elapsed 34.5m  ETA 00:03:12  fps 883
+[ETA] step 1,840,000 / 2,000,000 (92.0%)  elapsed 34.7m  ETA 00:03:01  fps 883
+[ETA] step 1,850,000 / 2,000,000 (92.5%)  elapsed 34.9m  ETA 00:02:49  fps 883
+[ETA] step 1,860,000 / 2,000,000 (93.0%)  elapsed 35.1m  ETA 00:02:38  fps 883
+[ETA] step 1,870,000 / 2,000,000 (93.5%)  elapsed 35.3m  ETA 00:02:27  fps 883
+[ETA] step 1,880,000 / 2,000,000 (94.0%)  elapsed 35.5m  ETA 00:02:15  fps 883
+[ETA] step 1,890,000 / 2,000,000 (94.5%)  elapsed 35.7m  ETA 00:02:04  fps 883
+[ETA] step 1,900,000 / 2,000,000 (95.0%)  elapsed 35.9m  ETA 00:01:53  fps 883
+[ETA] step 1,910,000 / 2,000,000 (95.5%)  elapsed 36.1m  ETA 00:01:41  fps 883
+[ETA] step 1,920,000 / 2,000,000 (96.0%)  elapsed 36.2m  ETA 00:01:30  fps 883
+[ETA] step 1,930,000 / 2,000,000 (96.5%)  elapsed 36.4m  ETA 00:01:19  fps 883
+[ETA] step 1,940,000 / 2,000,000 (97.0%)  elapsed 36.7m  ETA 00:01:08  fps 882
+[ETA] step 1,950,000 / 2,000,000 (97.5%)  elapsed 36.9m  ETA 00:00:56  fps 882
+[ETA] step 1,960,000 / 2,000,000 (98.0%)  elapsed 37.1m  ETA 00:00:45  fps 882
+[ETA] step 1,970,000 / 2,000,000 (98.5%)  elapsed 37.3m  ETA 00:00:34  fps 881
+[ETA] step 1,980,000 / 2,000,000 (99.0%)  elapsed 37.5m  ETA 00:00:22  fps 881
+[ETA] step 1,990,000 / 2,000,000 (99.5%)  elapsed 37.7m  ETA 00:00:11  fps 880
+[ETA] step 2,000,000 / 2,000,000 (100.0%)  elapsed 37.9m  ETA 00:00:00  fps 878
+
+[3/3] Evaluating best TQC checkpoint (500 episodes)...
+
+  ─────────────────────────────────────────────
+  TQC pocket rate  : 31.9%
+  Clear rate (all 3): 3.4%
+  Random            : 8.7%
+  Improvement       : +23.2pp
+  Training time     : 38.0 min  (877 fps)
+  Saved → logs/experiments/TQC_2000k_s42_multi3_ms3_sp0.1_tp1.0_20260302_212019
+  TensorBoard → tensorboard --logdir logs/tensorboard
+  -> saved: logs/experiments/TQC_2000k_s42_multi3_ms3_sp0.1_tp1.0_20260302_212019
+
+--------------------------------------------------------
+  [7/9]  PPO  seed=0
+  21:58:31
+--------------------------------------------------------
+
+=======================================================
+  billiards-rl — PPO  |  2,000,000 steps  |  seed 0  |  env multi3(ms=3)
+  exp_dir : logs/experiments/PPO_2000k_s0_multi3_ms3_sp0.1_tp1.0_20260302_215831
+=======================================================
+
+[1/3] Random agent baseline (500 episodes)...
+      Random pocket rate: 9.1%  (avg 0.27/3 balls)
+
+[2/3] Training PPO — 2,000,000 steps × 10 envs ...
+  ERROR in PPO seed=0: PPO.__init__() got an unexpected keyword argument 'gradient_steps'
+
+--------------------------------------------------------
+  [8/9]  PPO  seed=1
+  21:58:35
+--------------------------------------------------------
+
+=======================================================
+  billiards-rl — PPO  |  2,000,000 steps  |  seed 1  |  env multi3(ms=3)
+  exp_dir : logs/experiments/PPO_2000k_s1_multi3_ms3_sp0.1_tp1.0_20260302_215835
+=======================================================
+
+[1/3] Random agent baseline (500 episodes)...
+      Random pocket rate: 9.7%  (avg 0.29/3 balls)
+
+[2/3] Training PPO — 2,000,000 steps × 10 envs ...
+  ERROR in PPO seed=1: PPO.__init__() got an unexpected keyword argument 'gradient_steps'
+
+--------------------------------------------------------
+  [9/9]  PPO  seed=42
+  21:58:39
+--------------------------------------------------------
+
+=======================================================
+  billiards-rl — PPO  |  2,000,000 steps  |  seed 42  |  env multi3(ms=3)
+  exp_dir : logs/experiments/PPO_2000k_s42_multi3_ms3_sp0.1_tp1.0_20260302_215839
+=======================================================
+
+[1/3] Random agent baseline (500 episodes)...
+      Random pocket rate: 10.4%  (avg 0.31/3 balls)
+
+[2/3] Training PPO — 2,000,000 steps × 10 envs ...
+  ERROR in PPO seed=42: PPO.__init__() got an unexpected keyword argument 'gradient_steps'
+
+========================================================
+  All 9 runs complete.
+  Finished: 2026-03-02 21:58:43
+========================================================

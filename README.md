@@ -52,10 +52,17 @@ Phase 2  ms=3 frontier
   [x] Exp-12  Action space 교체: delta_angle → absolute angle [0, 2π]  ★ 폐기
               seed=1 5M: 37.8%/6.4%  — delta_angle 2M(41.7%/8.4%)보다 낮음
               결론: abs_angle 불필요. delta_angle + HRL(Exp-13)이 올바른 방향.
-  [x] Phase 0 재훈련 (부산물): n_balls=1, 1M, seed=42 → 42.4% / random 3% (14× 개선)
-              ※ 구 Exp-01(77.6%)은 target 배치가 y=[0.6,0.9]로 상단 고정 → 쉬운 직선샷 위주.
-                 현재 코드는 target y=[0.30,0.85]로 확장(89431bd) → 더 다양하고 어려운 배치.
-                 배치 난이도 차이가 77.6%→42.4% 하락의 주원인. horizon=1 단일샷은 동일.
+  [x] Phase 0 재훈련 ablation (exp/phase0-placement-ablation 브랜치):
+              ※ 77.6%→42.4% 하락 원인 격리 실험 (seed=42, 1M, sp=0.0):
+                 원인 ①: scratch penalty (-0.5) — 원본에 없었음. random action의 ~26%가 scratch
+                          → expected reward +0.026 → -0.099로 역전. SAC가 scratch 회피 학습.
+                 원인 ②: ball placement 확장 (89431bd) — target y:[0.6,0.9]→[0.30,0.85]
+                          → 측면/근거리샷 포함, 배치 다양도 증가, 난이도 상승.
+                 결과 비교:
+                   legacy 배치 + scratch 없음 (원본 재현) →  81.4%  ✓ (Exp-01 77.6%와 일치)
+                   current 배치 + scratch 없음            →  50.0%  (배치 차이만의 영향: -31pp)
+                   current 배치 + scratch 있음            →  42.4%  (scratch 추가 영향: -8pp)
+                 수정: n_balls=1은 scratch penalty 비적용 (simulator.py, `if scratch and n_balls > 1`)
                  Exp-13은 Phase 1(Exp-10 best_model, 23-dim) 기반으로 설계 → Phase 0 미사용.
   [ ] Exp-13a HRL-A: 공 선택 (discrete 3) · Phase 1 freeze · obs 재배열(target→ball[0])
   [ ] Exp-13b HRL-B: 공+포켓 선택 (discrete 18) · Phase 1 freeze · 비목표포켓 마스킹
@@ -78,7 +85,7 @@ Phase 1 실험 전체를 돌아보면, 현재 병목이 두 가지 서로 다른
 > "이 방향, 이 속도로 쏘면 저 공이 저 포켓에 들어간다"
 
 - 물리 역학 학습: cut angle, speed → ball trajectory
-- **Phase 0에서 이미 검증 완료**: SAC 77.6% (단일공)
+- **Phase 0에서 이미 검증 완료**: SAC 77.6% (단일공, legacy 배치 기준) / 50.0% (current 배치)
 - **Transfer A (zero-shot)가 훈련 0분으로 63.6%** = System 1이 multi-ball로 그대로 전이됨
 - reward signal이 즉각적 (공이 들어갔는가?) → 학습이 쉬움
 
@@ -432,12 +439,24 @@ SAC/TQC/PPO × 3 seeds, ms=3, sp=0.1, tp=1.0, 2M steps. (SAC s42, PPO s1/s42는 
 
 **설정:** 1M steps, seed {0, 1, 42}, `n_balls=1`
 
-> **📌 재현 시 성능 차이 원인 (2026-03 확인):**
-> 초기 커밋(0f55628~85e3855)의 배치: cue y∈[0.2,0.4], target y∈[0.6,0.9] — **항상 상하 분리**, 직선샷 위주.
-> MultiBallEnv 통합 커밋(89431bd)에서 배치가 통일: cue y∈[0.15,0.40], target y∈[0.30,0.85] — 측면/근거리샷 포함.
-> **배치 난이도 상승**이 77.6%→42.4% 하락의 원인. horizon=1 단일샷은 초기 커밋부터 동일.
-> 2026-03 재훈련(seed=42, 1M, sp=0.0): **42.4%** / random **3%** → 14× 개선 (현재 배치 기준).
-> **Exp-13은 Phase 1(n_balls=3) 기반으로 설계 변경 → Phase 0 가중치 미사용.**
+> **📌 재현 시 성능 차이 원인 (2026-03 ablation 확인 — branch: exp/phase0-placement-ablation):**
+>
+> 77.6% → 42.4% 하락은 **두 가지 원인의 합산**:
+>
+> | 조건 | seed=42, 1M | 변화량 |
+> |------|-------------|--------|
+> | Legacy 배치 + scratch 없음 (원본 완전 재현) | **81.4%** | 기준 |
+> | Current 배치 + scratch 없음 | **50.0%** | −31pp |
+> | Current 배치 + scratch 있음 (run_phase0) | **42.4%** | −39pp |
+>
+> **원인 ①** `scratch penalty (-0.5)`: 원본에 없던 패널티. random action의 ~26%가 scratch
+> → expected reward가 +0.026 → **−0.099**로 역전 → SAC가 포켓 대신 scratch 회피를 학습.
+> → **수정 완료**: `simulator.py` — `if scratch and self.n_balls > 1` 조건 추가 (n_balls=1 제외)
+>
+> **원인 ②** `ball placement 확장` (커밋 89431bd): target y:[0.6,0.9] → [0.30,0.85]
+> → 측면/근거리샷 포함, 배치 다양도↑, 학습 난이도↑. n_balls=3 통합 시 의도적 변경.
+>
+> horizon=1 단일샷은 초기 커밋부터 동일. **Exp-13은 Phase 1(n_balls=3) 기반 → Phase 0 미사용.**
 
 **결과 (당시 기록):**
 

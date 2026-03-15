@@ -1,0 +1,14 @@
+
+============================================================
+  billiards-rl  transfer — strategy=obs-collapse
+  pretrained   : logs/experiments/SAC_1000k_s0_20260301_131229/best_model/best_model
+  max_steps    : 5  |  seed 42
+  exp_dir      : logs/experiments/SAC_transfer_obs_collapse_ms5_s42_20260301_201624
+============================================================
+
+[1] Pretrained model loaded from logs/experiments/SAC_1000k_s0_20260301_131229/best_model/best_model
+[2] Zero-shot evaluation (obs-collapse, 23→16-dim)...
+    Zero-shot pocket rate : 63.6%
+    Zero-shot clear rate  : 31.4%
+
+  Saved → logs/experiments/SAC_transfer_obs_collapse_ms5_s42_20260301_201624
