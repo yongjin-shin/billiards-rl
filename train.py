@@ -35,6 +35,8 @@ from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.callbacks import BaseCallback, EvalCallback, CallbackList
 from stable_baselines3.common.vec_env import SubprocVecEnv
 
+from logger import ExperimentLogger, AimEvalCallback, TrainMetricsCallback
+
 try:
     from sb3_contrib import TQC
     HAS_TQC = True
@@ -192,7 +194,8 @@ def make_exp_dir(algo: str, steps: int, seed: int, n_balls: int = 1,
                  shots_taken: bool = False,
                  learning_rate: float = 3e-4,
                  gradient_steps: int = 1,
-                 abs_angle: bool = False) -> str:
+                 abs_angle: bool = False,
+                 legacy_placement: bool = False) -> str:
     """Create and return a unique experiment directory path."""
     ts      = datetime.now().strftime("%Y%m%d_%H%M%S")
     env_tag = f"_multi{n_balls}_ms{max_steps}" if n_balls > 1 else ""
@@ -209,6 +212,8 @@ def make_exp_dir(algo: str, steps: int, seed: int, n_balls: int = 1,
         rew_tag += f"_gs{gradient_steps}"
     if abs_angle:
         rew_tag += "_aa"
+    if legacy_placement:
+        rew_tag += "_legacyplace"
     name    = f"{algo}_{steps // 1000}k_s{seed}{env_tag}{rew_tag}_{ts}"
     path    = os.path.join("logs", "experiments", name)
     os.makedirs(os.path.join(path, "best_model"), exist_ok=True)
@@ -234,7 +239,8 @@ def train(algo: str = "SAC", steps: int = 1_000_000, seed: int = 42,
           shots_taken: bool = False,
           learning_rate: float = 3e-4,
           gradient_steps: int = 1,
-          abs_angle: bool = False) -> str:
+          abs_angle: bool = False,
+          legacy_placement: bool = False) -> str:
     """
     Train one algorithm for `steps` timesteps with a fixed seed.
     Returns the experiment directory path.
@@ -249,6 +255,8 @@ def train(algo: str = "SAC", steps: int = 1_000_000, seed: int = 42,
     shots_taken          → if True, append shots_taken/max_steps to obs (24-dim for n_balls=3)
     learning_rate        → critic/actor learning rate (default 3e-4; try 1e-4 for stability)
     gradient_steps       → gradient updates per env step (default 1; set to N_ENVS=10 for 1:1 ratio)
+    legacy_placement     → if True (n_balls=1 only): use original Exp-01 placement ranges
+                           cue y∈[0.2,0.4], target y∈[0.6,0.9] — always upper/lower separated
     """
     algo     = algo.upper()
     algo_map = _build_algo_map()
@@ -259,20 +267,21 @@ def train(algo: str = "SAC", steps: int = 1_000_000, seed: int = 42,
 
     set_global_seed(seed)
 
-    exp_dir   = make_exp_dir(algo, steps, seed, n_balls, max_steps, step_penalty, trunc_penalty, progressive_penalty, clear_bonus, shots_taken, learning_rate, gradient_steps, abs_angle)
+    exp_dir   = make_exp_dir(algo, steps, seed, n_balls, max_steps, step_penalty, trunc_penalty, progressive_penalty, clear_bonus, shots_taken, learning_rate, gradient_steps, abs_angle, legacy_placement)
 
     with _tee_output(os.path.join(exp_dir, "train.log")):
         _train_inner(algo, steps, seed, n_balls, max_steps, step_penalty,
                      trunc_penalty, progressive_penalty, clear_bonus,
                      shots_taken, learning_rate, gradient_steps, abs_angle,
-                     exp_dir)
+                     legacy_placement, exp_dir)
 
     return exp_dir
 
 
 def _train_inner(algo, steps, seed, n_balls, max_steps, step_penalty,
                  trunc_penalty, progressive_penalty, clear_bonus,
-                 shots_taken, learning_rate, gradient_steps, abs_angle, exp_dir):
+                 shots_taken, learning_rate, gradient_steps, abs_angle,
+                 legacy_placement, exp_dir):
     AlgoClass = _build_algo_map()[algo]
     algo_cfg  = ALGO_CONFIGS[algo]
 
@@ -300,6 +309,7 @@ def _train_inner(algo, steps, seed, n_balls, max_steps, step_penalty,
         "clear_bonus"         : clear_bonus,
         "shots_taken"         : shots_taken,
         "abs_angle"           : abs_angle,
+        "legacy_placement"    : legacy_placement,
         "learning_rate"       : learning_rate,
         "gradient_steps"      : gradient_steps,
         "env"                 : f"BilliardsEnv-n{n_balls}-ms{max_steps}",
@@ -309,7 +319,7 @@ def _train_inner(algo, steps, seed, n_balls, max_steps, step_penalty,
 
     # ── Random baseline ───────────────────────────────────────────────────────
     print("[1/3] Random agent baseline (500 episodes)...")
-    baseline_env = BilliardsEnv(n_balls=n_balls, max_steps=max_steps, step_penalty=step_penalty, trunc_penalty=trunc_penalty, progressive_penalty=progressive_penalty, clear_bonus=clear_bonus, shots_taken=shots_taken, abs_angle=abs_angle)
+    baseline_env = BilliardsEnv(n_balls=n_balls, max_steps=max_steps, step_penalty=step_penalty, trunc_penalty=trunc_penalty, progressive_penalty=progressive_penalty, clear_bonus=clear_bonus, shots_taken=shots_taken, abs_angle=abs_angle, legacy_placement=legacy_placement)
     baseline_env.reset(seed=seed)
     total_pocketed_baseline = 0
     for _ in range(500):
@@ -336,17 +346,25 @@ def _train_inner(algo, steps, seed, n_balls, max_steps, step_penalty,
                        "step_penalty": step_penalty, "trunc_penalty": trunc_penalty,
                        "progressive_penalty": progressive_penalty,
                        "clear_bonus": clear_bonus, "shots_taken": shots_taken,
-                       "abs_angle": abs_angle},
+                       "abs_angle": abs_angle, "legacy_placement": legacy_placement},
         vec_env_cls = SubprocVecEnv,
         monitor_dir = os.path.join(exp_dir, "train"),
         seed        = seed,
     )
 
-    _eval_env = Monitor(BilliardsEnv(n_balls=n_balls, max_steps=max_steps, step_penalty=step_penalty, trunc_penalty=trunc_penalty, progressive_penalty=progressive_penalty, clear_bonus=clear_bonus, shots_taken=shots_taken, abs_angle=abs_angle),
+    _eval_env = Monitor(BilliardsEnv(n_balls=n_balls, max_steps=max_steps, step_penalty=step_penalty, trunc_penalty=trunc_penalty, progressive_penalty=progressive_penalty, clear_bonus=clear_bonus, shots_taken=shots_taken, abs_angle=abs_angle, legacy_placement=legacy_placement),
                         filename=os.path.join(exp_dir, "eval", "monitor"))
     _eval_env.reset(seed=seed)
 
-    eval_callback = EvalCallback(
+    exp_logger = ExperimentLogger(
+        exp_dir        = exp_dir,
+        run_name       = os.path.basename(exp_dir),
+        config         = config,
+        aim_experiment = f"{algo}_ms{max_steps}_sp{step_penalty}{'_aa' if abs_angle else ''}",
+    )
+
+    eval_callback = AimEvalCallback(
+        exp_logger,
         _eval_env,
         best_model_save_path = os.path.join(exp_dir, "best_model"),
         log_path             = os.path.join(exp_dir, "eval"),
@@ -355,7 +373,8 @@ def _train_inner(algo, steps, seed, n_balls, max_steps, step_penalty,
         deterministic        = True,
         verbose              = 0,   # silent: ETACallback handles progress printing
     )
-    eta_callback = ETACallback(total_timesteps=steps, log_freq=10_000)
+    eta_callback        = ETACallback(total_timesteps=steps, log_freq=10_000)
+    train_log_callback  = TrainMetricsCallback(exp_logger, log_freq=10_000)
 
     model_kwargs = dict(
         device          = DEVICE,
@@ -379,15 +398,21 @@ def _train_inner(algo, steps, seed, n_balls, max_steps, step_penalty,
     if learning_rate != 3e-4:   cfg_parts.append(f"lr{learning_rate}")
     if gradient_steps != 1:     cfg_parts.append(f"gs{gradient_steps}")
     if abs_angle:               cfg_parts.append("aa")
+    if legacy_placement:        cfg_parts.append("lp")
     _ts_str = time.strftime("%Y-%m-%d@%H%M")   # e.g. 2026-03-03@0752
     tb_log_name = f"{'_'.join(cfg_parts)}/{algo}/s{seed}/{_ts_str}"
 
     t0 = time.time()
-    model.learn(
-        total_timesteps = steps,
-        callback        = CallbackList([eval_callback, eta_callback]),
-        tb_log_name     = tb_log_name,
-    )
+    try:
+        model.learn(
+            total_timesteps = steps,
+            callback        = CallbackList([eval_callback, eta_callback, train_log_callback]),
+            tb_log_name     = tb_log_name,
+        )
+    except Exception:
+        exp_logger.log_exception("model.learn")
+        exp_logger.finish()
+        raise
     elapsed = time.time() - t0
 
     model.save(os.path.join(exp_dir, f"{algo.lower()}_final"))
@@ -399,7 +424,7 @@ def _train_inner(algo, steps, seed, n_balls, max_steps, step_penalty,
     best_model = AlgoClass.load(best_model_path)
     print(f"\n[3/3] Evaluating best {algo} checkpoint (500 episodes)...")
 
-    final_eval_env = BilliardsEnv(n_balls=n_balls, max_steps=max_steps, step_penalty=step_penalty, trunc_penalty=trunc_penalty, progressive_penalty=progressive_penalty, clear_bonus=clear_bonus, shots_taken=shots_taken, abs_angle=abs_angle)
+    final_eval_env = BilliardsEnv(n_balls=n_balls, max_steps=max_steps, step_penalty=step_penalty, trunc_penalty=trunc_penalty, progressive_penalty=progressive_penalty, clear_bonus=clear_bonus, shots_taken=shots_taken, abs_angle=abs_angle, legacy_placement=legacy_placement)
     final_eval_env.reset(seed=seed)
     n_eval = 500
     total_pocketed_eval, clears = 0, 0
@@ -444,6 +469,7 @@ def _train_inner(algo, steps, seed, n_balls, max_steps, step_penalty,
         "exp_dir"            : exp_dir,
     }
     save_json(os.path.join(exp_dir, "results.json"), results)
+    exp_logger.finish(summary=results)
 
     print(f"\n  {'─'*45}")
     print(f"  {algo} pocket rate  : {trained_rate:.1f}%")

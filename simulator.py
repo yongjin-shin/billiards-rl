@@ -67,7 +67,8 @@ class BilliardsEnv(gym.Env):
                  progressive_penalty: bool = False,
                  clear_bonus: float = 0.0,
                  shots_taken: bool = False,
-                 abs_angle: bool = False):
+                 abs_angle: bool = False,
+                 legacy_placement: bool = False):
         super().__init__()
         assert n_balls >= 1, "n_balls must be >= 1"
 
@@ -79,6 +80,11 @@ class BilliardsEnv(gym.Env):
         self.clear_bonus         = clear_bonus         # +clear_bonus/steps_used on termination
         self.shots_taken         = shots_taken         # if True: append shots_taken/max_steps to obs
         self.abs_angle           = abs_angle           # if True: action[0] = absolute phi [0, 2π]
+        # legacy_placement=True: original Exp-01 ranges (n_balls=1 only)
+        #   cue y∈[0.2,0.4], target y∈[0.6,0.9] — always upper/lower separated
+        # legacy_placement=False (default): current unified ranges
+        #   cue y∈[0.15,0.40], target y∈[0.30,0.85] — wider, harder
+        self.legacy_placement    = legacy_placement and (n_balls == 1)
 
         # Ball IDs: "1", "2", "3", ...
         self._ball_ids = [str(i + 1) for i in range(n_balls)]
@@ -163,11 +169,16 @@ class BilliardsEnv(gym.Env):
             return xy_m
 
         # Cue ball — lower portion
-        cue_xy = sample_pos([0.15, 0.15], [0.85, 0.40])
-
-        # Target balls — upper portion (spread across table)
-        ball_xys = [sample_pos([0.15, 0.30], [0.85, 0.85])
-                    for _ in self._ball_ids]
+        if self.legacy_placement:
+            # Original Exp-01 ranges: cue bottom, target top — always separated
+            cue_xy   = sample_pos([0.20, 0.20], [0.80, 0.40])
+            ball_xys = [sample_pos([0.20, 0.60], [0.80, 0.90])
+                        for _ in self._ball_ids]
+        else:
+            cue_xy   = sample_pos([0.15, 0.15], [0.85, 0.40])
+            # Target balls — upper portion (spread across table)
+            ball_xys = [sample_pos([0.15, 0.30], [0.85, 0.85])
+                        for _ in self._ball_ids]
 
         balls = {"cue": pt.Ball.create("cue", xy=cue_xy)}
         for bid, bxy in zip(self._ball_ids, ball_xys):
@@ -232,7 +243,9 @@ class BilliardsEnv(gym.Env):
         _step_pen = (self.step_penalty * self._step_count
                      if self.progressive_penalty else self.step_penalty)
         reward = float(newly_pocketed) - _step_pen
-        if scratch:
+        # Scratch penalty: n_balls=1은 원본 동작 유지 (scratch 무시, reward ∈ {0,1})
+        # n_balls>1: 스크래치 시 -0.5 (ball-in-hand 기회 손실)
+        if scratch and self.n_balls > 1:
             reward -= 0.5
         if truncated:
             reward -= self.trunc_penalty
