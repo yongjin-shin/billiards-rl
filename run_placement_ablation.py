@@ -1,16 +1,18 @@
 """
-run_placement_ablation.py — Ball placement 범위가 Phase 0 성능에 미치는 영향 검증.
+run_placement_ablation.py — Phase 0 성능 하락 원인 격리 실험.
 
-가설: 89431bd 커밋에서 n_balls=1 배치 범위가 바뀌면서 77.6%→42.4% 하락.
+발견된 원인:
+  1. Scratch penalty (-0.5) — 원본에는 없었음. random action의 ~26%가 scratch
+     → expected reward가 +0.026 → -0.099로 역전. SAC가 scratch 회피를 학습.
+  2. Ball placement 범위 — 89431bd 커밋에서 target y: [0.6,0.9] → [0.30,0.85]로 확대
 
-비교 대상:
-  A) legacy_placement=True  : cue y∈[0.2,0.4], target y∈[0.6,0.9]  (원본 Exp-01 조건)
-  B) legacy_placement=False : cue y∈[0.15,0.40], target y∈[0.30,0.85] (현재 기본)
+수정:
+  - n_balls=1에서는 scratch penalty 적용 안 함 (원본 동작 복원)
+  - legacy_placement=True 로 배치 범위도 원본으로 복원
 
-두 조건 모두 동일 설정:
-  SAC, n_balls=1, 1M steps, seed=42, step_penalty=0.0, trunc_penalty=0.0
-
-결과는 콘솔 + logs/placement_ablation_<ts>.log + 각 exp_dir/results.json 에 저장.
+비교 조건 (모두 SAC, 1M steps, seed=42, sp=0.0):
+  A) legacy  placement  (cue y∈[0.2,0.4], target y∈[0.6,0.9])  ← 원본 완전 재현
+  B) current placement  (cue y∈[0.15,0.4], target y∈[0.30,0.85])  ← 현재 기본
 """
 
 import json
@@ -28,13 +30,13 @@ ALGO  = "SAC"
 def main():
     results = {}
 
-    for label, legacy in [("legacy (원본)", True), ("current (현재)", False)]:
-        print("\n" + "=" * 55)
-        print(f"  Placement: {label}")
-        print(f"  legacy_placement={legacy}")
+    for label, legacy in [("legacy (원본 배치)", True), ("current (현재 배치)", False)]:
+        print("\n" + "=" * 60)
+        print(f"  Condition: {label}")
+        print(f"  legacy_placement={legacy}  |  scratch_penalty=disabled(n_balls=1)")
         print(f"  {ALGO}, n_balls=1, {STEPS//1000}k steps, seed={SEED}")
         print(f"  Started: {time.strftime('%Y-%m-%d %H:%M:%S')}")
-        print("=" * 55)
+        print("=" * 60)
 
         exp_dir = train(
             algo             = ALGO,
@@ -62,16 +64,20 @@ def main():
               f"random={res['random_pocket_rate']:.1f}%")
 
     # ── Summary ──────────────────────────────────────────────────────────────
-    print("\n" + "=" * 55)
-    print("  PLACEMENT ABLATION — SUMMARY")
-    print("=" * 55)
-    print(f"  Legacy (원본 Exp-01 조건): {results['legacy']['pocket_rate']:.1f}%"
+    print("\n" + "=" * 60)
+    print("  PLACEMENT ABLATION — SUMMARY (scratch penalty 비활성화 후)")
+    print("=" * 60)
+    print(f"  [원본 배치] legacy : {results['legacy']['pocket_rate']:.1f}%"
           f"  (random {results['legacy']['random_rate']:.1f}%)")
-    print(f"  Current (현재 기본):       {results['current']['pocket_rate']:.1f}%"
+    print(f"  [현재 배치] current: {results['current']['pocket_rate']:.1f}%"
           f"  (random {results['current']['random_rate']:.1f}%)")
     delta = results["legacy"]["pocket_rate"] - results["current"]["pocket_rate"]
-    print(f"  Δ = {delta:+.1f}pp  ({'legacy 우세' if delta > 0 else 'current 우세'})")
-    print("=" * 55)
+    print(f"  Δ = {delta:+.1f}pp")
+    print()
+    print("  비교 기준 (이전 결과):")
+    print("  - 원본 Exp-01 (legacy + no scratch): 77.6%  ← 목표")
+    print("  - run_phase0 (current + scratch):    42.4%  ← 기존 낮은 결과")
+    print("=" * 60)
 
 
 if __name__ == "__main__":

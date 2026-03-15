@@ -243,7 +243,9 @@ class BilliardsEnv(gym.Env):
         _step_pen = (self.step_penalty * self._step_count
                      if self.progressive_penalty else self.step_penalty)
         reward = float(newly_pocketed) - _step_pen
-        if scratch:
+        # Scratch penalty: n_balls=1은 원본 동작 유지 (scratch 무시, reward ∈ {0,1})
+        # n_balls>1: 스크래치 시 -0.5 (ball-in-hand 기회 손실)
+        if scratch and self.n_balls > 1:
             reward -= 0.5
         if truncated:
             reward -= self.trunc_penalty
