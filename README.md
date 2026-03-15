@@ -53,8 +53,9 @@ Phase 2  ms=3 frontier
               seed=1 5M: 37.8%/6.4%  — delta_angle 2M(41.7%/8.4%)보다 낮음
               결론: abs_angle 불필요. delta_angle + HRL(Exp-13)이 올바른 방향.
   [x] Phase 0 재훈련 (부산물): n_balls=1, 1M, seed=42 → 42.4% / random 3% (14× 개선)
-              ※ 구 Exp-01(77.6%)은 ms=∞ multi-shot 조건. 현재는 horizon=1 단일샷.
-                 physics 변화(random 6%→3%)로 절대 수치 하락, 상대 개선율은 유사.
+              ※ 구 Exp-01(77.6%)은 target 배치가 y=[0.6,0.9]로 상단 고정 → 쉬운 직선샷 위주.
+                 현재 코드는 target y=[0.30,0.85]로 확장(89431bd) → 더 다양하고 어려운 배치.
+                 배치 난이도 차이가 77.6%→42.4% 하락의 주원인. horizon=1 단일샷은 동일.
                  Exp-13은 Phase 1(Exp-10 best_model, 23-dim) 기반으로 설계 → Phase 0 미사용.
   [ ] Exp-13a HRL-A: 공 선택 (discrete 3) · Phase 1 freeze · obs 재배열(target→ball[0])
   [ ] Exp-13b HRL-B: 공+포켓 선택 (discrete 18) · Phase 1 freeze · 비목표포켓 마스킹
@@ -431,10 +432,11 @@ SAC/TQC/PPO × 3 seeds, ms=3, sp=0.1, tp=1.0, 2M steps. (SAC s42, PPO s1/s42는 
 
 **설정:** 1M steps, seed {0, 1, 42}, `n_balls=1`
 
-> ⚠️ **조건 재해석 (후일 확인):** 당시 Phase 0은 `max_steps`가 크거나 ∞이어서 **에피소드당 여러 번 시도 가능**했던 것으로 추정.
-> 현재 simulator의 `n_balls=1`은 항상 1샷 후 종료(horizon=1).
-> 2026-03 재훈련(seed=42, 1M, sp=0.0): **42.4%** / random **3%** → 14× 개선.
-> random baseline이 6%→3%로 감소한 것은 pooltool physics 변화 때문이며, 상대적 개선율(12~14×)은 유사하다.
+> **📌 재현 시 성능 차이 원인 (2026-03 확인):**
+> 초기 커밋(0f55628~85e3855)의 배치: cue y∈[0.2,0.4], target y∈[0.6,0.9] — **항상 상하 분리**, 직선샷 위주.
+> MultiBallEnv 통합 커밋(89431bd)에서 배치가 통일: cue y∈[0.15,0.40], target y∈[0.30,0.85] — 측면/근거리샷 포함.
+> **배치 난이도 상승**이 77.6%→42.4% 하락의 원인. horizon=1 단일샷은 초기 커밋부터 동일.
+> 2026-03 재훈련(seed=42, 1M, sp=0.0): **42.4%** / random **3%** → 14× 개선 (현재 배치 기준).
 > **Exp-13은 Phase 1(n_balls=3) 기반으로 설계 변경 → Phase 0 가중치 미사용.**
 
 **결과 (당시 기록):**
@@ -447,7 +449,7 @@ SAC/TQC/PPO × 3 seeds, ms=3, sp=0.1, tp=1.0, 2M steps. (SAC s42, PPO s1/s42는 
 | Random | ~6% | — |
 
 **관찰:**
-- Horizon 여유가 있을 때 off-policy(SAC/TQC)가 압도적. PPO의 GAE는 단일 transition에서 REINFORCE로 퇴화.
+- Horizon=1 단일샷에서 off-policy(SAC/TQC)가 압도적. PPO의 GAE는 단일 transition에서 REINFORCE로 퇴화.
 - TQC는 seed 간 분산이 매우 큼 (어떤 seed는 SAC 수준, 어떤 seed는 붕괴). 분포 추정의 불안정성으로 추정.
 - SAC의 best_model vs final_model 격차가 종종 큼 — 훈련 말기에 collapse 발생. EvalCallback의 best_model을 사용해야 함.
 
