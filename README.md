@@ -52,12 +52,14 @@ Phase 2  ms=3 frontier
   [x] Exp-12  Action space 교체: delta_angle → absolute angle [0, 2π]  ★ 폐기
               seed=1 5M: 37.8%/6.4%  — delta_angle 2M(41.7%/8.4%)보다 낮음
               결론: abs_angle 불필요. delta_angle + HRL(Exp-13)이 올바른 방향.
-  [ ] Exp-13  Phase 0 재훈련: n_balls=1, 1M steps, seed=42  (Exp-13a~d 선행 조건)
-              ※ Exp-01 weight 유실 → 재훈련 필요. obs 16-dim / delta_angle 그대로.
-  [ ] Exp-13a HRL-A: 공 선택 (discrete 3) · Phase 0 완전 freeze · obs-collapse
-  [ ] Exp-13b HRL-B: 공+포켓 선택 (discrete 18) · Phase 0 freeze · 비목표포켓 마스킹
-  [ ] Exp-13c HRL-C: 공+포켓 선택 (discrete 18) · Phase 0 freeze · 전체 포켓 공개
-  [ ] Exp-13d HRL-D: 공+포켓 선택 (discrete 18) · scratch (Phase 0 없이 joint 학습)
+  [x] Phase 0 재훈련 (부산물): n_balls=1, 1M, seed=42 → 42.4% / random 3% (14× 개선)
+              ※ 구 Exp-01(77.6%)은 ms=∞ multi-shot 조건. 현재는 horizon=1 단일샷.
+                 physics 변화(random 6%→3%)로 절대 수치 하락, 상대 개선율은 유사.
+                 Exp-13은 Phase 1(Exp-10 best_model, 23-dim) 기반으로 설계 → Phase 0 미사용.
+  [ ] Exp-13a HRL-A: 공 선택 (discrete 3) · Phase 1 freeze · obs 재배열(target→ball[0])
+  [ ] Exp-13b HRL-B: 공+포켓 선택 (discrete 18) · Phase 1 freeze · 비목표포켓 마스킹
+  [ ] Exp-13c HRL-C: 공+포켓 선택 (discrete 18) · Phase 1 freeze · 전체 포켓 공개
+  [ ] Exp-13d HRL-D: scratch (Phase 1 없이 joint 학습)
   [ ] cushion/bank shots (action space 확장)
   [ ] self-play / full 8-ball
   [ ] DreamerV3 (model-based)
@@ -146,9 +148,24 @@ High-level (System 2, 새로 학습):
   obs → 목표 선택 → System 1에 전달
   reward: clear 여부
 
-Low-level (System 1, Phase 0 기반):
-  obs + 목표 → (angle, speed) 실행
+Low-level (System 1, Phase 1 기반 — Exp-10 best_model):
+  obs(재배열) → (angle, speed) 실행
   reward: 목표 공이 (목표 포켓에) 들어갔는가
+```
+
+**왜 Phase 0이 아닌 Phase 1인가:**
+Phase 0 (n_balls=1)은 단일공 환경만 경험해 다른 공과의 간섭, 충돌을 모른다.
+목표는 3볼 환경에서의 클리어이므로, 3볼 경험이 있는 Phase 1 policy가 System 1으로 더 적합하다.
+Phase 1은 이미 23-dim obs를 사용하므로 obs 구조 변경 없이 ball 순서만 재배열하면 된다.
+
+```
+System 2: target_ball 선택 (discrete 3)
+           ↓
+obs 재배열: [cue_xy, target_ball_xyz, other1_xyz, other2_xyz, 6pockets]
+           → target ball을 obs에서 ball[0] 위치로
+           ↓
+System 1 (Exp-10 weight, frozen):
+  delta_angle = 0 → ball[0] 방향(= target ball) 겨냥
 ```
 
 **System 1 설계 선택지 → 각각 별도 실험:**
@@ -156,43 +173,46 @@ Low-level (System 1, Phase 0 기반):
 | | Exp-13a | Exp-13b | Exp-13c | Exp-13d |
 |---|---------|---------|---------|---------|
 | **System 2 action** | 공 선택 (discrete 3) | 공+포켓 (discrete 18) | 공+포켓 (discrete 18) | 공+포켓 (discrete 18) |
-| **System 1** | Phase 0 완전 freeze | Phase 0 freeze | Phase 0 freeze | scratch (joint 학습) |
-| **System 1 obs** | `[cue_xy, target_ball_xy, 6포켓]` (Phase 0 그대로) | `[cue_xy, target_ball_xy, target_pocket_xy, 0×10]` (비목표 마스킹, OOD) | `[cue_xy, target_ball_xy, target_pocket_xy, 나머지5포켓]` (16-dim, in-dist.) | goal-conditioned 새 설계 |
-| **Phase 0 재사용** | 완전 그대로 | 완전 그대로 (OOD 입력) | 완전 그대로 (in-distribution) | 없음 |
-| **포켓 선택** | System 1이 자율 결정 | System 2 지정 (masking으로 강제) | System 2 지정 (soft, System 1이 무시 가능) | System 2 지정 |
-| **Credit assignment** | 문제없음 | 문제없음 | 문제없음 | non-stationarity 주의 |
-| **핵심 질문** | HRL 구조 자체가 유효한가? | masking으로 포켓 강제 가능한가? | 포켓 info 추가가 도움되는가? | Phase 0 없이 end-to-end 가능한가? |
+| **System 1** | Phase 1 완전 freeze | Phase 1 freeze | Phase 1 freeze | scratch (joint 학습) |
+| **System 1 obs** | `[cue_xy, target_xyz, other1_xyz, other2_xyz, 6pockets]` (ball 재배열) | 위 + 비목표 포켓 마스킹 | 위 + target pocket 첫 번째로 | goal-conditioned 새 설계 |
+| **Phase 1 재사용** | 완전 그대로 | 완전 그대로 (OOD: 비nearest ball[0]) | 완전 그대로 (OOD) | 없음 |
+| **포켓 선택** | System 1이 자율 결정 | System 2 지정 (masking) | System 2 지정 (soft) | System 2 지정 |
+| **OOD 리스크** | 낮음 (ball[0]만 바뀜) | 중간 (ball[0] + pocket 마스킹) | 중간 (pocket 순서 변경) | 없음 |
+| **핵심 질문** | HRL 구조 자체가 유효한가? | masking으로 포켓 강제 가능한가? | 포켓 info 추가가 도움되는가? | Phase 1 없이 end-to-end 가능한가? |
 
 **리워드 구조 (13a~d 공통):**
 - 어느 포켓이든 들어가면 +1 (포켓 지정 여부 무관)
 - 포켓 지정 준수 여부는 reward에 반영하지 않음 — System 2가 episode clear reward로 간접 학습
-- **평가 지표 추가 (13b/c/d)**: `pocket_accuracy` = 지정 포켓에 실제로 들어간 비율. reward는 아니지만 매 eval마다 기록 → System 1이 포켓 지시를 얼마나 따르는지 사후 분석
+- **평가 지표 추가 (13b/c/d)**: `pocket_accuracy` = 지정 포켓에 실제로 들어간 비율 (reward 아님, 사후 분석용)
 
 **실험 순서 근거:**
-- 13a → HRL 구조 자체가 flat MLP보다 유리한지 가장 깨끗하게 검증 (변수 최소)
-- 13b → masking으로 System 1이 실제로 지정 포켓을 겨냥하는가 (OOD 효과 확인)
-- 13c → 포켓 정보를 온전히 줄 때 vs 마스킹할 때 차이 (13b 대비)
-- 13d → Phase 0 pretraining의 기여도 ablation (13b/c 대비, non-stationarity 감수)
+- 13a → Phase 1 OOD 정도가 가장 낮음. HRL 구조 자체 유효성 검증에 가장 깨끗한 조건.
+- 13b/c → 포켓 지정이 실제로 System 1의 행동을 바꾸는가 (masking vs 전체 공개)
+- 13d → Phase 1 pretraining 없을 때 대비 ablation
 
 **Exp-12 vs Exp-13의 관계 (업데이트):**
-Exp-12는 실패 → abs_angle 불채택. Exp-13은 delta_angle + Phase 0 그대로 사용.
-공 선택 자유도는 abs_angle이 아닌 System 2의 명시적 target 지정으로 해결.
+Exp-12 실패 → abs_angle 불채택. Exp-13은 delta_angle + Phase 1 재배열 구조 사용.
+공 선택 자유도는 abs_angle이 아닌 System 2의 명시적 target 지정 + obs 재배열로 해결.
 
 ---
 
-### Phase 0 obs 호환성 분석 — Exp-13a/b/c에서 재훈련 필요 없음
+### Phase 1 obs 재배열 분석 — Exp-13a/b/c 설계
 
-Phase 0 obs: `[cue_x, cue_y, ball_x, ball_y, p0x,p0y, …, p5x,p5y]` = **16-dim, delta_angle**
+Phase 1 obs: `[cue_xy, b1_xyz, b2_xyz, b3_xyz, 6pockets]` = **23-dim, delta_angle**
+(훈련 시 b1 = nearest ball 순서로 정렬)
 
-| Exp | System 1 obs 구성 | dim | Phase 0 대비 |
-|-----|------------------|-----|-------------|
-| 13a | `[cue_xy, target_ball_xy, 6포켓]` | 16 | **완전 동일** (obs-collapse만) |
-| 13b | `[cue_xy, target_ball_xy, target_pkt_xy, 0×10]` | 16 | 같은 dim, 비목표 포켓 0 마스킹 (OOD) |
-| 13c | `[cue_xy, target_ball_xy, target_pkt_xy, 나머지5포켓]` | 16 | 같은 dim, 포켓 순서 재배치 (in-dist) |
-| 13d | goal-conditioned 새 설계 | new | Phase 0 미사용 |
+System 2가 target ball(idx=k)을 선택하면, obs를 재배열해서 target을 ball[0] 위치로 올린다.
+delta_angle=0 → ball[0] 방향 겨냥이므로, Phase 1은 재배열된 obs에서 target ball을 향해 쏜다.
 
-**결론:** 13a/b/c 모두 16-dim으로 동일 → Phase 0 **가중치 구조 변경 불필요**.
-단, Exp-01 가중치 파일이 유실됨 → **n_balls=1 재훈련 필요 (1M steps, ~30분)**. obs/action 설계는 그대로.
+| Exp | System 1 obs 구성 | OOD 정도 | 핵심 변수 |
+|-----|------------------|----------|----------|
+| 13a | ball[0]=target, ball[1/2]=others | 낮음 (순서만 바뀜) | HRL 구조 유효성 |
+| 13b | 위 + 비목표 포켓 0 마스킹 | 중간 (포켓 일부 누락) | 포켓 지정 강제 가능성 |
+| 13c | 위 + target pocket 첫 번째 | 중간 (포켓 순서 변경) | 포켓 info 추가 효과 |
+| 13d | goal-conditioned 새 설계 | — | Phase 1 없이 end-to-end |
+
+**OOD 리스크:** Phase 1은 ball[0]=nearest ball로 훈련됐으나, Exp-13에서 ball[0]=target ball (≠ nearest 가능).
+non-nearest ball을 겨냥할 때 Phase 1이 얼마나 잘 동작하는지가 Exp-13a의 핵심 확인 사항.
 
 ---
 
@@ -234,15 +254,15 @@ Low-level (System 1, execution):
 **단계적 로드맵:**
 
 ```
-Exp-12   절대각도      → 공 선택 자유도 확보 (쿠션 없이 먼저)
-Exp-13a  HRL-A         → 공 선택 (discrete 3), Phase 0 완전 freeze, obs-collapse
+Exp-12   절대각도 ❌    → 5M써도 delta 2M보다 낮음. abs_angle 폐기.
+Exp-13a  HRL-A         → 공 선택 (discrete 3), Phase 1 freeze, obs 재배열(target→ball[0])
                           확인: HRL 구조 자체가 flat MLP 대비 유리한가? (변수 최소)
-Exp-13b  HRL-B         → 공+포켓 선택 (discrete 18), Phase 0 freeze, 비목표포켓 마스킹
+Exp-13b  HRL-B         → 공+포켓 선택 (discrete 18), Phase 1 freeze, 비목표포켓 마스킹
                           확인: masking으로 System 1이 지정 포켓을 실제로 겨냥하는가?
-Exp-13c  HRL-C         → 공+포켓 선택 (discrete 18), Phase 0 freeze, 전체 포켓 공개
-                          확인: 포켓 정보 온전히 줄 때 vs 마스킹 대비 차이?
-Exp-13d  HRL-D         → 공+포켓 선택 (discrete 18), scratch (Phase 0 없이 joint 학습)
-                          확인: Phase 0 pretraining이 없으면 얼마나 못하나? (ablation)
+Exp-13c  HRL-C         → 공+포켓 선택 (discrete 18), Phase 1 freeze, target pocket 첫 번째
+                          확인: 포켓 정보 추가가 도움되는가?
+Exp-13d  HRL-D         → 공+포켓 선택 (discrete 18), scratch (Phase 1 없이 joint 학습)
+                          확인: Phase 1 pretraining이 없으면 얼마나 못하나? (ablation)
 Exp-14   쿠션 확장     → simulator에 cushion count 추가
                           obs에 n_cushions 포함, high-level에 쿠션 선택 추가
                           확인: goal-conditioned low-level이 0쿠션/1쿠션/2쿠션을
@@ -265,23 +285,20 @@ Exp-14   쿠션 확장     → simulator에 cushion count 추가
           확인: 5M 써도 delta 2M(41.7%/8.4%)보다 낮음(37.8%/6.4%)
                abs_angle의 inductive bias 부재가 치명적. delta_angle 유지.
 
-④ Phase 0 재훈련  n_balls=1, 1M steps, seed=42  ← 지금 바로 필요 (Exp-13 선행)
-           Exp-01 weight 유실. 설계 변경 없음(16-dim obs, delta_angle).
-           ETA: ~30분. best_model 경로 저장 필수.
-
-⑤ Exp-13a  HRL-A — 공 선택 (discrete 3), Phase 0 완전 freeze, obs-collapse
+④ Exp-13a  HRL-A — 공 선택 (discrete 3), Phase 1 freeze, obs 재배열(target→ball[0])
            확인: HRL 구조 자체가 flat MLP보다 유리한가? (변수 최소, 가장 깨끗한 검증)
+           선행 조건: Exp-10 best_model (SAC s0 or s1, ms=3, 2M)
 
-⑥ Exp-13b  HRL-B — 공+포켓 선택 (discrete 18), Phase 0 freeze, 비목표포켓 마스킹
+⑤ Exp-13b  HRL-B — 공+포켓 선택 (discrete 18), Phase 1 freeze, 비목표포켓 마스킹
            확인: masking으로 System 1이 지정 포켓을 실제로 겨냥하는가?
            평가: pocket_accuracy (지정 포켓 적중률) 추가 기록
 
-⑦ Exp-13c  HRL-C — 공+포켓 선택 (discrete 18), Phase 0 freeze, 전체 포켓 공개
+⑥ Exp-13c  HRL-C — 공+포켓 선택 (discrete 18), Phase 1 freeze, target pocket 첫 번째
            확인: 포켓 정보를 온전히 줄 때 masking 대비 차이?
            평가: pocket_accuracy 추가 기록
 
-⑧ Exp-13d  HRL-D — 공+포켓 선택 (discrete 18), scratch (Phase 0 없이 joint)
-           확인: Phase 0 pretraining 없이 end-to-end 가능한가? (13b/c 대비 ablation)
+⑦ Exp-13d  HRL-D — 공+포켓 선택 (discrete 18), scratch (Phase 1 없이 joint)
+           확인: Phase 1 pretraining 없이 end-to-end 가능한가? (13a~c 대비 ablation)
            평가: pocket_accuracy 추가 기록
 
 ⑨ Exp-14  쿠션 확장  (Exp-13 성공 후)
@@ -414,7 +431,13 @@ SAC/TQC/PPO × 3 seeds, ms=3, sp=0.1, tp=1.0, 2M steps. (SAC s42, PPO s1/s42는 
 
 **설정:** 1M steps, seed {0, 1, 42}, `n_balls=1`
 
-**결과:**
+> ⚠️ **조건 재해석 (후일 확인):** 당시 Phase 0은 `max_steps`가 크거나 ∞이어서 **에피소드당 여러 번 시도 가능**했던 것으로 추정.
+> 현재 simulator의 `n_balls=1`은 항상 1샷 후 종료(horizon=1).
+> 2026-03 재훈련(seed=42, 1M, sp=0.0): **42.4%** / random **3%** → 14× 개선.
+> random baseline이 6%→3%로 감소한 것은 pooltool physics 변화 때문이며, 상대적 개선율(12~14×)은 유사하다.
+> **Exp-13은 Phase 1(n_balls=3) 기반으로 설계 변경 → Phase 0 가중치 미사용.**
+
+**결과 (당시 기록):**
 
 | Algorithm | Pocket rate (mean ± std) | vs. random |
 |-----------|--------------------------|------------|
@@ -424,7 +447,7 @@ SAC/TQC/PPO × 3 seeds, ms=3, sp=0.1, tp=1.0, 2M steps. (SAC s42, PPO s1/s42는 
 | Random | ~6% | — |
 
 **관찰:**
-- Horizon=1에서 off-policy(SAC/TQC)가 압도적. PPO의 GAE는 단일 transition에서 REINFORCE로 퇴화.
+- Horizon 여유가 있을 때 off-policy(SAC/TQC)가 압도적. PPO의 GAE는 단일 transition에서 REINFORCE로 퇴화.
 - TQC는 seed 간 분산이 매우 큼 (어떤 seed는 SAC 수준, 어떤 seed는 붕괴). 분포 추정의 불안정성으로 추정.
 - SAC의 best_model vs final_model 격차가 종종 큼 — 훈련 말기에 collapse 발생. EvalCallback의 best_model을 사용해야 함.
 
@@ -638,15 +661,17 @@ SAC/TQC/PPO × 3 seeds, ms=3, sp=0.1, tp=1.0, 2M steps. (SAC s42, PPO s1/s42는 
 
 **목표:** delta_angle(nearest-ball 기준)을 absolute angle [0, 2π]로 교체 시 ball ordering 개선 여부.
 
-**설정:** SAC, ms=3, sp=0.1, tp=1.0. 3 seeds × 5M steps 계획 → 4/5 조기 종료(환경 오류)
+**설정:** SAC, ms=3, sp=0.1, tp=1.0. 3 seeds × 5M steps 계획 → seed=0/42 5M은 crash(결과 없음), seed=42 2M은 조기종료
 
 **결과 (완료된 run만):**
 
-| Seed | Steps | Pocket% | Clear% |
-|------|-------|---------|--------|
-| 42 | 2M (조기종료) | 32.5% | 2.0% |
-| 1 | 5M (완료) | 37.8% | 6.4% |
-| Exp-10 SAC baseline | 2M | **41.7%** | **8.4%** |
+| Seed | Steps | Pocket% | Clear% | 비고 |
+|------|-------|---------|--------|------|
+| 42 | 2M | 32.5% | 2.0% | 조기종료 |
+| 0 | 5M | — | — | crash |
+| 1 | 5M | 37.8% | 6.4% | **유일하게 완료** |
+| 42 | 5M | — | — | crash |
+| Exp-10 SAC baseline | 2M | **41.7%** | **8.4%** | delta_angle |
 
 **관찰:**
 - abs_angle은 5M을 써도 delta 2M보다 낮다. 2.5× 스텝으로 오히려 뒤처짐.
