@@ -12,7 +12,11 @@ build/
 # Training artifacts — generated content, not source
 logs/tensorboard/
 logs/experiments/
+logs/*.log
 outputs/*
+
+# Aim experiment tracker database (binary, large)
+.aim/
 
 # But keep directory markers
 !logs/.gitkeep
