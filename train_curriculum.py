@@ -33,6 +33,7 @@ from stable_baselines3.common.vec_env import SubprocVecEnv
 
 from simulator import BilliardsEnv
 from train import ETACallback, set_global_seed, save_json, ALGO_CONFIGS, N_ENVS, DEVICE, _tee_output
+from logger import ExperimentLogger, AimEvalCallback, TrainMetricsCallback
 
 
 # =============================================================================
@@ -118,7 +119,20 @@ def train_stage(stage: int, max_steps: int, steps: int, seed: int,
     )
     _eval_env.reset(seed=seed)
 
-    eval_callback = EvalCallback(
+    stage_config = {
+        "stage": stage, "max_steps": max_steps, "steps": steps,
+        "seed": seed, "step_penalty": step_penalty,
+        "trunc_penalty": trunc_penalty, "pretrained": pretrained_path,
+    }
+    exp_logger = ExperimentLogger(
+        exp_dir        = stage_dir,
+        run_name       = f"curriculum_s{seed}_stage{stage}_ms{max_steps}",
+        config         = stage_config,
+        aim_experiment = "curriculum_ms5-4-3",
+    )
+
+    eval_callback = AimEvalCallback(
+        exp_logger,
         _eval_env,
         best_model_save_path = os.path.join(stage_dir, "best_model"),
         log_path             = os.path.join(stage_dir, "eval"),
@@ -127,7 +141,8 @@ def train_stage(stage: int, max_steps: int, steps: int, seed: int,
         deterministic        = True,
         verbose              = 0,
     )
-    eta_callback = ETACallback(total_timesteps=steps, log_freq=10_000)
+    eta_callback       = ETACallback(total_timesteps=steps, log_freq=10_000)
+    train_log_callback = TrainMetricsCallback(exp_logger, log_freq=10_000)
 
     # TensorBoard: curriculum_sp0.1_tp1.0/SAC/s42/stage1_2026-03-03@0900
     _ts = time.strftime("%Y-%m-%d@%H%M")
@@ -155,12 +170,17 @@ def train_stage(stage: int, max_steps: int, steps: int, seed: int,
         )
 
     t0 = time.time()
-    model.learn(
-        total_timesteps   = steps,
-        callback          = CallbackList([eval_callback, eta_callback]),
-        tb_log_name       = tb_log_name,
-        reset_num_timesteps = True,   # each stage starts at step 0 in TensorBoard
-    )
+    try:
+        model.learn(
+            total_timesteps     = steps,
+            callback            = CallbackList([eval_callback, eta_callback, train_log_callback]),
+            tb_log_name         = tb_log_name,
+            reset_num_timesteps = True,
+        )
+    except Exception:
+        exp_logger.log_exception("model.learn")
+        exp_logger.finish()
+        raise
     elapsed = time.time() - t0
 
     vec_env.close()
@@ -177,7 +197,7 @@ def train_stage(stage: int, max_steps: int, steps: int, seed: int,
           f"clear={metrics['clear_rate']:.1f}%  "
           f"ep_len={metrics['ep_len_mean']:.2f}")
 
-    save_json(os.path.join(stage_dir, "results.json"), {
+    stage_results = {
         "stage"        : stage,
         "max_steps"    : max_steps,
         "steps"        : steps,
@@ -187,7 +207,9 @@ def train_stage(stage: int, max_steps: int, steps: int, seed: int,
         "pretrained"   : pretrained_path,
         "training_time_sec": round(elapsed, 1),
         **metrics,
-    })
+    }
+    save_json(os.path.join(stage_dir, "results.json"), stage_results)
+    exp_logger.finish(summary=stage_results)
     return best_model_path
 
 

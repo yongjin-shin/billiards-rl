@@ -11,6 +11,7 @@ Exp-10 대비 비교:
 import os
 import sys
 import time
+import traceback
 from train import train, _Tee
 
 STEPS     = 5_000_000
@@ -49,7 +50,11 @@ def main():
             )
             print(f"  -> saved: {exp_dir}")
         except Exception as e:
-            print(f"  ERROR in {ALGO} seed={seed}: {e}", file=sys.stderr)
+            print(
+                f"  ERROR in {ALGO} seed={seed}: {type(e).__name__}: {e}\n"
+                + traceback.format_exc(),
+                file=sys.stderr,
+            )
 
     print("\n" + "=" * 56)
     print(f"  All {total} seeds complete.")

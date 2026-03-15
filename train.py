@@ -35,6 +35,8 @@ from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.callbacks import BaseCallback, EvalCallback, CallbackList
 from stable_baselines3.common.vec_env import SubprocVecEnv
 
+from logger import ExperimentLogger, AimEvalCallback, TrainMetricsCallback
+
 try:
     from sb3_contrib import TQC
     HAS_TQC = True
@@ -346,7 +348,15 @@ def _train_inner(algo, steps, seed, n_balls, max_steps, step_penalty,
                         filename=os.path.join(exp_dir, "eval", "monitor"))
     _eval_env.reset(seed=seed)
 
-    eval_callback = EvalCallback(
+    exp_logger = ExperimentLogger(
+        exp_dir        = exp_dir,
+        run_name       = os.path.basename(exp_dir),
+        config         = config,
+        aim_experiment = f"{algo}_ms{max_steps}_sp{step_penalty}{'_aa' if abs_angle else ''}",
+    )
+
+    eval_callback = AimEvalCallback(
+        exp_logger,
         _eval_env,
         best_model_save_path = os.path.join(exp_dir, "best_model"),
         log_path             = os.path.join(exp_dir, "eval"),
@@ -355,7 +365,8 @@ def _train_inner(algo, steps, seed, n_balls, max_steps, step_penalty,
         deterministic        = True,
         verbose              = 0,   # silent: ETACallback handles progress printing
     )
-    eta_callback = ETACallback(total_timesteps=steps, log_freq=10_000)
+    eta_callback        = ETACallback(total_timesteps=steps, log_freq=10_000)
+    train_log_callback  = TrainMetricsCallback(exp_logger, log_freq=10_000)
 
     model_kwargs = dict(
         device          = DEVICE,
@@ -383,11 +394,16 @@ def _train_inner(algo, steps, seed, n_balls, max_steps, step_penalty,
     tb_log_name = f"{'_'.join(cfg_parts)}/{algo}/s{seed}/{_ts_str}"
 
     t0 = time.time()
-    model.learn(
-        total_timesteps = steps,
-        callback        = CallbackList([eval_callback, eta_callback]),
-        tb_log_name     = tb_log_name,
-    )
+    try:
+        model.learn(
+            total_timesteps = steps,
+            callback        = CallbackList([eval_callback, eta_callback, train_log_callback]),
+            tb_log_name     = tb_log_name,
+        )
+    except Exception:
+        exp_logger.log_exception("model.learn")
+        exp_logger.finish()
+        raise
     elapsed = time.time() - t0
 
     model.save(os.path.join(exp_dir, f"{algo.lower()}_final"))
@@ -444,6 +460,7 @@ def _train_inner(algo, steps, seed, n_balls, max_steps, step_penalty,
         "exp_dir"            : exp_dir,
     }
     save_json(os.path.join(exp_dir, "results.json"), results)
+    exp_logger.finish(summary=results)
 
     print(f"\n  {'─'*45}")
     print(f"  {algo} pocket rate  : {trained_rate:.1f}%")
