@@ -2,21 +2,22 @@
 logger.py — Structured experiment logger with Aim integration.
 
 Provides:
-  ExperimentLogger     — timestamped logging + Aim Run (metrics, exceptions)
-  AimEvalCallback      — EvalCallback subclass that logs eval metrics to Aim
-  TrainMetricsCallback — samples ep_info_buffer every N steps → logs to Aim
+  ExperimentLogger       — timestamped logging + Aim Run (metrics, exceptions)
+  BilliardsEvalCallback  — 직접 평가 loop: pocket_rate / clear_rate / ep_len → Aim
+  TrainMetricsCallback   — ep_info_buffer 샘플링 → train 지표 → Aim
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import os
 import traceback
 from pathlib import Path
 from typing import Optional
 
 import numpy as np
-from stable_baselines3.common.callbacks import BaseCallback, EvalCallback
+from stable_baselines3.common.callbacks import BaseCallback
 
 try:
     from aim import Run as AimRun
@@ -179,33 +180,111 @@ class ExperimentLogger:
 # Callbacks
 # =============================================================================
 
-class AimEvalCallback(EvalCallback):
+class BilliardsEvalCallback(BaseCallback):
     """
-    EvalCallback subclass that additionally logs eval metrics to ExperimentLogger.
+    직접 평가 loop 기반 eval callback.
+    EvalCallback과 달리 info dict에 직접 접근해 pocket_rate / clear_rate를 집계.
 
-    Logs after every evaluation:
-      eval/mean_reward    — mean episodic reward over n_eval_episodes
-      eval/best_mean_reward — running best
+    Aim에 기록되는 지표:
+      eval/pocket_rate      — 포켓된 공 수 / (episodes × n_balls) [%]
+      eval/clear_rate       — 모든 공 클리어한 에피소드 비율 [%]
+      eval/mean_reward      — 평균 에피소드 reward
+      eval/best_mean_reward — 지금까지 최고 mean_reward
+      eval/ep_len_mean      — 평균 에피소드 길이
+
+    best_model 저장 기준: mean_reward 개선 시.
     """
 
-    def __init__(self, exp_logger: ExperimentLogger, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self._exp_logger = exp_logger
+    def __init__(
+        self,
+        exp_logger: ExperimentLogger,
+        eval_env,
+        n_balls: int,
+        best_model_save_path: str,
+        log_path: str,
+        eval_freq: int = 1_000,
+        n_eval_episodes: int = 50,
+        deterministic: bool = True,
+        verbose: int = 0,
+    ):
+        super().__init__(verbose)
+        self._exp_logger         = exp_logger
+        self._eval_env           = eval_env
+        self._n_balls            = n_balls
+        self._best_model_path    = os.path.join(best_model_save_path, "best_model")
+        self._log_path           = log_path
+        self._eval_freq          = eval_freq
+        self._n_eval_episodes    = n_eval_episodes
+        self._deterministic      = deterministic
+        self._best_mean_reward   = -np.inf
+
+        os.makedirs(best_model_save_path, exist_ok=True)
+        os.makedirs(log_path, exist_ok=True)
+
+        # evaluations.npz 누적 (compare.py 호환)
+        self._eval_timesteps: list = []
+        self._eval_results: list   = []   # shape: (n_evals, n_eval_episodes)
 
     def _on_step(self) -> bool:
-        result = super()._on_step()
-        # EvalCallback evaluates when n_calls % eval_freq == 0
-        if self.eval_freq > 0 and self.n_calls % self.eval_freq == 0:
-            if hasattr(self, "last_mean_reward") and self.last_mean_reward is not None:
-                self._exp_logger.log_metrics(
-                    {
-                        "eval/mean_reward":      float(self.last_mean_reward),
-                        "eval/best_mean_reward": float(self.best_mean_reward),
-                    },
-                    step=self.num_timesteps,
-                    context="eval",
-                )
-        return result
+        if self._eval_freq > 0 and self.n_calls % self._eval_freq != 0:
+            return True
+
+        ep_rewards, ep_lengths = [], []
+        total_pocketed, total_clears = 0, 0
+
+        obs, _ = self._eval_env.reset()
+        for _ in range(self._n_eval_episodes):
+            obs, _ = self._eval_env.reset()
+            ep_reward, ep_len = 0.0, 0
+            done = False
+            while not done:
+                action, _ = self.model.predict(obs, deterministic=self._deterministic)
+                obs, reward, terminated, truncated, info = self._eval_env.step(action)
+                ep_reward += reward
+                ep_len    += 1
+                done = terminated or truncated
+            ep_rewards.append(ep_reward)
+            ep_lengths.append(ep_len)
+            if self._n_balls == 1:
+                total_pocketed += int(info.get("pocketed", False))
+                total_clears   += int(info.get("pocketed", False))
+            else:
+                total_pocketed += info.get("total_pocketed", 0)
+                total_clears   += int(info.get("total_pocketed", 0) == self._n_balls)
+
+        mean_reward  = float(np.mean(ep_rewards))
+        pocket_rate  = total_pocketed / (self._n_eval_episodes * self._n_balls) * 100
+        clear_rate   = total_clears   /  self._n_eval_episodes * 100
+        ep_len_mean  = float(np.mean(ep_lengths))
+
+        # best model 저장
+        if mean_reward > self._best_mean_reward:
+            self._best_mean_reward = mean_reward
+            self.model.save(self._best_model_path)
+
+        # Aim + structured.log
+        self._exp_logger.log_metrics(
+            {
+                "eval/pocket_rate":      pocket_rate,
+                "eval/clear_rate":       clear_rate,
+                "eval/mean_reward":      mean_reward,
+                "eval/best_mean_reward": self._best_mean_reward,
+                "eval/ep_len_mean":      ep_len_mean,
+            },
+            step=self.num_timesteps,
+            context="eval",
+        )
+
+        # evaluations.npz 누적 (compare.py 호환)
+        self._eval_timesteps.append(self.num_timesteps)
+        self._eval_results.append(ep_rewards)
+        np.savez(
+            os.path.join(self._log_path, "evaluations.npz"),
+            timesteps=np.array(self._eval_timesteps),
+            results=np.array(self._eval_results),
+        )
+
+        return True
 
 
 class TrainMetricsCallback(BaseCallback):

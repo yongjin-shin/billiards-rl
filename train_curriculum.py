@@ -28,12 +28,12 @@ import numpy as np
 from stable_baselines3 import SAC
 from stable_baselines3.common.env_util import make_vec_env
 from stable_baselines3.common.monitor import Monitor
-from stable_baselines3.common.callbacks import BaseCallback, EvalCallback, CallbackList
+from stable_baselines3.common.callbacks import BaseCallback, CallbackList
 from stable_baselines3.common.vec_env import SubprocVecEnv
 
 from simulator import BilliardsEnv
 from train import ETACallback, set_global_seed, save_json, ALGO_CONFIGS, N_ENVS, DEVICE, _tee_output
-from logger import ExperimentLogger, AimEvalCallback, TrainMetricsCallback
+from logger import ExperimentLogger, BilliardsEvalCallback, TrainMetricsCallback
 
 
 # =============================================================================
@@ -131,15 +131,15 @@ def train_stage(stage: int, max_steps: int, steps: int, seed: int,
         aim_experiment = "curriculum_ms5-4-3",
     )
 
-    eval_callback = AimEvalCallback(
+    eval_callback = BilliardsEvalCallback(
         exp_logger,
         _eval_env,
+        n_balls              = 3,
         best_model_save_path = os.path.join(stage_dir, "best_model"),
         log_path             = os.path.join(stage_dir, "eval"),
         eval_freq            = 10_000 // N_ENVS,
         n_eval_episodes      = 50,
         deterministic        = True,
-        verbose              = 0,
     )
     eta_callback       = ETACallback(total_timesteps=steps, log_freq=10_000)
     train_log_callback = TrainMetricsCallback(exp_logger, log_freq=10_000)

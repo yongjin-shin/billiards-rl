@@ -32,10 +32,10 @@ import numpy as np
 from stable_baselines3 import SAC, PPO
 from stable_baselines3.common.env_util import make_vec_env
 from stable_baselines3.common.monitor import Monitor
-from stable_baselines3.common.callbacks import BaseCallback, EvalCallback, CallbackList
+from stable_baselines3.common.callbacks import BaseCallback, CallbackList
 from stable_baselines3.common.vec_env import SubprocVecEnv
 
-from logger import ExperimentLogger, AimEvalCallback, TrainMetricsCallback
+from logger import ExperimentLogger, BilliardsEvalCallback, TrainMetricsCallback
 
 try:
     from sb3_contrib import TQC
@@ -363,15 +363,15 @@ def _train_inner(algo, steps, seed, n_balls, max_steps, step_penalty,
         aim_experiment = f"{algo}_ms{max_steps}_sp{step_penalty}{'_aa' if abs_angle else ''}",
     )
 
-    eval_callback = AimEvalCallback(
+    eval_callback = BilliardsEvalCallback(
         exp_logger,
         _eval_env,
+        n_balls              = n_balls,
         best_model_save_path = os.path.join(exp_dir, "best_model"),
         log_path             = os.path.join(exp_dir, "eval"),
         eval_freq            = 10_000 // N_ENVS,   # every 10k total steps
         n_eval_episodes      = 50,
         deterministic        = True,
-        verbose              = 0,   # silent: ETACallback handles progress printing
     )
     eta_callback        = ETACallback(total_timesteps=steps, log_freq=10_000)
     train_log_callback  = TrainMetricsCallback(exp_logger, log_freq=10_000)
