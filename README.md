@@ -9,9 +9,9 @@ Reinforcement learning on a physics-accurate billiards simulator ([pooltool](htt
 
 | | |
 |---|---|
-| **현재 위치** | Phase 2 frontier (ms=3) — SAC 41.7% pocket / 8.4% clear |
-| **다음 실험** | Exp-13a HRL-A: System 2(공 선택) + System 1(Phase 1 freeze) |
-| **진행 중** | Exp-06 재실험 (multi-seed 0/1/2, 1M steps) |
+| **현재 위치** | Phase 0 bottleneck 확인 — 단일샷 50% → ms=3 clear 8% (0.5³) |
+| **다음 실험** | Exp-13: Phase 0 proximity reward shaping (단일샷 정확도 개선) |
+| **진행 중** | Exp-06 재실험 — seed=0 완료 63.1%/31.2% ≈ 원래 63.9%/33.2% |
 
 ---
 
@@ -29,7 +29,7 @@ Reinforcement learning on a physics-accurate billiards simulator ([pooltool](htt
 | | |
 |---|---|
 | **Observation** | 16-dim: `[cue_xy, ball_xy, p0~p5_xy]` |
-| **Reward** | +1 pocketed, 0 otherwise |
+| **Reward** | +1 pocketed, 0 otherwise (Exp-13부터: + α·(−min_dist/d_max) 추가) |
 | **Episode** | 항상 1 step 후 종료 |
 | **Ball placement** | cue y∈[0.15,0.40] / ball y∈[0.30,0.85] (current)<br>cue y∈[0.20,0.40] / ball y∈[0.60,0.90] (legacy — 원본 Exp-01 조건) |
 
@@ -74,7 +74,7 @@ SAC / PPO / TQC, 1M steps, seeds {0, 1, 2}, legacy 배치 조건.
 | 05 | Transfer B warm-start | 61.5% | 30.4% | — | zero-shot보다 낮음 |
 | **06** | **pp=✓ scratch** | **63.9%** | **33.2%** | **4.48** | **ms=5 best** |
 
-> Exp-06 재실험(multi-seed 0/1/2) 진행 중.
+> Exp-06 재실험: seed=0 완료 63.1%/31.2% (원래 63.9%/33.2%). seed=1/2 미완.
 
 #### Exp-07~08: ep_len 단축 시도 → 전부 실패
 
@@ -142,55 +142,55 @@ delta_angle → absolute angle [0, 2π] 교체 실험.
 
 ---
 
-## Next: Exp-13 HRL
+## Next: Exp-13 Phase 0 Proximity Reward
 
 ### 설계 근거
 
-현재 flat MLP의 병목은 두 레벨 문제를 혼합:
+**Phase 0가 Phase 1의 bottleneck:**
 
-| | System 1 (aiming) | System 2 (strategy) |
-|---|---|---|
-| **역할** | 이 각도+속도로 쏘면 저 공이 들어가는가 | 어떤 공을 먼저, 어느 포켓으로 |
-| **reward** | 즉각적 (+1 per pocket) | 희박하고 지연됨 (9% clear) |
-| **현재 문제** | nearest-ball greedy에 하드코딩됨 | gradient 신호 거의 없음 |
+| Phase 0 단일샷 정확도 | ms=3 예상 clear rate |
+|----------------------|---------------------|
+| 현재 ~50% | 0.50³ ≈ **12.5%** (실측 8%) |
+| 목표 ~80% | 0.80³ ≈ **51.2%** |
 
-**해결:** System 2가 target ball을 명시적으로 지정 → obs 재배열 → Phase 1 policy(System 1)가 실행.
+Phase 0 reward가 완전 sparse (+1 / 0)라 miss 시 gradient 없음. 포켓까지의 거리로 dense signal 제공.
+
+### Reward 설계
 
 ```
-System 2 (새로 학습):  target ball 선택 (discrete)
-                       ↓
-obs 재배열:  [cue_xy, target_xyz, other1_xyz, other2_xyz, 6pockets]
-             target ball → ball[0] 위치로 이동
-                       ↓
-System 1 (Phase 1 Exp-10 freeze):
-  delta_angle = 0 → ball[0] 방향(= target) 겨냥
+r = +1.0                             (pocketed)
+  + α · (−min_dist(ball→pocket) / d_max)   (shaping, 항상 ≤ 0)
 ```
 
-**왜 Phase 1인가:** Phase 0(n_balls=1)은 다른 공과의 간섭/충돌 경험 없음. Phase 1은 3볼 경험 + 23-dim obs 그대로 재사용 가능.
+- **miss 시**: 볼이 포켓에 가까울수록 덜 나쁜 보상 → gradient 상시 존재
+- **pocketed 시**: shaping ≈ 0 → pocketing reward +1.0이 dominant, signal 오염 없음
+- **α 범위**: 0.1~0.5 (너무 크면 "포켓 근처에 멈추기"만 학습)
+- **d_max**: 테이블 대각선 길이로 정규화 → shaping 범위 [−α, 0]
 
 ### Exp-13 variants
 
-| | 13a | 13b | 13c | 13d |
-|---|-----|-----|-----|-----|
-| **System 2 action** | 공 선택 (discrete 3) | 공+포켓 (discrete 18) | 공+포켓 (discrete 18) | 공+포켓 (discrete 18) |
-| **System 1** | Phase 1 freeze | Phase 1 freeze | Phase 1 freeze | joint 학습 (no pretrain) |
-| **포켓 처리** | System 1 자율 | 비목표 포켓 마스킹 | target pocket 첫 번째 | System 2 지정 |
-| **OOD 리스크** | 낮음 | 중간 | 중간 | 없음 |
-| **핵심 질문** | HRL 구조 자체 유효한가? | masking으로 포켓 강제 가능한가? | 포켓 info가 도움되는가? | pretraining 없이 가능한가? |
+| | 13a | 13b | 13c |
+|---|-----|-----|-----|
+| **α** | 0.3 | 0.1 | 0.5 |
+| **목적** | 기본 검증 | weak shaping | strong shaping 한계 확인 |
 
-**실험 순서:** 13a → 13b/c → 13d (OOD 리스크 낮은 순으로, 13d는 ablation baseline)
+**실험 순서:** 13a → 결과 보고 α 조정
 
 ---
 
 ## Roadmap
 
 ```
-[ ] Exp-13a  HRL-A  공 선택 (discrete 3), Phase 1 freeze, obs 재배열
-[ ] Exp-13b  HRL-B  공+포켓 (discrete 18), Phase 1 freeze, 비목표포켓 마스킹
-[ ] Exp-13c  HRL-C  공+포켓 (discrete 18), Phase 1 freeze, target pocket 첫 번째
-[ ] Exp-13d  HRL-D  공+포켓 (discrete 18), Phase 1 없이 joint 학습 (ablation)
+[ ] Exp-13a  Phase 0 proximity reward α=0.3 (기본 검증)
+[ ] Exp-13b  Phase 0 proximity reward α=0.1 (weak shaping)
+[ ] Exp-13c  Phase 0 proximity reward α=0.5 (strong shaping 한계)
 
-[ ] Exp-14   쿠션 확장 (Exp-13 성공 후)
+[ ] Exp-14a  HRL-A  공 선택 (discrete 3), Phase 1 freeze, obs 재배열
+[ ] Exp-14b  HRL-B  공+포켓 (discrete 18), Phase 1 freeze, 비목표포켓 마스킹
+[ ] Exp-14c  HRL-C  공+포켓 (discrete 18), Phase 1 freeze, target pocket 첫 번째
+[ ] Exp-14d  HRL-D  공+포켓 (discrete 18), Phase 1 없이 joint 학습 (ablation)
+
+[ ] Exp-15   쿠션 확장 (Exp-14 성공 후)
              simulator에 cushion count 추가
              System 2: ball × pocket × n_cushions (3×6×3 = 54)
              System 1: n_cushions를 goal condition으로 받아 다른 각도 전략 학습
@@ -342,7 +342,7 @@ billiards-rl/
 ├── simulator.py          # BilliardsEnv (n_balls=1: Phase 0, n_balls=3: Phase 1)
 ├── train.py              # SAC/PPO/TQC 훈련 CLI (주요 진입점)
 ├── train_curriculum.py   # Curriculum ms=5→4→3
-├── logger.py             # ExperimentLogger + AimEvalCallback (Aim 연동)
+├── logger.py             # ExperimentLogger + BilliardsEvalCallback (Aim 연동)
 ├── compare.py            # 실험 결과 비교 테이블 + 학습 곡선 PNG
 ├── visualize.py          # 이미지 그리드 / MP4 영상 / before-after 비교
 ├── benchmark.py          # 하드웨어 벤치마크 (vec_env × device 조합)
