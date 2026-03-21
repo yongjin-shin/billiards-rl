@@ -68,7 +68,8 @@ class BilliardsEnv(gym.Env):
                  clear_bonus: float = 0.0,
                  shots_taken: bool = False,
                  abs_angle: bool = False,
-                 legacy_placement: bool = False):
+                 legacy_placement: bool = False,
+                 proximity_reward_alpha: float = 0.0):
         super().__init__()
         assert n_balls >= 1, "n_balls must be >= 1"
 
@@ -84,7 +85,11 @@ class BilliardsEnv(gym.Env):
         #   cue y∈[0.2,0.4], target y∈[0.6,0.9] — always upper/lower separated
         # legacy_placement=False (default): current unified ranges
         #   cue y∈[0.15,0.40], target y∈[0.30,0.85] — wider, harder
-        self.legacy_placement    = legacy_placement and (n_balls == 1)
+        self.legacy_placement         = legacy_placement and (n_balls == 1)
+        # proximity_reward_alpha > 0: dense shaping for Phase 0 (n_balls=1 only)
+        #   r += alpha * (-min_dist(ball→pocket) / d_max)  when ball NOT pocketed
+        #   range of shaping term: [-alpha, 0]
+        self.proximity_reward_alpha   = proximity_reward_alpha if n_balls == 1 else 0.0
 
         # Ball IDs: "1", "2", "3", ...
         self._ball_ids = [str(i + 1) for i in range(n_balls)]
@@ -117,6 +122,7 @@ class BilliardsEnv(gym.Env):
         self._pocket_obs     = self._build_pocket_obs()
         self._pocket_centers = self._pocket_obs.reshape(6, 2) * \
                                np.array([self.table_width, self.table_length])
+        self._d_max          = float(np.sqrt(self.table_width**2 + self.table_length**2))
 
         self.system      = None
         self._step_count = 0
@@ -247,6 +253,15 @@ class BilliardsEnv(gym.Env):
         # n_balls>1: 스크래치 시 -0.5 (ball-in-hand 기회 손실)
         if scratch and self.n_balls > 1:
             reward -= 0.5
+        # Proximity reward shaping (Phase 0 only, Exp-13+)
+        # miss 시: 볼~포켓 최소거리의 음수를 normalized 보상으로 추가 → dense gradient
+        # pocketed 시: 볼이 사라지므로 shaping 0 (pocketing reward +1.0이 dominant)
+        if self.proximity_reward_alpha > 0.0 and self.n_balls == 1 and not newly_pocketed:
+            bid = self._ball_ids[0]
+            if bid in self.system.balls:
+                ball_pos = self.system.balls[bid].state.rvw[0, :2]
+                min_dist = float(np.min(np.linalg.norm(self._pocket_centers - ball_pos, axis=1)))
+                reward  += self.proximity_reward_alpha * (-min_dist / self._d_max)
         if truncated:
             reward -= self.trunc_penalty
         # Clear bonus: reward faster clears — scales as 1/steps_used so fewer steps = bigger bonus

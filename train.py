@@ -195,7 +195,8 @@ def make_exp_dir(algo: str, steps: int, seed: int, n_balls: int = 1,
                  learning_rate: float = 3e-4,
                  gradient_steps: int = 1,
                  abs_angle: bool = False,
-                 legacy_placement: bool = False) -> str:
+                 legacy_placement: bool = False,
+                 proximity_reward_alpha: float = 0.0) -> str:
     """Create and return a unique experiment directory path."""
     ts      = datetime.now().strftime("%Y%m%d_%H%M%S")
     env_tag = f"_multi{n_balls}_ms{max_steps}" if n_balls > 1 else ""
@@ -214,6 +215,8 @@ def make_exp_dir(algo: str, steps: int, seed: int, n_balls: int = 1,
         rew_tag += "_aa"
     if legacy_placement:
         rew_tag += "_legacyplace"
+    if proximity_reward_alpha > 0.0:
+        rew_tag += f"_pr{proximity_reward_alpha}"
     name    = f"{algo}_{steps // 1000}k_s{seed}{env_tag}{rew_tag}_{ts}"
     path    = os.path.join("logs", "experiments", name)
     os.makedirs(os.path.join(path, "best_model"), exist_ok=True)
@@ -240,7 +243,8 @@ def train(algo: str = "SAC", steps: int = 1_000_000, seed: int = 42,
           learning_rate: float = 3e-4,
           gradient_steps: int = 1,
           abs_angle: bool = False,
-          legacy_placement: bool = False) -> str:
+          legacy_placement: bool = False,
+          proximity_reward_alpha: float = 0.0) -> str:
     """
     Train one algorithm for `steps` timesteps with a fixed seed.
     Returns the experiment directory path.
@@ -257,6 +261,9 @@ def train(algo: str = "SAC", steps: int = 1_000_000, seed: int = 42,
     gradient_steps       → gradient updates per env step (default 1; set to N_ENVS=10 for 1:1 ratio)
     legacy_placement     → if True (n_balls=1 only): use original Exp-01 placement ranges
                            cue y∈[0.2,0.4], target y∈[0.6,0.9] — always upper/lower separated
+    proximity_reward_alpha → shaping coefficient (n_balls=1 only, Exp-13+)
+                           r += alpha * (-min_dist(ball→pocket) / d_max) on miss
+                           0.0 = disabled (default, backward-compatible)
     """
     algo     = algo.upper()
     algo_map = _build_algo_map()
@@ -267,13 +274,13 @@ def train(algo: str = "SAC", steps: int = 1_000_000, seed: int = 42,
 
     set_global_seed(seed)
 
-    exp_dir   = make_exp_dir(algo, steps, seed, n_balls, max_steps, step_penalty, trunc_penalty, progressive_penalty, clear_bonus, shots_taken, learning_rate, gradient_steps, abs_angle, legacy_placement)
+    exp_dir   = make_exp_dir(algo, steps, seed, n_balls, max_steps, step_penalty, trunc_penalty, progressive_penalty, clear_bonus, shots_taken, learning_rate, gradient_steps, abs_angle, legacy_placement, proximity_reward_alpha)
 
     with _tee_output(os.path.join(exp_dir, "train.log")):
         _train_inner(algo, steps, seed, n_balls, max_steps, step_penalty,
                      trunc_penalty, progressive_penalty, clear_bonus,
                      shots_taken, learning_rate, gradient_steps, abs_angle,
-                     legacy_placement, exp_dir)
+                     legacy_placement, proximity_reward_alpha, exp_dir)
 
     return exp_dir
 
@@ -281,7 +288,7 @@ def train(algo: str = "SAC", steps: int = 1_000_000, seed: int = 42,
 def _train_inner(algo, steps, seed, n_balls, max_steps, step_penalty,
                  trunc_penalty, progressive_penalty, clear_bonus,
                  shots_taken, learning_rate, gradient_steps, abs_angle,
-                 legacy_placement, exp_dir):
+                 legacy_placement, proximity_reward_alpha, exp_dir):
     AlgoClass = _build_algo_map()[algo]
     algo_cfg  = ALGO_CONFIGS[algo]
 
@@ -308,9 +315,10 @@ def _train_inner(algo, steps, seed, n_balls, max_steps, step_penalty,
         "progressive_penalty" : progressive_penalty,
         "clear_bonus"         : clear_bonus,
         "shots_taken"         : shots_taken,
-        "abs_angle"           : abs_angle,
-        "legacy_placement"    : legacy_placement,
-        "learning_rate"       : learning_rate,
+        "abs_angle"              : abs_angle,
+        "legacy_placement"       : legacy_placement,
+        "proximity_reward_alpha" : proximity_reward_alpha,
+        "learning_rate"          : learning_rate,
         "gradient_steps"      : gradient_steps,
         "env"                 : f"BilliardsEnv-n{n_balls}-ms{max_steps}",
         "exp_dir"    : exp_dir,
@@ -319,7 +327,7 @@ def _train_inner(algo, steps, seed, n_balls, max_steps, step_penalty,
 
     # ── Random baseline ───────────────────────────────────────────────────────
     print("[1/3] Random agent baseline (500 episodes)...")
-    baseline_env = BilliardsEnv(n_balls=n_balls, max_steps=max_steps, step_penalty=step_penalty, trunc_penalty=trunc_penalty, progressive_penalty=progressive_penalty, clear_bonus=clear_bonus, shots_taken=shots_taken, abs_angle=abs_angle, legacy_placement=legacy_placement)
+    baseline_env = BilliardsEnv(n_balls=n_balls, max_steps=max_steps, step_penalty=step_penalty, trunc_penalty=trunc_penalty, progressive_penalty=progressive_penalty, clear_bonus=clear_bonus, shots_taken=shots_taken, abs_angle=abs_angle, legacy_placement=legacy_placement, proximity_reward_alpha=proximity_reward_alpha)
     baseline_env.reset(seed=seed)
     total_pocketed_baseline = 0
     for _ in range(500):
@@ -346,13 +354,14 @@ def _train_inner(algo, steps, seed, n_balls, max_steps, step_penalty,
                        "step_penalty": step_penalty, "trunc_penalty": trunc_penalty,
                        "progressive_penalty": progressive_penalty,
                        "clear_bonus": clear_bonus, "shots_taken": shots_taken,
-                       "abs_angle": abs_angle, "legacy_placement": legacy_placement},
+                       "abs_angle": abs_angle, "legacy_placement": legacy_placement,
+                       "proximity_reward_alpha": proximity_reward_alpha},
         vec_env_cls = SubprocVecEnv,
         monitor_dir = os.path.join(exp_dir, "train"),
         seed        = seed,
     )
 
-    _eval_env = Monitor(BilliardsEnv(n_balls=n_balls, max_steps=max_steps, step_penalty=step_penalty, trunc_penalty=trunc_penalty, progressive_penalty=progressive_penalty, clear_bonus=clear_bonus, shots_taken=shots_taken, abs_angle=abs_angle, legacy_placement=legacy_placement),
+    _eval_env = Monitor(BilliardsEnv(n_balls=n_balls, max_steps=max_steps, step_penalty=step_penalty, trunc_penalty=trunc_penalty, progressive_penalty=progressive_penalty, clear_bonus=clear_bonus, shots_taken=shots_taken, abs_angle=abs_angle, legacy_placement=legacy_placement, proximity_reward_alpha=proximity_reward_alpha),
                         filename=os.path.join(exp_dir, "eval", "monitor"))
     _eval_env.reset(seed=seed)
 
@@ -398,7 +407,8 @@ def _train_inner(algo, steps, seed, n_balls, max_steps, step_penalty,
     if learning_rate != 3e-4:   cfg_parts.append(f"lr{learning_rate}")
     if gradient_steps != 1:     cfg_parts.append(f"gs{gradient_steps}")
     if abs_angle:               cfg_parts.append("aa")
-    if legacy_placement:        cfg_parts.append("lp")
+    if legacy_placement:              cfg_parts.append("lp")
+    if proximity_reward_alpha > 0.0:  cfg_parts.append(f"pr{proximity_reward_alpha}")
     _ts_str = time.strftime("%Y-%m-%d@%H%M")   # e.g. 2026-03-03@0752
     tb_log_name = f"{'_'.join(cfg_parts)}/{algo}/s{seed}/{_ts_str}"
 
@@ -424,7 +434,7 @@ def _train_inner(algo, steps, seed, n_balls, max_steps, step_penalty,
     best_model = AlgoClass.load(best_model_path)
     print(f"\n[3/3] Evaluating best {algo} checkpoint (500 episodes)...")
 
-    final_eval_env = BilliardsEnv(n_balls=n_balls, max_steps=max_steps, step_penalty=step_penalty, trunc_penalty=trunc_penalty, progressive_penalty=progressive_penalty, clear_bonus=clear_bonus, shots_taken=shots_taken, abs_angle=abs_angle, legacy_placement=legacy_placement)
+    final_eval_env = BilliardsEnv(n_balls=n_balls, max_steps=max_steps, step_penalty=step_penalty, trunc_penalty=trunc_penalty, progressive_penalty=progressive_penalty, clear_bonus=clear_bonus, shots_taken=shots_taken, abs_angle=abs_angle, legacy_placement=legacy_placement, proximity_reward_alpha=proximity_reward_alpha)
     final_eval_env.reset(seed=seed)
     n_eval = 500
     total_pocketed_eval, clears = 0, 0
@@ -515,11 +525,14 @@ def main():
                         help="Gradient updates per env step (default: 1; set to N_ENVS=10 for 1:1 ratio)")
     parser.add_argument("--abs-angle", action="store_true",
                         help="Use absolute cue angle [0, 2π] instead of delta from nearest ball (Exp-12)")
+    parser.add_argument("--proximity-reward-alpha", type=float, default=0.0,
+                        help="Proximity reward shaping coefficient (n_balls=1 only, Exp-13+). "
+                             "Adds alpha*(-min_dist(ball→pocket)/d_max) on miss. 0.0 = disabled (default)")
     args = parser.parse_args()
     train(args.algo, args.steps, args.seed, args.n_balls, args.max_steps,
           args.step_penalty, args.trunc_penalty, args.progressive_penalty,
           args.clear_bonus, args.shots_taken, args.learning_rate, args.gradient_steps,
-          args.abs_angle)
+          args.abs_angle, proximity_reward_alpha=args.proximity_reward_alpha)
 
 
 if __name__ == "__main__":
