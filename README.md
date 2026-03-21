@@ -9,9 +9,9 @@ Reinforcement learning on a physics-accurate billiards simulator ([pooltool](htt
 
 | | |
 |---|---|
-| **현재 위치** | Phase 0 bottleneck 확인 — 단일샷 50% → ms=3 clear 8% (0.5³) |
-| **다음 실험** | Exp-13: Phase 0 proximity reward shaping (단일샷 정확도 개선) |
-| **진행 중** | Exp-06 재실험 — seed=0 완료 63.1%/31.2% ≈ 원래 63.9%/33.2% |
+| **현재 위치** | Exp-13 proximity reward — 모든 α에서 baseline 50% 하회. 방향 재검토 중 |
+| **진행 중** | 2M steps 실험 (α=0.0 / α=0.3) — steps 증가 자체의 효과 확인 중 |
+| **Exp-06 재실험** | seed=0 완료 63.1%/31.2% ≈ 원래 63.9%/33.2% (재현 확인) |
 
 ---
 
@@ -29,7 +29,7 @@ Reinforcement learning on a physics-accurate billiards simulator ([pooltool](htt
 | | |
 |---|---|
 | **Observation** | 16-dim: `[cue_xy, ball_xy, p0~p5_xy]` |
-| **Reward** | +1 pocketed, 0 otherwise (Exp-13부터: + α·(−min_dist/d_max) 추가) |
+| **Reward** | +1 pocketed, 0 otherwise |
 | **Episode** | 항상 1 step 후 종료 |
 | **Ball placement** | cue y∈[0.15,0.40] / ball y∈[0.30,0.85] (current)<br>cue y∈[0.20,0.40] / ball y∈[0.60,0.90] (legacy — 원본 Exp-01 조건) |
 
@@ -142,46 +142,52 @@ delta_angle → absolute angle [0, 2π] 교체 실험.
 
 ---
 
-## Next: Exp-13 Phase 0 Proximity Reward
+## Exp-13 결과 · Phase 0 Proximity Reward ❌
 
-### 설계 근거
+### 결과
 
-**Phase 0가 Phase 1의 bottleneck:**
+| α | Pocket% | vs baseline |
+|---|---------|-------------|
+| 0.0 (baseline) | **50.0%** | — |
+| 0.05 | 40.8% | −9.2pp |
+| 0.1 | 37.8% | −12.2pp |
+| 0.3 | 41.4% | −8.6pp |
+| 0.5 | 42.0% | −8.0pp |
 
-| Phase 0 단일샷 정확도 | ms=3 예상 clear rate |
-|----------------------|---------------------|
-| 현재 ~50% | 0.50³ ≈ **12.5%** (실측 8%) |
-| 목표 ~80% | 0.80³ ≈ **51.2%** |
+모든 α에서 baseline 하회. α값에 무관하게 일관된 역효과.
 
-Phase 0 reward가 완전 sparse (+1 / 0)라 miss 시 gradient 없음. 포켓까지의 거리로 dense signal 제공.
+### 관찰
 
-### Reward 설계
+**왜 proximity reward가 작동하지 않는가:**
 
-```
-r = +1.0                             (pocketed)
-  + α · (−min_dist(ball→pocket) / d_max)   (shaping, 항상 ≤ 0)
-```
+쿠션에 1~2번만 맞아도 볼의 최종 위치와 초기 조준 방향 사이의 인과관계가 끊긴다.
+`f(action) → final_pos`가 아니라 `f(action) → chaos`가 되어버리므로,
+포켓 근처에 튕겨 나온 것이 좋은 샷이었다는 보장이 없다.
+**post-shot 최종 거리는 유효한 gradient signal이 아니다.**
 
-- **miss 시**: 볼이 포켓에 가까울수록 덜 나쁜 보상 → gradient 상시 존재
-- **pocketed 시**: shaping ≈ 0 → pocketing reward +1.0이 dominant, signal 오염 없음
-- **α 범위**: 0.1~0.5 (너무 크면 "포켓 근처에 멈추기"만 학습)
-- **d_max**: 테이블 대각선 길이로 정규화 → shaping 범위 [−α, 0]
+**sample complexity 문제:**
 
-**α 시작값:** 0.3. 결과 보고 조정.
+current placement (y=[0.30,0.85])는 legacy (y=[0.60,0.90])보다 훨씬 넓은 공간을 커버하므로,
+에이전트가 6개 포켓 방향을 모두 학습해야 한다. 동일한 1M steps에서 각 구성의 방문 빈도가 줄고,
+coverage가 크게 부족해질 수 있다. 2M 이상이 필요할 수 있으며, world model 기반 접근이
+sample efficiency 측면에서 유리할 수 있다.
+
+> 2M steps 실험 (α=0.0 / α=0.3) 진행 중 — steps 증가 자체의 효과 확인 후 방향 결정.
 
 ---
 
 ## Roadmap
 
 ```
-[ ] Exp-13   Phase 0 proximity reward shaping (α 튜닝)
+[x] Exp-13   Phase 0 proximity reward → 실패 (post-shot 거리 = noise after bounces)
 
-[ ] Exp-14   HRL (Exp-13 성공 후)
-[ ] Exp-15   쿠션 확장 (Exp-14 성공 후)
+[ ] Exp-13b  2M steps (α=0.0 / α=0.3) 진행 중 — steps 효과 단독 확인
+[ ] Exp-14   Phase 0 방향 결정 후 (curriculum placement / world model / 기타)
+[ ] Exp-15   HRL
 
 [ ] cushion / bank shots
 [ ] self-play / full 8-ball
-[ ] DreamerV3 (model-based)
+[ ] DreamerV3 (model-based, sample efficiency)
 ```
 
 ---
@@ -346,6 +352,22 @@ SAC s42: eval crash. PPO s1/s42: 파일 손실 제외.
 **설정:** SAC, seed=42, 1M+500k+500k=2M, sp=0.1, tp=1.0
 
 같은 2M에서 scratch 대비 +1.3pp pocket / +2.0pp clear. Stage 3(500k)만으로도 scratch 2M과 경쟁. ms=2 extension: 더블포켓 필수 → 학습 신호 부재, 실패 예상대로 확인.
+
+---
+
+### Exp-13 · Phase 0 proximity reward ❌
+
+**설정:** SAC, 1M, seed=42, n_balls=1, current placement, α ∈ {0.05, 0.1, 0.3, 0.5}
+
+```
+r = +1.0 (pocketed) + α · (−min_dist(ball→pocket) / d_max)
+```
+
+모든 α에서 baseline(50.0%) 하회 (37.8%~42.0%). α값에 무관한 일관된 역효과.
+
+**근본 원인:** 쿠션 반사 후 볼 최종 위치는 초기 action과 인과관계가 끊김. post-shot 거리는 gradient signal이 아닌 노이즈. sparse +1/0가 오히려 더 깨끗한 신호.
+
+**추가 관찰:** current placement는 legacy 대비 커버 공간이 크게 넓어 (y범위 3배), 동일 steps에서 각 구성 방문 빈도 하락 → sample efficiency 문제. 2M+ 또는 world model 기반 접근 검토 필요.
 
 ---
 
