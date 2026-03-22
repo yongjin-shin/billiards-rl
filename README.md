@@ -157,17 +157,20 @@ delta_angle → absolute angle [0, 2π] 교체 실험.
 모든 α에서 baseline 하회. **post-shot 최종 거리는 유효한 gradient signal이 아니다.**
 쿠션에 1~2번만 맞으면 볼의 최종 위치와 초기 action 사이의 인과관계가 끊김 — `f(action) → chaos`.
 
-### Steps Scaling ✅
+### Steps Scaling ✅ · gradient_steps 한계 확인
 
-| Steps | Pocket% | 증가량 | 효율 |
-|-------|---------|--------|------|
-| 1M | 50.0% | — | — |
-| 2M | 56.2% | +6.2pp | 6.2pp/1M |
-| 5M | **65.8%** | +9.6pp | 3.2pp/1M |
+| Steps | gs | Pocket% | 학습시간 | 효율 |
+|-------|----|---------|---------|------|
+| 1M | 1 | 50.0% | ~20분 | — |
+| 2M | 1 | 56.2% | ~35분 | 6.2pp/1M |
+| 5M | 1 | 65.8% | 91분 | 3.2pp/1M |
+| 5M | 4 | **68.6%** | 187분 | — |
 
-steps 늘릴수록 일관된 성능 향상. 단, **diminishing returns 시작** — 효율이 1M→2M 대비 절반으로 하락.
+steps 늘릴수록 일관된 성능 향상. 단, **diminishing returns 확연** — 효율 절반으로 하락.
 
-**해석:** current placement는 legacy 대비 커버 공간이 크게 넓어 (ball y범위 3배), 에이전트가 6개 포켓 방향을 모두 학습해야 한다. 단순히 더 많은 steps가 필요한 sample complexity 문제. 다음: `gradient_steps` 증가로 동일 steps에서 sample efficiency 개선 시도.
+`gradient_steps=4`는 +2.8pp에 그치며 학습시간 2배 소요 → ROI 낮음.
+
+**결론: flat policy의 ceiling 확인.** `Q(o,a) ≈ P(pocket | positions, angle)`을 binary feedback만으로 근사하는 구조적 한계. physics dynamics를 모르는 상태에서 sample을 아무리 늘려도 벽에 부딪힘. → **World Model (Exp-15)로 방향 전환.**
 
 ---
 
@@ -175,8 +178,9 @@ steps 늘릴수록 일관된 성능 향상. 단, **diminishing returns 시작** 
 
 ```
 [x] Exp-13   Phase 0: proximity reward 실패 + steps scaling 확인 (1M:50% / 2M:56% / 5M:65.8%)
+[x] Exp-14   gradient_steps=4, 5M → 68.6% (+2.8pp, 시간 2배) — flat policy ceiling 확인
 
-[ ] Exp-14   gradient_steps 증가 (현재 1 → 4~8) — 동일 steps에서 sample efficiency 개선
+[ ] Exp-15   World Model — physics dynamics 학습 (f + g) → policy sample efficiency 개선
 [ ] Exp-15   World Model — physics dynamics 학습 (f + g) → policy sample efficiency 개선
              flat policy의 근본 한계: Q(o,a) ≈ P(pocket|positions,angle)을 binary feedback만으로 근사
              → post-shot 궤적을 supervisor로 사용, physics-aware latent 학습
