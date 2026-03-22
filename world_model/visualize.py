@@ -126,32 +126,54 @@ def plot_action_correlation(zs, actions, out_dir, z_dim):
 def plot_latent_traversal(model, zs, out_dir, z_dim, device, n_steps=9):
     """
     각 latent dim을 -3σ ~ +3σ 로 변화시켜 디코딩한 trajectory 시각화.
-    테이블 위에 겹쳐서 그림.
+    좌표 범위는 디코딩 결과에서 동적으로 계산 (절대/상대 좌표 모두 대응).
     """
-    from simulator import BilliardsEnv
-    env   = BilliardsEnv(n_balls=1)
-    W, L  = env.table.w, env.table.l
-
     z_mean = zs.mean(axis=0)
     z_std  = zs.std(axis=0)
 
     n_cols = min(z_dim, 8)   # 최대 8 dim 시각화
+    vals   = np.linspace(-3, 3, n_steps)  # σ 단위
+
+    # ── 1단계: 모든 디코딩 결과를 미리 계산해 좌표 범위 파악 ──────────────
+    all_recons = {}
+    all_xy = []
+    for dim in range(n_cols):
+        for j, v in enumerate(vals):
+            z_sample = z_mean.copy()
+            z_sample[dim] = z_mean[dim] + v * z_std[dim]
+            with torch.no_grad():
+                z_t   = torch.tensor(z_sample, dtype=torch.float32).unsqueeze(0).to(device)
+                recon = model.decoder(z_t).squeeze(0).cpu().numpy()  # (MAX_EVENTS, EVENT_DIM)
+            all_recons[(dim, j)] = recon
+            all_xy.append(recon[:, :2])
+
+    all_xy = np.concatenate(all_xy, axis=0)
+    # 유효한 점만 (0이 아닌 행) 사용해 범위 계산
+    nonzero_mask = (all_xy != 0).any(axis=1)
+    if nonzero_mask.sum() > 0:
+        xy_valid = all_xy[nonzero_mask]
+        pad  = max(abs(xy_valid).max() * 0.15, 0.1)
+        xmin, xmax = xy_valid[:, 0].min() - pad, xy_valid[:, 0].max() + pad
+        ymin, ymax = xy_valid[:, 1].min() - pad, xy_valid[:, 1].max() + pad
+        # 정사각형 비율 유지
+        span = max(xmax - xmin, ymax - ymin)
+        cx   = (xmin + xmax) / 2
+        cy   = (ymin + ymax) / 2
+        xmin, xmax = cx - span / 2, cx + span / 2
+        ymin, ymax = cy - span / 2, cy + span / 2
+    else:
+        xmin, xmax, ymin, ymax = -1, 1, -1, 1
+
+    # ── 2단계: 시각화 ────────────────────────────────────────────────────
     fig, axes = plt.subplots(n_cols, n_steps, figsize=(n_steps * 1.5, n_cols * 1.8))
     alphas = np.linspace(0.3, 1.0, n_steps)
 
     for dim in range(n_cols):
-        vals = np.linspace(-3, 3, n_steps)  # σ 단위
         for j, v in enumerate(vals):
-            ax = axes[dim, j]
-            z_sample = z_mean.copy()
-            z_sample[dim] = z_mean[dim] + v * z_std[dim]
+            ax    = axes[dim, j]
+            recon = all_recons[(dim, j)]
 
-            with torch.no_grad():
-                z_t   = torch.tensor(z_sample, dtype=torch.float32).unsqueeze(0).to(device)
-                recon = model.decoder(z_t).squeeze(0).cpu().numpy()  # (MAX_EVENTS, EVENT_DIM)
-
-            # 테이블 배경
-            ax.set_xlim(0, W); ax.set_ylim(0, L)
+            ax.set_xlim(xmin, xmax); ax.set_ylim(ymin, ymax)
             ax.set_facecolor("#1a5c1a")
             ax.set_xticks([]); ax.set_yticks([])
             if j == 0:
@@ -164,8 +186,11 @@ def plot_latent_traversal(model, zs, out_dir, z_dim, device, n_steps=9):
             ax.plot(xys[:, 0], xys[:, 1], "w-", lw=0.6, alpha=0.5)
             ax.scatter(xys[:, 0], xys[:, 1], c="yellow",
                        s=6, alpha=alphas[j], zorder=3)
+            # 원점 표시 (stick_ball 기준점)
+            ax.scatter([0], [0], c="cyan", s=20, marker="x", zorder=4, linewidths=1)
 
-    plt.suptitle("Latent Dimension Traversal (−3σ → +3σ)", fontsize=10)
+    plt.suptitle("Latent Dimension Traversal (−3σ → +3σ)\n[cyan × = stick_ball origin]",
+                 fontsize=10)
     plt.tight_layout()
     fname = os.path.join(out_dir, "latent_traversal.png")
     plt.savefig(fname, dpi=120)

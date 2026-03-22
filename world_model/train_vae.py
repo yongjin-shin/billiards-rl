@@ -54,12 +54,23 @@ class TrajectoryDataset(Dataset):
             tag = tag_map.get(fname, "unknown")
             tags_list.append(np.full(len(d["obs"]), tag))
 
-        self.obs      = np.concatenate(obs_list)
-        self.actions  = np.concatenate(actions_list)
-        self.events   = np.concatenate(events_list)
-        self.lengths  = np.concatenate(lengths_list)
-        self.pocketed = np.concatenate(pocketed_list)
-        self.tags     = np.concatenate(tags_list)
+        self.obs       = np.concatenate(obs_list)
+        self.actions   = np.concatenate(actions_list)
+        self.events    = np.concatenate(events_list)
+        self.lengths   = np.concatenate(lengths_list)
+        self.pocketed  = np.concatenate(pocketed_list)
+        self.tags      = np.concatenate(tags_list)
+        # n_bounces: npz에 있으면 로드, 없으면 0으로 채움
+        n_bounces_list = []
+        for fname in all_npz:
+            if tags is not None and tag_map.get(fname) not in tags:
+                continue
+            d = np.load(os.path.join(data_dir, fname))
+            if "n_bounces" in d:
+                n_bounces_list.append(d["n_bounces"])
+            else:
+                n_bounces_list.append(np.zeros(len(d["obs"]), dtype=np.int32))
+        self.n_bounces = np.concatenate(n_bounces_list)
 
         print(f"Dataset loaded: {len(self.obs)} episodes")
         print(f"  Tags   : {np.unique(self.tags)}")

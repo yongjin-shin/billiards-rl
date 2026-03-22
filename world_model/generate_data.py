@@ -71,12 +71,25 @@ def extract_trajectory(system, target_id="1"):
       - ball_ball        → target ball 위치 (충돌 지점)
       - target ball 이벤트 → target ball 위치
 
+    위치는 stick_ball 이벤트 위치를 기준으로 상대 좌표로 정규화.
+    (절대 좌표가 latent에 인코딩되어 패턴 학습을 방해하는 것을 방지)
+
     Returns:
         events_enc : (MAX_EVENTS, EVENT_DIM) float32, padded
         length     : int, 실제 이벤트 수
         n_bounces  : int, 쿠션 바운스 횟수 (전체)
     """
     raw = []
+
+    # stick_ball 위치를 기준점으로 먼저 찾기
+    ref_x, ref_y = 0.0, 0.0
+    for e in system.events:
+        if str(e.event_type) == "stick_ball":
+            for agent in e.agents:
+                if hasattr(agent, "agent_type") and agent.agent_type == "ball":
+                    ref_x, ref_y = get_ball_xy(agent)
+                    break
+            break
 
     for e in system.events:
         et = str(e.event_type)
@@ -105,7 +118,8 @@ def extract_trajectory(system, target_id="1"):
                     x, y = get_ball_xy(agent)
                     break
 
-        raw.append((x, y, et))
+        # stick_ball 위치 기준 상대 좌표
+        raw.append((x - ref_x, y - ref_y, et))
 
     # 인코딩 (padding)
     events_enc = np.zeros((MAX_EVENTS, EVENT_DIM), dtype=np.float32)
