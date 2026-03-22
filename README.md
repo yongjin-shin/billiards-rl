@@ -180,10 +180,9 @@ steps 늘릴수록 일관된 성능 향상. 단, **diminishing returns 확연** 
 [x] Exp-13   Phase 0: proximity reward 실패 + steps scaling 확인 (1M:50% / 2M:56% / 5M:65.8%)
 [x] Exp-14   gradient_steps=4, 5M → 68.6% (+2.8pp, 시간 2배) — flat policy ceiling 확인
 
-[ ] Exp-15   World Model — physics dynamics 학습 (f + g) → policy sample efficiency 개선
-[ ] Exp-15   World Model — physics dynamics 학습 (f + g) → policy sample efficiency 개선
-             flat policy의 근본 한계: Q(o,a) ≈ P(pocket|positions,angle)을 binary feedback만으로 근사
-             → post-shot 궤적을 supervisor로 사용, physics-aware latent 학습
+[ ] Exp-15   Trajectory VAE — LSTM encoder + VAE로 physics-aware latent 학습
+             pooltool events (ball_ball 이후 target ball 궤적) → z ∈ R^16
+             t-SNE로 latent 구조 확인, action/pocketed 상관관계 분석
 [ ] Exp-16   Phase 0 HRL — System 2 (포켓 선택 discrete 6) + System 1 (pocket-conditioned)
              World Model 학습 후 System 1 freeze → System 2 학습
 [ ] Exp-17   Phase 1 HRL — System 2 (ball 선택 discrete 3) + System 1 (Phase 1 Exp-10 freeze)
@@ -194,11 +193,9 @@ steps 늘릴수록 일관된 성능 향상. 단, **diminishing returns 확연** 
 
 ---
 
-## Future: Exp-15 · World Model
+## Exp-15 · Trajectory VAE (World Model 기초)
 
-### 근본 문제
-
-현재 flat policy가 학습해야 하는 함수:
+### 근본 문제 (flat policy 한계)
 
 ```
 Q(o, a) ≈ P(pocketed | cue_pos, ball_pos, angle, speed)
@@ -206,61 +203,78 @@ Q(o, a) ≈ P(pocketed | cue_pos, ball_pos, angle, speed)
 
 이 함수는 billiards physics를 완전히 내포해야 하는데:
 - **불연속**: 0.1° 차이로 in/out
-- **비선형**: 쿠션 반사마다 복잡한 변환
 - **chaotic**: 다중 쿠션 후 초기 방향과 인과관계 단절
+- binary reward만으론 막대한 샘플 필요 → 5M steps에서도 68.6% ceiling
 
-binary reward (+1/0)만으로 이를 근사하려면 막대한 샘플이 필요. proximity reward가 실패한 이유도 동일 — post-shot 최종 위치는 이미 physics causal chain이 끊긴 이후.
+proximity reward 실패 원인도 동일 — post-shot 최종 위치는 physics causal chain이 끊긴 이후의 노이즈.
 
-### 아키텍처 설계
-
-```
-f(O_t | a_t) = (O_{t+1}, ..., O_{t+n})   # dynamics model: 궤적 예측
-g(O_{t+1}, ..., O_{t+n}) = h_t            # trajectory encoder → latent z
-p(O_t) = a_t                               # policy (SAC)
-```
-
-**핵심 순환 의존성 문제:**
-`p(O_t, h_t)` 로 만들면 `h_t = g(f(O_t | a_t))` 이고 `a_t = p(O_t, h_t)` → 순환.
-
-**해결책 A — Recurrent (h from past):**
-```
-h_{t-1} = g(f(O_{t-1} | a_{t-1}))   # 지난 샷 궤적 임베딩
-a_t = p(O_t, h_{t-1})                # 현재 action은 과거 h 사용
-```
-LSTM across episodes. 물리 법칙 자체는 에피소드 불변이라 h가 수렴하면 physics context로 작동.
-
-**해결책 B — Imagination / MPC:**
-```
-a* = argmax_a  V( g( f(O_t | a) ) )
-```
-후보 action을 샘플링 → world model로 궤적 상상 → value 평가 → 최선 선택.
-순환 없음. 이게 **TD-MPC / DreamerV3**의 핵심 구조.
-
-### SSM으로의 확장
+### 수식
 
 ```
-z_t = h_t ∈ Z-space          # latent state
-z_{t+1} = transition(z_t, a_t)   # SSM transition
-p(z_t) = a_t                  # policy on latent
+f(O_t | a_t) = (O_{t+1}, ..., O_{t+n})    # dynamics: 궤적
+g(O_{t+1}, ..., O_{t+n}) = h_t             # encoder → latent z
+p(O_t, h_t) = a_t                          # policy
 ```
 
-Z-space에서 imagination rollout으로 policy 학습 → **RSSM (DreamerV3)**.
-physics dynamics를 latent space에서 모델링하므로 real environment interaction 최소화.
+순환 의존성 해결 → **Recurrent** (h from past) 또는 **MPC/imagination** (TD-MPC / DreamerV3 방향).
 
-### 학습 순서
+### Exp-15 구현: Trajectory VAE
+
+**데이터**: pooltool `system.events`에서 `ball_ball` 이후 target ball 궤적 추출
+```
+event = (x, y, type_one_hot_10)  → 12-dim
+sequence: variable length, max 32 events
+```
+
+**이벤트 타입 (10종)**:
+`none` / `stick_ball` / `ball_ball` / `ball_linear_cushion` /
+`ball_circular_cushion` / `ball_pocket` / `sliding_rolling` /
+`rolling_spinning` / `rolling_stationary` / `spinning_stationary`
+
+**모델**:
+```
+Encoder: LSTM(12 → 64) → h_final → μ, log σ² → z ∈ R^z_dim
+Decoder: MLP(z_dim → 128 → 12 × 32)
+Loss:    MSE(pos) + CE(event_type) + β·KL
+```
+
+**분석**:
+- t-SNE: pocketed / n_bounces / tag(SAC vs random) 별 latent 구조
+- action 상관관계: z_dim vs delta_angle / speed
+- latent traversal: 각 dim을 ±3σ로 변화시켜 궤적 디코딩
+
+### 파일 구조
 
 ```
-1단계: 실제 데이터로 f, g 사전 학습 (simulator가 ground truth 제공)
-2단계: world model 안에서 imagination으로 p 학습 (annealing)
-3단계: 실제 환경 검증 → world model 업데이트
+world_model/
+├── data/              # 생성된 trajectory 데이터셋 (.npz + metadata.json)
+├── checkpoints/       # 학습된 VAE 체크포인트
+├── results/           # t-SNE, correlation, traversal 이미지
+├── generate_data.py   # SAC/random 모델로 데이터 수집
+├── model.py           # LSTM encoder + VAE
+├── train_vae.py       # VAE 학습
+├── visualize.py       # t-SNE + latent traversal
+└── analyze.py         # linear probe + correlation 분석
 ```
 
-### 구현 방향
+### 실행 순서
 
-- **단기 (Exp-15a)**: auxiliary task — policy network에 trajectory prediction head 추가
-  - shared backbone이 physics-aware feature 학습
-  - f, g를 simulator GT로 supervised 학습
-- **장기 (Exp-15b)**: DreamerV3 full — RSSM + actor-critic in imagination
+```bash
+# 1. 데이터 생성
+python world_model/generate_data.py --tag sac_5m_gs4 \
+    --model logs/experiments/SAC_5000k_s42_sp0.0_tp0.0_gs4_20260322_150734/best_model/best_model \
+    --n-episodes 5000
+python world_model/generate_data.py --tag random --n-episodes 5000
+
+# 2. VAE 학습 (z_dim 비교)
+python world_model/train_vae.py --z-dim 8
+python world_model/train_vae.py --z-dim 16
+python world_model/train_vae.py --z-dim 32
+
+# 3. 분석
+python world_model/visualize.py --ckpt world_model/checkpoints/vae_z16_*.pt
+python world_model/analyze.py   --ckpt world_model/checkpoints/vae_z16_*.pt
+```
 
 ---
 
