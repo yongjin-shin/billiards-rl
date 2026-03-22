@@ -201,7 +201,7 @@ System 2 (새로 학습): 포켓 선택 (discrete 6)
                        ↓
 obs 재배열: target_pocket_xy → obs 앞에 주입
                        ↓
-System 1 (Phase 0 freeze, 80%+ 달성 후):
+System 1 (pocket-conditioned, freeze 후):
   "이 포켓으로 공을 넣기 위한 각도"를 학습
 ```
 
@@ -211,6 +211,46 @@ System 1 (Phase 0 freeze, 80%+ 달성 후):
 - System 2는 통계적으로 수렴 (에피소드 수천 개 기준)
 
 **구현:** DQN (System 2, discrete 6) + SAC (System 1, continuous) + custom env wrapper
+
+---
+
+### Obs 설계
+
+**현재 Phase 0 obs (16-dim):**
+```
+[cue_x, cue_y,        # 2
+ ball_x, ball_y,      # 2
+ p0_x, p0_y,          # 12 (6 pockets, 순서 고정)
+ p1_x, p1_y,
+ ...
+ p5_x, p5_y]
+```
+
+**Exp-15 System 1 obs (16-dim, 동일 크기):**
+```
+[cue_x, cue_y,              # 2
+ ball_x, ball_y,            # 2
+ target_x, target_y,        # 2  ← 항상 obs[4:6] = 선택된 포켓
+ other_p0_x, other_p0_y,    # 10 (나머지 5 pockets)
+ ...
+ other_p4_x, other_p4_y]
+```
+
+System 2가 포켓 idx를 선택하면 해당 포켓을 obs[4:6]으로 배치, 나머지 5개를 뒤에 채움.
+→ obs 크기 유지 (16-dim), System 1은 항상 "obs[4:6]이 목표 포켓"으로 학습.
+
+**System 1 학습 시 reward 변경:**
+```
+현재: +1 (어느 포켓이든 들어가면)
+변경: +1 (target pocket에 들어갔을 때만)
+```
+
+**Feasible pocket 선택 (random target pocket 문제 해결):**
+```
+cut_angle(pocket_i) = arccos(dot(normalize(B-C), normalize(P_i - B)))
+feasible = [i for i in range(6) if cut_angle(i) < 60°]
+target_pocket = random.choice(feasible)  # fallback: argmin(cut_angle) if empty
+```
 
 ---
 
