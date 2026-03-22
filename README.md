@@ -177,19 +177,90 @@ steps 늘릴수록 일관된 성능 향상. 단, **diminishing returns 시작** 
 [x] Exp-13   Phase 0: proximity reward 실패 + steps scaling 확인 (1M:50% / 2M:56% / 5M:65.8%)
 
 [ ] Exp-14   gradient_steps 증가 (현재 1 → 4~8) — 동일 steps에서 sample efficiency 개선
-[ ] Exp-15   Phase 0 HRL — System 2 (포켓 선택 discrete 6) + System 1 (1-ball aiming)
-             Phase 0 충분히 향상(80%+) 후 System 1 freeze → System 2 학습
-             credit assignment: System 1 freeze 후 실패 = System 2 탓으로 귀결
-[ ] Exp-16   Phase 1 HRL — System 2 (ball 선택 discrete 3) + System 1 (Phase 1 Exp-10 freeze)
+[ ] Exp-15   World Model — physics dynamics 학습 (f + g) → policy sample efficiency 개선
+             flat policy의 근본 한계: Q(o,a) ≈ P(pocket|positions,angle)을 binary feedback만으로 근사
+             → post-shot 궤적을 supervisor로 사용, physics-aware latent 학습
+[ ] Exp-16   Phase 0 HRL — System 2 (포켓 선택 discrete 6) + System 1 (pocket-conditioned)
+             World Model 학습 후 System 1 freeze → System 2 학습
+[ ] Exp-17   Phase 1 HRL — System 2 (ball 선택 discrete 3) + System 1 (Phase 1 Exp-10 freeze)
 
 [ ] cushion / bank shots
 [ ] self-play / full 8-ball
-[ ] DreamerV3 (model-based, sample efficiency)
 ```
 
 ---
 
-## Future: Exp-15 · Phase 0 HRL
+## Future: Exp-15 · World Model
+
+### 근본 문제
+
+현재 flat policy가 학습해야 하는 함수:
+
+```
+Q(o, a) ≈ P(pocketed | cue_pos, ball_pos, angle, speed)
+```
+
+이 함수는 billiards physics를 완전히 내포해야 하는데:
+- **불연속**: 0.1° 차이로 in/out
+- **비선형**: 쿠션 반사마다 복잡한 변환
+- **chaotic**: 다중 쿠션 후 초기 방향과 인과관계 단절
+
+binary reward (+1/0)만으로 이를 근사하려면 막대한 샘플이 필요. proximity reward가 실패한 이유도 동일 — post-shot 최종 위치는 이미 physics causal chain이 끊긴 이후.
+
+### 아키텍처 설계
+
+```
+f(O_t | a_t) = (O_{t+1}, ..., O_{t+n})   # dynamics model: 궤적 예측
+g(O_{t+1}, ..., O_{t+n}) = h_t            # trajectory encoder → latent z
+p(O_t) = a_t                               # policy (SAC)
+```
+
+**핵심 순환 의존성 문제:**
+`p(O_t, h_t)` 로 만들면 `h_t = g(f(O_t | a_t))` 이고 `a_t = p(O_t, h_t)` → 순환.
+
+**해결책 A — Recurrent (h from past):**
+```
+h_{t-1} = g(f(O_{t-1} | a_{t-1}))   # 지난 샷 궤적 임베딩
+a_t = p(O_t, h_{t-1})                # 현재 action은 과거 h 사용
+```
+LSTM across episodes. 물리 법칙 자체는 에피소드 불변이라 h가 수렴하면 physics context로 작동.
+
+**해결책 B — Imagination / MPC:**
+```
+a* = argmax_a  V( g( f(O_t | a) ) )
+```
+후보 action을 샘플링 → world model로 궤적 상상 → value 평가 → 최선 선택.
+순환 없음. 이게 **TD-MPC / DreamerV3**의 핵심 구조.
+
+### SSM으로의 확장
+
+```
+z_t = h_t ∈ Z-space          # latent state
+z_{t+1} = transition(z_t, a_t)   # SSM transition
+p(z_t) = a_t                  # policy on latent
+```
+
+Z-space에서 imagination rollout으로 policy 학습 → **RSSM (DreamerV3)**.
+physics dynamics를 latent space에서 모델링하므로 real environment interaction 최소화.
+
+### 학습 순서
+
+```
+1단계: 실제 데이터로 f, g 사전 학습 (simulator가 ground truth 제공)
+2단계: world model 안에서 imagination으로 p 학습 (annealing)
+3단계: 실제 환경 검증 → world model 업데이트
+```
+
+### 구현 방향
+
+- **단기 (Exp-15a)**: auxiliary task — policy network에 trajectory prediction head 추가
+  - shared backbone이 physics-aware feature 학습
+  - f, g를 simulator GT로 supervised 학습
+- **장기 (Exp-15b)**: DreamerV3 full — RSSM + actor-critic in imagination
+
+---
+
+## Future: Exp-16 · Phase 0 HRL
 
 ### 설계 근거
 
@@ -254,7 +325,7 @@ target_pocket = random.choice(feasible)  # fallback: argmin(cut_angle) if empty
 
 ---
 
-## Future: Exp-16 · Phase 1 HRL
+## Future: Exp-17 · Phase 1 HRL
 
 ### 설계 근거
 
