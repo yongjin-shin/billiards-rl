@@ -220,7 +220,8 @@ p(O_t, h_t) = a_t                          # policy
 
 ### Exp-15 구현: Trajectory VAE
 
-**데이터**: pooltool `system.events`에서 `ball_ball` 이후 target ball 궤적 추출
+**데이터**: pooltool `system.events`에서 `stick_ball` 부터 전체 궤적 추출
+(cue 접근 경로 + ball_ball 충돌 + target ball 이후 경로 모두 포함)
 ```
 event = (x, y, type_one_hot_10)  → 12-dim
 sequence: variable length, max 32 events

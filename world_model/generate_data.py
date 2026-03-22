@@ -63,44 +63,47 @@ def get_ball_xy(agent):
 
 def extract_trajectory(system, target_id="1"):
     """
-    ball_ball 이벤트 이후 target ball의 궤적 이벤트를 추출.
+    stick_ball 부터 전체 궤적 이벤트를 추출.
+    cue ball의 접근 경로 + ball_ball 충돌 + target ball 이후 경로 모두 포함.
+
+    각 이벤트에서 위치는:
+      - cue 관련 이벤트 → cue ball 위치
+      - ball_ball        → target ball 위치 (충돌 지점)
+      - target ball 이벤트 → target ball 위치
 
     Returns:
         events_enc : (MAX_EVENTS, EVENT_DIM) float32, padded
         length     : int, 실제 이벤트 수
-        n_bounces  : int, 쿠션 바운스 횟수 (target ball 기준)
+        n_bounces  : int, 쿠션 바운스 횟수 (전체)
     """
     raw = []
-    found_collision = False
 
     for e in system.events:
         et = str(e.event_type)
 
-        # ball_ball: 충돌 시점 — 여기서부터 target ball 추적 시작
+        # 더미 이벤트 스킵
+        if et == "none":
+            continue
+
+        # 이벤트에서 대표 위치 추출:
+        # ball_ball → target ball 위치 우선, 없으면 첫 번째 ball agent
+        # 나머지  → 첫 번째 ball agent 위치
+        x, y = 0.0, 0.0
         if et == "ball_ball":
-            found_collision = True
-            # target ball 위치 찾기
-            x, y = 0.0, 0.0
             for agent in e.agents:
                 if agent.id == target_id:
                     x, y = get_ball_xy(agent)
                     break
-            raw.append((x, y, et))
-            continue
-
-        if not found_collision:
-            continue
-
-        # ball_ball 이후: target ball 관련 이벤트만
-        agent_ids = {a.id for a in e.agents}
-        if target_id not in agent_ids and et not in ("none",):
-            continue
-
-        x, y = 0.0, 0.0
-        for agent in e.agents:
-            if agent.id == target_id:
-                x, y = get_ball_xy(agent)
-                break
+            else:
+                for agent in e.agents:
+                    if agent.agent_type == "ball":
+                        x, y = get_ball_xy(agent)
+                        break
+        else:
+            for agent in e.agents:
+                if hasattr(agent, "agent_type") and agent.agent_type == "ball":
+                    x, y = get_ball_xy(agent)
+                    break
 
         raw.append((x, y, et))
 
