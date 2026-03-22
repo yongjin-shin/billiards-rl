@@ -177,7 +177,10 @@ steps 늘릴수록 일관된 성능 향상. 단, **diminishing returns 시작** 
 [x] Exp-13   Phase 0: proximity reward 실패 + steps scaling 확인 (1M:50% / 2M:56% / 5M:65.8%)
 
 [ ] Exp-14   gradient_steps 증가 (현재 1 → 4~8) — 동일 steps에서 sample efficiency 개선
-[ ] Exp-15   HRL (Phase 0 충분히 향상 후)
+[ ] Exp-15   Phase 0 HRL — System 2 (포켓 선택 discrete 6) + System 1 (1-ball aiming)
+             Phase 0 충분히 향상(80%+) 후 System 1 freeze → System 2 학습
+             credit assignment: System 1 freeze 후 실패 = System 2 탓으로 귀결
+[ ] Exp-16   Phase 1 HRL — System 2 (ball 선택 discrete 3) + System 1 (Phase 1 Exp-10 freeze)
 
 [ ] cushion / bank shots
 [ ] self-play / full 8-ball
@@ -186,7 +189,32 @@ steps 늘릴수록 일관된 성능 향상. 단, **diminishing returns 시작** 
 
 ---
 
-## Future: Exp-14 HRL
+## Future: Exp-15 · Phase 0 HRL
+
+### 설계 근거
+
+Phase 0 flat policy의 문제: delta_angle 기준이 nearest ball 방향이라 **어느 포켓을 노릴지 implicit하게만 결정**됨.
+커리큘럼 등 학습 과정에서 nearest pocket bias가 생길 수 있음.
+
+```
+System 2 (새로 학습): 포켓 선택 (discrete 6)
+                       ↓
+obs 재배열: target_pocket_xy → obs 앞에 주입
+                       ↓
+System 1 (Phase 0 freeze, 80%+ 달성 후):
+  "이 포켓으로 공을 넣기 위한 각도"를 학습
+```
+
+**Credit assignment 해결 방법:**
+- System 1을 먼저 충분히 학습 후 freeze
+- 이후 System 2 학습 시 실패 원인 = System 2의 포켓 선택 탓으로 귀결
+- System 2는 통계적으로 수렴 (에피소드 수천 개 기준)
+
+**구현:** DQN (System 2, discrete 6) + SAC (System 1, continuous) + custom env wrapper
+
+---
+
+## Future: Exp-16 · Phase 1 HRL
 
 ### 설계 근거
 
@@ -198,10 +226,8 @@ steps 늘릴수록 일관된 성능 향상. 단, **diminishing returns 시작** 
 | **reward** | 즉각적 (+1 per pocket) | 희박하고 지연됨 (9% clear) |
 | **현재 문제** | nearest-ball greedy에 하드코딩됨 | gradient 신호 거의 없음 |
 
-**해결:** System 2가 target ball을 명시적으로 지정 → obs 재배열 → Phase 1 policy(System 1)가 실행.
-
 ```
-System 2 (새로 학습):  target ball 선택 (discrete)
+System 2 (새로 학습):  target ball 선택 (discrete 3)
                        ↓
 obs 재배열:  [cue_xy, target_xyz, other1_xyz, other2_xyz, 6pockets]
              target ball → ball[0] 위치로 이동
@@ -210,19 +236,16 @@ System 1 (Phase 1 Exp-10 freeze):
   delta_angle = 0 → ball[0] 방향(= target) 겨냥
 ```
 
-**왜 Phase 1인가:** Phase 0(n_balls=1)은 다른 공과의 간섭/충돌 경험 없음. Phase 1은 3볼 경험 + 23-dim obs 그대로 재사용 가능.
+### Exp-16 variants
 
-### Exp-14 variants
+| | 16a | 16b | 16c |
+|---|-----|-----|-----|
+| **System 2 action** | 공 선택 (discrete 3) | 공+포켓 (discrete 18) | 공+포켓 (discrete 18) |
+| **System 1** | Phase 1 freeze | Phase 1 freeze | joint 학습 |
+| **OOD 리스크** | 낮음 | 중간 | 없음 |
+| **핵심 질문** | HRL 구조 자체 유효한가? | 포켓 info가 도움되는가? | pretraining 없이 가능한가? |
 
-| | 14a | 14b | 14c | 14d |
-|---|-----|-----|-----|-----|
-| **System 2 action** | 공 선택 (discrete 3) | 공+포켓 (discrete 18) | 공+포켓 (discrete 18) | 공+포켓 (discrete 18) |
-| **System 1** | Phase 1 freeze | Phase 1 freeze | Phase 1 freeze | joint 학습 (no pretrain) |
-| **포켓 처리** | System 1 자율 | 비목표 포켓 마스킹 | target pocket 첫 번째 | System 2 지정 |
-| **OOD 리스크** | 낮음 | 중간 | 중간 | 없음 |
-| **핵심 질문** | HRL 구조 자체 유효한가? | masking으로 포켓 강제 가능한가? | 포켓 info가 도움되는가? | pretraining 없이 가능한가? |
-
-**실험 순서:** 14a → 14b/c → 14d (OOD 리스크 낮은 순으로, 14d는 ablation baseline)
+**실험 순서:** 16a → 16b → 16c
 
 ---
 
