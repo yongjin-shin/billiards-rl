@@ -9,8 +9,8 @@ Reinforcement learning on a physics-accurate billiards simulator ([pooltool](htt
 
 | | |
 |---|---|
-| **현재 위치** | Exp-13 proximity reward — 모든 α에서 baseline 50% 하회. 방향 재검토 중 |
-| **진행 중** | 2M steps 실험 (α=0.0 / α=0.3) — steps 증가 자체의 효과 확인 중 |
+| **현재 위치** | Phase 0 steps scaling 확인 — 1M:50% / 2M:56% / 5M:65.8%. steps ∝ 성능 |
+| **다음 실험** | gradient_steps 증가로 sample efficiency 개선 시도 |
 | **Exp-06 재실험** | seed=0 완료 63.1%/31.2% ≈ 원래 63.9%/33.2% (재현 확인) |
 
 ---
@@ -142,48 +142,42 @@ delta_angle → absolute angle [0, 2π] 교체 실험.
 
 ---
 
-## Exp-13 결과 · Phase 0 Proximity Reward ❌
+## Exp-13 결과 · Phase 0 Reward Shaping & Steps Scaling
 
-### 결과
+### Proximity Reward ❌
 
 | α | Pocket% | vs baseline |
 |---|---------|-------------|
-| 0.0 (baseline) | **50.0%** | — |
+| 0.0 (baseline, 1M) | **50.0%** | — |
 | 0.05 | 40.8% | −9.2pp |
 | 0.1 | 37.8% | −12.2pp |
 | 0.3 | 41.4% | −8.6pp |
 | 0.5 | 42.0% | −8.0pp |
 
-모든 α에서 baseline 하회. α값에 무관하게 일관된 역효과.
+모든 α에서 baseline 하회. **post-shot 최종 거리는 유효한 gradient signal이 아니다.**
+쿠션에 1~2번만 맞으면 볼의 최종 위치와 초기 action 사이의 인과관계가 끊김 — `f(action) → chaos`.
 
-### 관찰
+### Steps Scaling ✅
 
-**왜 proximity reward가 작동하지 않는가:**
+| Steps | Pocket% | 증가량 | 효율 |
+|-------|---------|--------|------|
+| 1M | 50.0% | — | — |
+| 2M | 56.2% | +6.2pp | 6.2pp/1M |
+| 5M | **65.8%** | +9.6pp | 3.2pp/1M |
 
-쿠션에 1~2번만 맞아도 볼의 최종 위치와 초기 조준 방향 사이의 인과관계가 끊긴다.
-`f(action) → final_pos`가 아니라 `f(action) → chaos`가 되어버리므로,
-포켓 근처에 튕겨 나온 것이 좋은 샷이었다는 보장이 없다.
-**post-shot 최종 거리는 유효한 gradient signal이 아니다.**
+steps 늘릴수록 일관된 성능 향상. 단, **diminishing returns 시작** — 효율이 1M→2M 대비 절반으로 하락.
 
-**sample complexity 문제:**
-
-current placement (y=[0.30,0.85])는 legacy (y=[0.60,0.90])보다 훨씬 넓은 공간을 커버하므로,
-에이전트가 6개 포켓 방향을 모두 학습해야 한다. 동일한 1M steps에서 각 구성의 방문 빈도가 줄고,
-coverage가 크게 부족해질 수 있다. 2M 이상이 필요할 수 있으며, world model 기반 접근이
-sample efficiency 측면에서 유리할 수 있다.
-
-> 2M steps 실험 (α=0.0 / α=0.3) 진행 중 — steps 증가 자체의 효과 확인 후 방향 결정.
+**해석:** current placement는 legacy 대비 커버 공간이 크게 넓어 (ball y범위 3배), 에이전트가 6개 포켓 방향을 모두 학습해야 한다. 단순히 더 많은 steps가 필요한 sample complexity 문제. 다음: `gradient_steps` 증가로 동일 steps에서 sample efficiency 개선 시도.
 
 ---
 
 ## Roadmap
 
 ```
-[x] Exp-13   Phase 0 proximity reward → 실패 (post-shot 거리 = noise after bounces)
+[x] Exp-13   Phase 0: proximity reward 실패 + steps scaling 확인 (1M:50% / 2M:56% / 5M:65.8%)
 
-[ ] Exp-13b  2M steps (α=0.0 / α=0.3) 진행 중 — steps 효과 단독 확인
-[ ] Exp-14   Phase 0 방향 결정 후 (curriculum placement / world model / 기타)
-[ ] Exp-15   HRL
+[ ] Exp-14   gradient_steps 증가 (현재 1 → 4~8) — 동일 steps에서 sample efficiency 개선
+[ ] Exp-15   HRL (Phase 0 충분히 향상 후)
 
 [ ] cushion / bank shots
 [ ] self-play / full 8-ball
@@ -355,29 +349,32 @@ SAC s42: eval crash. PPO s1/s42: 파일 손실 제외.
 
 ---
 
-### Exp-13 · Phase 0 proximity reward ❌
-
-**설정:** SAC, 1M, seed=42, n_balls=1, current placement, α ∈ {0.05, 0.1, 0.3, 0.5}
-
-```
-r = +1.0 (pocketed) + α · (−min_dist(ball→pocket) / d_max)
-```
-
-모든 α에서 baseline(50.0%) 하회 (37.8%~42.0%). α값에 무관한 일관된 역효과.
-
-**근본 원인:** 쿠션 반사 후 볼 최종 위치는 초기 action과 인과관계가 끊김. post-shot 거리는 gradient signal이 아닌 노이즈. sparse +1/0가 오히려 더 깨끗한 신호.
-
-**추가 관찰:** current placement는 legacy 대비 커버 공간이 크게 넓어 (y범위 3배), 동일 steps에서 각 구성 방문 빈도 하락 → sample efficiency 문제. 2M+ 또는 world model 기반 접근 검토 필요.
-
----
-
 ### Exp-12 · abs_angle ❌
 
 **설정:** SAC, ms=3, sp=0.1, tp=1.0, 3 seeds × 5M (seed=0/42 crash, seed=1만 완료)
 
 seed=1 5M: 37.8% / 6.4% — delta 2M(41.7%/8.4%)보다 낮음. 2.5× 스텝 소모로 오히려 뒤처짐. inductive bias(delta=0 → 공 직접 겨냥) 부재가 탐색 공간을 폭발시킴.
 
-**abs_angle 폐기. delta_angle + System 2 명시적 target 지정(Exp-13)으로 공 선택 자유도 해결.**
+**abs_angle 폐기. delta_angle 유지.**
+
+---
+
+### Exp-13 · Phase 0 reward shaping & steps scaling
+
+**설정:** SAC, n_balls=1, current placement, seed=42
+
+**proximity reward (1M):** α ∈ {0.05, 0.1, 0.3, 0.5} 전부 baseline(50%) 하회.
+쿠션 반사 후 볼 최종 위치 ≠ action 결과 → post-shot 거리는 노이즈. sparse +1/0이 더 깨끗한 신호.
+
+**steps scaling:**
+
+| Steps | Pocket% | 효율 |
+|-------|---------|------|
+| 1M | 50.0% | — |
+| 2M | 56.2% | 6.2pp/1M |
+| 5M | 65.8% | 3.2pp/1M |
+
+steps ∝ 성능. diminishing returns 시작. current placement의 넓은 커버 공간 (ball y범위 3배) 때문에 단순히 더 많은 steps가 필요한 sample complexity 문제.
 
 ---
 
