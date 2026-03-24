@@ -179,12 +179,11 @@ steps 늘릴수록 일관된 성능 향상. 단, **diminishing returns 확연** 
 ```
 [x] Exp-13   Phase 0: proximity reward 실패 + steps scaling 확인 (1M:50% / 2M:56% / 5M:65.8%)
 [x] Exp-14   gradient_steps=4, 5M → 68.6% (+2.8pp, 시간 2배) — flat policy ceiling 확인
+[x] Exp-15   Trajectory VAE 탐색 — physics latent 구조 파악, M decoder 구조 확정
+             (VAE 자체는 최종 구조에서 폐기, decoder 아키텍처·하이퍼파라미터 탐색 목적)
 
-[ ] Exp-15   Trajectory VAE — LSTM encoder + VAE로 physics-aware latent 학습
-             pooltool events (ball_ball 이후 target ball 궤적) → z ∈ R^16
-             t-SNE로 latent 구조 확인, action/pocketed 상관관계 분석
-[ ] Exp-16   Phase 0 HRL — System 2 (포켓 선택 discrete 6) + System 1 (pocket-conditioned)
-             World Model 학습 후 System 1 freeze → System 2 학습
+[ ] Exp-16   World Model Critic — Q(s,a) = q(M(s,a))
+             SB3 SAC 기반 최소 확장 (~190줄), flat policy baseline 직접 비교
 [ ] Exp-17   Phase 1 HRL — System 2 (ball 선택 discrete 3) + System 1 (Phase 1 Exp-10 freeze)
 
 [ ] cushion / bank shots
@@ -279,7 +278,84 @@ python world_model/analyze.py   --ckpt world_model/checkpoints/vae_z16_*.pt
 
 ---
 
-## Future: Exp-16 · Phase 0 HRL
+## Exp-16 · World Model Critic
+
+### 근본 문제 (flat policy 한계 복기)
+
+```
+Q(s, a) ≈ E[r | s, a]
+```
+
+Q가 physics를 implicit하게 배워야 하는데:
+- **(s, a) → scalar** 로 압축하는 순간 physics causal chain 소실
+- `∂Q/∂a` 가 noisy — "이 angle이 통계적으로 나빴다"만 알고 "왜 나빴는지" 모름
+- sparse binary reward에서 역추론 → 5M steps 68.6% ceiling
+
+### 아키텍처
+
+```
+Actor:   π_θ(s) → a                     표준 SAC, 무수정
+Critic:  Q(s, a) = q( M(s, a) )         M이 critic 안에서만 존재
+```
+
+Critic 내부:
+
+```
+s, a ──→ M ──→ ĥ ──→ q ──→ Q
+          ↑           ↑
+   L_WM (dense)   L_Bellman (sparse)
+   MSE(ĥ, h_real)  Bellman backup
+```
+
+- `M: (s, a) → ĥ` — 단순 MLP. trajectory 전체를 예측. dense supervision으로 physics 명시적 학습
+- `q: ĥ → Q` — value head. Bellman으로 학습. physics는 M이 처리했으니 q의 문제가 단순해짐
+
+### 왜 기존 Q(s,a)보다 나은가
+
+```
+기존: ∂Q/∂a            — physics를 scalar gradient 하나로 압축
+새것: ∂q/∂ĥ · ∂ĥ/∂a  — ∂ĥ/∂a 가 physics Jacobian, M이 dense 학습으로 정확
+```
+
+Actor update 시 gradient path:
+```
+actor_loss = -Q + entropy = -q(M(s, π(s))) + entropy
+∂/∂θ: ∂q/∂ĥ · ∂ĥ/∂a · ∂a/∂θ   ← physics gradient 도달, shared weight 없음
+```
+
+### 학습
+
+```python
+# Critic update (M + q 동시)
+h_hat    = M(s, a)
+L_WM      = MSE(h_hat, h_real)           # dense, trajectory 전 step
+L_Bellman = MSE(q(h_hat), target_Q)      # sparse, reward
+L_critic  = L_Bellman + λ · L_WM
+L_critic.backward()
+critic_optimizer.step()
+
+# Actor update (표준 SAC)
+a_pi = π_θ(s)
+actor_loss = -q(M(s, a_pi)) + α·log π_θ(a_pi)
+actor_loss.backward()   # 새 forward → 새 graph, double-backward 없음
+actor_optimizer.step()
+```
+
+### SB3 수정 범위
+
+```
+Actor                → 무수정
+TrajectoryBuffer     → h_real 저장 추가          (~60줄)
+WorldModelCritic     → ContinuousCritic 상속      (~80줄)
+WorldModelSAC        → train() 오버라이드         (~30줄)
+simulator.py         → info에 trajectory 포함     (~20줄)
+─────────────────────────────────────────────────────────
+총                   ~190줄, SB3 core 무손상
+```
+
+---
+
+## Future: Exp-17 · Phase 0 HRL
 
 ### 설계 근거
 
