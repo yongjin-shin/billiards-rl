@@ -71,8 +71,8 @@ def extract_trajectory(system, target_id="1"):
       - ball_ball        → target ball 위치 (충돌 지점)
       - target ball 이벤트 → target ball 위치
 
-    위치는 stick_ball 이벤트 위치를 기준으로 상대 좌표로 정규화.
-    (절대 좌표가 latent에 인코딩되어 패턴 학습을 방해하는 것을 방지)
+    위치는 절대 좌표 (m 단위, table 범위 0~0.991 × 0~1.981).
+    물리 시뮬레이션 버그로 인한 극단값 방지를 위해 clip 적용.
 
     Returns:
         events_enc : (MAX_EVENTS, EVENT_DIM) float32, padded
@@ -80,16 +80,6 @@ def extract_trajectory(system, target_id="1"):
         n_bounces  : int, 쿠션 바운스 횟수 (전체)
     """
     raw = []
-
-    # stick_ball 위치를 기준점으로 먼저 찾기
-    ref_x, ref_y = 0.0, 0.0
-    for e in system.events:
-        if str(e.event_type) == "stick_ball":
-            for agent in e.agents:
-                if hasattr(agent, "agent_type") and agent.agent_type == "ball":
-                    ref_x, ref_y = get_ball_xy(agent)
-                    break
-            break
 
     for e in system.events:
         et = str(e.event_type)
@@ -118,8 +108,10 @@ def extract_trajectory(system, target_id="1"):
                     x, y = get_ball_xy(agent)
                     break
 
-        # stick_ball 위치 기준 상대 좌표
-        raw.append((x - ref_x, y - ref_y, et))
+        # 절대 좌표 + 물리 오류 방지 clip (table: ~0.991 × 1.981 m)
+        cx = float(np.clip(x, -0.5, 2.0))
+        cy = float(np.clip(y, -0.5, 3.0))
+        raw.append((cx, cy, et))
 
     # 인코딩 (padding)
     events_enc = np.zeros((MAX_EVENTS, EVENT_DIM), dtype=np.float32)

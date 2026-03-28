@@ -27,14 +27,22 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from world_model.model import TrajectoryVAE, MAX_EVENTS, EVENT_DIM, N_EVENT_TYPES
 from world_model.train_vae import TrajectoryDataset
 
+# 테이블 절대 좌표 범위 (simulator.py와 일치)
+W, L = 0.991, 1.981
+
 
 def load_model(ckpt_path, device):
-    ckpt  = torch.load(ckpt_path, map_location=device)
-    z_dim = ckpt["z_dim"]
-    model = TrajectoryVAE(z_dim=z_dim).to(device)
+    ckpt         = torch.load(ckpt_path, map_location=device)
+    z_dim        = ckpt["z_dim"]
+    decoder_type = ckpt.get("decoder_type", "lstm")
+    saved_args   = ckpt.get("args", {})
+    hidden_enc   = saved_args.get("hidden_enc", 64)
+    hidden_dec   = saved_args.get("hidden_dec", 128)
+    model = TrajectoryVAE(z_dim=z_dim, decoder_type=decoder_type,
+                          hidden_enc=hidden_enc, hidden_dec=hidden_dec).to(device)
     model.load_state_dict(ckpt["state"])
     model.eval()
-    print(f"Loaded VAE  z_dim={z_dim}  val_loss={ckpt['val_loss']:.4f}")
+    print(f"Loaded VAE  z_dim={z_dim}  decoder={decoder_type}  val_loss={ckpt['val_loss']:.4f}")
     return model, z_dim
 
 
@@ -134,9 +142,8 @@ def plot_latent_traversal(model, zs, out_dir, z_dim, device, n_steps=9):
     n_cols = min(z_dim, 8)   # 최대 8 dim 시각화
     vals   = np.linspace(-3, 3, n_steps)  # σ 단위
 
-    # ── 1단계: 모든 디코딩 결과를 미리 계산해 좌표 범위 파악 ──────────────
+    # ── 1단계: 모든 디코딩 결과 미리 계산 ──────────────────────────────
     all_recons = {}
-    all_xy = []
     for dim in range(n_cols):
         for j, v in enumerate(vals):
             z_sample = z_mean.copy()
@@ -145,26 +152,8 @@ def plot_latent_traversal(model, zs, out_dir, z_dim, device, n_steps=9):
                 z_t   = torch.tensor(z_sample, dtype=torch.float32).unsqueeze(0).to(device)
                 recon = model.decoder(z_t).squeeze(0).cpu().numpy()  # (MAX_EVENTS, EVENT_DIM)
             all_recons[(dim, j)] = recon
-            all_xy.append(recon[:, :2])
 
-    all_xy = np.concatenate(all_xy, axis=0)
-    # 유효한 점만 (0이 아닌 행) 사용해 범위 계산
-    nonzero_mask = (all_xy != 0).any(axis=1)
-    if nonzero_mask.sum() > 0:
-        xy_valid = all_xy[nonzero_mask]
-        pad  = max(abs(xy_valid).max() * 0.15, 0.1)
-        xmin, xmax = xy_valid[:, 0].min() - pad, xy_valid[:, 0].max() + pad
-        ymin, ymax = xy_valid[:, 1].min() - pad, xy_valid[:, 1].max() + pad
-        # 정사각형 비율 유지
-        span = max(xmax - xmin, ymax - ymin)
-        cx   = (xmin + xmax) / 2
-        cy   = (ymin + ymax) / 2
-        xmin, xmax = cx - span / 2, cx + span / 2
-        ymin, ymax = cy - span / 2, cy + span / 2
-    else:
-        xmin, xmax, ymin, ymax = -1, 1, -1, 1
-
-    # ── 2단계: 시각화 ────────────────────────────────────────────────────
+    # ── 2단계: 시각화 (절대좌표 → 테이블 범위로 고정) ────────────────────
     fig, axes = plt.subplots(n_cols, n_steps, figsize=(n_steps * 1.5, n_cols * 1.8))
     alphas = np.linspace(0.3, 1.0, n_steps)
 
@@ -173,7 +162,7 @@ def plot_latent_traversal(model, zs, out_dir, z_dim, device, n_steps=9):
             ax    = axes[dim, j]
             recon = all_recons[(dim, j)]
 
-            ax.set_xlim(xmin, xmax); ax.set_ylim(ymin, ymax)
+            ax.set_xlim(0, W); ax.set_ylim(0, L)   # 절대좌표 = 테이블 범위
             ax.set_facecolor("#1a5c1a")
             ax.set_xticks([]); ax.set_yticks([])
             if j == 0:
@@ -186,10 +175,8 @@ def plot_latent_traversal(model, zs, out_dir, z_dim, device, n_steps=9):
             ax.plot(xys[:, 0], xys[:, 1], "w-", lw=0.6, alpha=0.5)
             ax.scatter(xys[:, 0], xys[:, 1], c="yellow",
                        s=6, alpha=alphas[j], zorder=3)
-            # 원점 표시 (stick_ball 기준점)
-            ax.scatter([0], [0], c="cyan", s=20, marker="x", zorder=4, linewidths=1)
 
-    plt.suptitle("Latent Dimension Traversal (−3σ → +3σ)\n[cyan × = stick_ball origin]",
+    plt.suptitle("Latent Dimension Traversal (−3σ → +3σ)  [absolute coords]",
                  fontsize=10)
     plt.tight_layout()
     fname = os.path.join(out_dir, "latent_traversal.png")

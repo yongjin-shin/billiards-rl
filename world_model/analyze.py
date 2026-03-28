@@ -69,12 +69,17 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     # 모델 로드
-    ckpt  = torch.load(args.ckpt, map_location=device)
-    z_dim = ckpt["z_dim"]
-    model = TrajectoryVAE(z_dim=z_dim).to(device)
+    ckpt         = torch.load(args.ckpt, map_location=device)
+    z_dim        = ckpt["z_dim"]
+    decoder_type = ckpt.get("decoder_type", "lstm")
+    saved_args   = ckpt.get("args", {})
+    hidden_enc   = saved_args.get("hidden_enc", 64)
+    hidden_dec   = saved_args.get("hidden_dec", 128)
+    model = TrajectoryVAE(z_dim=z_dim, decoder_type=decoder_type,
+                          hidden_enc=hidden_enc, hidden_dec=hidden_dec).to(device)
     model.load_state_dict(ckpt["state"])
     model.eval()
-    print(f"Model: z_dim={z_dim}  val_loss={ckpt['val_loss']:.4f}")
+    print(f"Model: z_dim={z_dim}  decoder={decoder_type}  val_loss={ckpt['val_loss']:.4f}")
 
     dataset = TrajectoryDataset(args.data)
     zs, actions, pocketeds, n_bounces = collect_latents(model, dataset, device)

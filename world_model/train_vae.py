@@ -110,9 +110,10 @@ def train(args):
     # 모델
     model = TrajectoryVAE(z_dim=args.z_dim,
                            hidden_enc=args.hidden_enc,
-                           hidden_dec=args.hidden_dec).to(device)
+                           hidden_dec=args.hidden_dec,
+                           decoder_type=args.decoder).to(device)
     n_params = sum(p.numel() for p in model.parameters())
-    print(f"\nModel: z_dim={args.z_dim}  params={n_params:,}")
+    print(f"\nModel: z_dim={args.z_dim}  decoder={args.decoder}  params={n_params:,}")
 
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
@@ -122,15 +123,28 @@ def train(args):
     ts       = datetime.now().strftime("%Y%m%d_%H%M%S")
     save_dir = os.path.join(os.path.dirname(__file__), "checkpoints")
     os.makedirs(save_dir, exist_ok=True)
-    ckpt_path = os.path.join(save_dir, f"vae_z{args.z_dim}_{ts}.pt")
+    b_str    = str(args.beta).replace(".", "")   # 0.1 → 01
+    pw_str   = str(int(args.pos_weight))
+    ckpt_path = os.path.join(save_dir, f"vae_{args.decoder}_z{args.z_dim}_b{b_str}_pw{pw_str}_{ts}.pt")
 
     best_val_loss = float("inf")
     history = []
 
     print(f"\nTraining {args.epochs} epochs  |  batch={args.batch_size}  β={args.beta}")
+    print(f"KL annealing : {args.kl_anneal_epochs} epochs  "
+          f"(β: 0 → {args.beta})")
+    print(f"Sched. sample: {args.ss_anneal_epochs} epochs  "
+          f"(tf_ratio: 1.0 → {args.ss_min_ratio:.1f})")
     print("-" * 60)
 
     for epoch in range(1, args.epochs + 1):
+        # ── 스케줄 계산 ──
+        # KL annealing: β를 0에서 args.beta까지 선형 증가
+        beta_eff = args.beta * min(epoch / max(args.kl_anneal_epochs, 1), 1.0)
+        # Scheduled sampling: tf_ratio를 1.0에서 ss_min_ratio까지 선형 감소
+        ss_progress = min(epoch / max(args.ss_anneal_epochs, 1), 1.0)
+        tf_ratio    = 1.0 - ss_progress * (1.0 - args.ss_min_ratio)
+
         # ── train ──
         model.train()
         t_loss = t_pos = t_type = t_kl = 0.0
@@ -138,9 +152,10 @@ def train(args):
             events  = batch["events"].to(device)
             lengths = batch["lengths"].to(device)
 
-            x_recon, mu, logvar, z = model(events, lengths)
+            x_recon, mu, logvar, z = model(events, lengths, tf_ratio=tf_ratio)
             loss, pos_l, type_l, kl = vae_loss(events, x_recon, mu, logvar,
-                                                 lengths, beta=args.beta)
+                                                lengths, beta=beta_eff,
+                                                pos_weight=args.pos_weight)
             optimizer.zero_grad()
             loss.backward()
             nn.utils.clip_grad_norm_(model.parameters(), 1.0)
@@ -152,15 +167,16 @@ def train(args):
         n = len(train_dl)
         t_loss /= n; t_pos /= n; t_type /= n; t_kl /= n
 
-        # ── val ──
+        # ── val (teacher forcing 고정 — 비교 기준 통일) ──
         model.eval()
         v_loss = 0.0
         with torch.no_grad():
             for batch in val_dl:
                 events  = batch["events"].to(device)
                 lengths = batch["lengths"].to(device)
-                x_recon, mu, logvar, _ = model(events, lengths)
-                loss, *_ = vae_loss(events, x_recon, mu, logvar, lengths, args.beta)
+                x_recon, mu, logvar, _ = model(events, lengths, tf_ratio=1.0)
+                loss, *_ = vae_loss(events, x_recon, mu, logvar, lengths,
+                                    beta_eff, args.pos_weight)
                 v_loss += loss.item()
         v_loss /= len(val_dl)
 
@@ -169,23 +185,25 @@ def train(args):
         if v_loss < best_val_loss:
             best_val_loss = v_loss
             torch.save({
-                "epoch"  : epoch,
-                "z_dim"  : args.z_dim,
-                "state"  : model.state_dict(),
-                "val_loss": v_loss,
-                "args"   : vars(args),
+                "epoch"       : epoch,
+                "z_dim"       : args.z_dim,
+                "decoder_type": args.decoder,
+                "state"       : model.state_dict(),
+                "val_loss"    : v_loss,
+                "args"        : vars(args),
             }, ckpt_path)
             marker = " ← best"
         else:
             marker = ""
 
         history.append(dict(epoch=epoch, train=t_loss, val=v_loss,
-                            pos=t_pos, type=t_type, kl=t_kl))
+                            pos=t_pos, type=t_type, kl=t_kl,
+                            beta_eff=beta_eff, tf_ratio=tf_ratio))
 
         if epoch % 5 == 0 or epoch == 1:
             print(f"[{epoch:3d}] train={t_loss:.4f} "
                   f"(pos={t_pos:.4f} type={t_type:.4f} kl={t_kl:.4f}) "
-                  f"val={v_loss:.4f}{marker}")
+                  f"val={v_loss:.4f}  β={beta_eff:.3f}  tf={tf_ratio:.2f}{marker}")
 
     print(f"\nBest val loss: {best_val_loss:.4f}")
     print(f"Saved → {ckpt_path}")
@@ -208,9 +226,20 @@ def main():
     parser.add_argument("--epochs",     type=int,   default=100)
     parser.add_argument("--batch-size", type=int,   default=256)
     parser.add_argument("--lr",         type=float, default=3e-4)
-    parser.add_argument("--beta",       type=float, default=1.0,
-                        help="KL weight (β-VAE)")
-    parser.add_argument("--tags",       nargs="*",  default=None,
+    parser.add_argument("--beta",             type=float, default=1.0,
+                        help="KL weight 최종값 (β-VAE)")
+    parser.add_argument("--kl-anneal-epochs", type=int,   default=0,
+                        help="β를 0에서 --beta까지 선형 증가시킬 에폭 수. 0=즉시적용")
+    parser.add_argument("--ss-anneal-epochs", type=int,   default=0,
+                        help="teacher forcing ratio를 1→ss-min-ratio로 줄일 에폭 수. 0=즉시적용")
+    parser.add_argument("--ss-min-ratio",     type=float, default=0.0,
+                        help="scheduled sampling 최소 teacher forcing 비율")
+    parser.add_argument("--pos-weight",       type=float, default=1.0,
+                        help="position MSE loss 가중치 (기본 1.0, type loss 대비)")
+    parser.add_argument("--decoder",          type=str,   default="lstm",
+                        choices=["mlp", "lstm"],
+                        help="decoder 종류: mlp 또는 lstm")
+    parser.add_argument("--tags",             nargs="*",  default=None,
                         help="Filter dataset by tags. None = all")
     args = parser.parse_args()
     train(args)
