@@ -9,9 +9,9 @@ Reinforcement learning on a physics-accurate billiards simulator ([pooltool](htt
 
 | | |
 |---|---|
-| **현재 위치** | Exp-16 구현 검증 완료 — VanillaSAC ≈ SB3 SAC (p=0.49), WM variant 실험 예정 |
+| **현재 위치** | Exp-16 구현 검증 완료 — Phase 0/1 모두 VanillaSAC ≈ SB3 SAC, WM variant 실험 예정 |
 | **다음 실험** | Exp-16 WM variant (wm_coef 탐색) |
-| **Exp-16 vanilla** | seeds {0,1,2,3,42} — pocket 62.2% / clear 29.0% ≈ SB3 SAC 63.6% / 31.8% (not significant) |
+| **Exp-16 vanilla** | Phase 1: pocket 62.2% ≈ SAC 63.6% (p=0.49) / Phase 0: pocket 56.9% ≈ SAC 55.3% (p=0.62) |
 
 ---
 
@@ -372,6 +372,30 @@ VanillaSAC (custom) vs SB3 SAC — 2M steps, n_balls=3, ms=5, seeds {0,1,2,3,42}
 - clear:  diff=−2.7pp, t=−1.21, **p=0.29** → not significant
 
 **결론: VanillaSAC ≈ SB3 SAC. 구현 검증 완료.**
+
+### 결과 · Vanilla SAC 구현 검증 — Phase 0 (2026-03-29)
+
+VanillaSAC (custom) vs SB3 SAC — 2M steps, n_balls=1, ms=1, seeds {0,1,2,3,42}
+
+| seed | vanilla pocket | SB3 pocket |
+|------|---------------|-----------|
+| 0    | 54.8%         | 49.0%     |
+| 1    | 57.6%         | 58.6%     |
+| 2    | 60.8%         | 50.2%     |
+| 3    | 51.4%         | 57.6%     |
+| 42   | 59.8%         | 61.0%     |
+| **mean** | **56.9%** | **55.3%** |
+| **std**  | 3.83      | 5.35      |
+
+> random baseline: ~2.8%
+> best checkpoint (eval 중 peak): vanilla 74.0% vs SAC 72.4%
+> SAC s3 — best 66%에서 학습 말기 8%로 collapse 관찰
+
+**유의성 검정 (paired t-test):**
+- best pocket: diff=+1.6pp, t=0.63, **p=0.57** → not significant
+- final pocket: diff=+1.6pp, t=0.54, **p=0.62** → not significant
+
+**결론: Phase 0에서도 VanillaSAC ≈ SB3 SAC. 구현 검증 완료.**
 
 ---
 
