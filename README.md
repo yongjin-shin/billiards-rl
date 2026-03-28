@@ -9,9 +9,9 @@ Reinforcement learning on a physics-accurate billiards simulator ([pooltool](htt
 
 | | |
 |---|---|
-| **현재 위치** | Phase 0 steps scaling 확인 — 1M:50% / 2M:56% / 5M:65.8%. steps ∝ 성능 |
-| **다음 실험** | gradient_steps 증가로 sample efficiency 개선 시도 |
-| **Exp-06 재실험** | seed=0 완료 63.1%/31.2% ≈ 원래 63.9%/33.2% (재현 확인) |
+| **현재 위치** | Exp-16 구현 검증 완료 — VanillaSAC ≈ SB3 SAC (p=0.49), WM variant 실험 예정 |
+| **다음 실험** | Exp-16 WM variant (wm_coef 탐색) |
+| **Exp-16 vanilla** | seeds {0,1,2,3,42} — pocket 62.2% / clear 29.0% ≈ SB3 SAC 63.6% / 31.8% (not significant) |
 
 ---
 
@@ -182,8 +182,8 @@ steps 늘릴수록 일관된 성능 향상. 단, **diminishing returns 확연** 
 [x] Exp-15   Trajectory VAE 탐색 — physics latent 구조 파악, M decoder 구조 확정
              (VAE 자체는 최종 구조에서 폐기, decoder 아키텍처·하이퍼파라미터 탐색 목적)
 
-[ ] Exp-16   World Model Critic — Q(s,a) = q(M(s,a))
-             SB3 SAC 기반 최소 확장 (~190줄), flat policy baseline 직접 비교
+[~] Exp-16   World Model Critic — Q(s,a) = q(M(s,a))
+             vanilla 구현 검증 완료 (≈ SB3 SAC), WM variant 실험 중
 [ ] Exp-17   Phase 1 HRL — System 2 (ball 선택 discrete 3) + System 1 (Phase 1 Exp-10 freeze)
 
 [ ] cushion / bank shots
@@ -352,6 +352,26 @@ simulator.py         → info에 trajectory 포함     (~20줄)
 ─────────────────────────────────────────────────────────
 총                   ~190줄, SB3 core 무손상
 ```
+
+### 결과 · Vanilla SAC 구현 검증 (2026-03-28)
+
+VanillaSAC (custom) vs SB3 SAC — 2M steps, n_balls=3, ms=5, seeds {0,1,2,3,42}
+
+| seed | vanilla pocket | SB3 pocket | vanilla clear | SB3 clear |
+|------|---------------|-----------|--------------|----------|
+| 0    | 65.9%         | 63.5%     | 32.2%        | 32.0%    |
+| 1    | 63.5%         | 62.5%     | 29.0%        | 29.8%    |
+| 2    | 59.0%         | 66.5%     | 24.4%        | 35.8%    |
+| 3    | 60.5%         | 60.1%     | 29.2%        | 28.2%    |
+| 42   | 62.1%         | 65.3%     | 30.4%        | 33.0%    |
+| **mean** | **62.2%** | **63.6%** | **29.0%** | **31.8%** |
+| **std**  | 2.65      | 2.48      | 2.89         | 2.93     |
+
+**유의성 검정 (paired t-test):**
+- pocket: diff=−1.4pp, t=−0.77, **p=0.49** → not significant
+- clear:  diff=−2.7pp, t=−1.21, **p=0.29** → not significant
+
+**결론: VanillaSAC ≈ SB3 SAC. 구현 검증 완료.**
 
 ---
 
