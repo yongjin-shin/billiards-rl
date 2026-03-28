@@ -11,8 +11,8 @@ set +e  # 한 실험 실패해도 계속 진행
 # ─────────────────────────────────────────────────────────────────────────────
 
 WANDB_PROJECT="billiards-rl-exp16-phase0"
-COMMON_EXP16="--n-envs 10 --total-steps 2_000_000 --eval-freq 10000 --eval-episodes 50 --learning-starts 5000 --n-balls 1 --max-steps 5 --step-penalty 0.0 --trunc-penalty 0.0 --wandb-project $WANDB_PROJECT"
-COMMON_ROOT="--algo SAC --steps 2_000_000 --n-balls 1 --max-steps 5 --step-penalty 0.0 --trunc-penalty 0.0 --wandb-project $WANDB_PROJECT"
+COMMON_EXP16="--n-envs 10 --total-steps 2_000_000 --eval-freq 10000 --eval-episodes 50 --learning-starts 5000 --n-balls 1 --max-steps 1 --step-penalty 0.0 --trunc-penalty 0.0 --wandb-project $WANDB_PROJECT"
+COMMON_ROOT="--algo SAC --steps 2_000_000 --n-balls 1 --max-steps 1 --step-penalty 0.0 --trunc-penalty 0.0 --wandb-project $WANDB_PROJECT"
 
 FAILED=()
 
