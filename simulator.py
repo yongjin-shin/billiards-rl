@@ -19,6 +19,83 @@ import pooltool as pt
 
 
 # =============================================================================
+# Trajectory extraction (shared with World Model)
+# =============================================================================
+
+# Event type vocabulary — must match world_model/generate_data.py
+_EVENT_TYPES = [
+    "none", "stick_ball", "ball_ball",
+    "ball_linear_cushion", "ball_circular_cushion", "ball_pocket",
+    "sliding_rolling", "rolling_spinning", "rolling_stationary", "spinning_stationary",
+]
+_EVENT2IDX   = {e: i for i, e in enumerate(_EVENT_TYPES)}
+_N_EVENT_TYPES = len(_EVENT_TYPES)   # 10
+
+TRAJ_EVENT_DIM  = 2 + _N_EVENT_TYPES   # 12
+TRAJ_MAX_EVENTS = 32
+
+
+def _get_ball_xy(agent) -> tuple[float, float]:
+    """Extract (x, y) from a pooltool event agent."""
+    if agent.initial is None:
+        return 0.0, 0.0
+    if hasattr(agent.initial, "xyz"):
+        return float(agent.initial.xyz[0]), float(agent.initial.xyz[1])
+    if hasattr(agent.initial, "state"):
+        rvw = agent.initial.state.rvw[0]
+        return float(rvw[0]), float(rvw[1])
+    return 0.0, 0.0
+
+
+def _extract_trajectory(
+    system,
+    target_id: str = "1",
+) -> tuple[np.ndarray, int]:
+    """
+    Extract shot trajectory from a simulated pooltool system.
+
+    Returns:
+        h_real  : (TRAJ_MAX_EVENTS, TRAJ_EVENT_DIM) float32, zero-padded
+        traj_len: int, number of real events
+    """
+    raw = []
+    for e in system.events:
+        et = str(e.event_type)
+        if et == "none":
+            continue
+
+        x, y = 0.0, 0.0
+        if et == "ball_ball":
+            for agent in e.agents:
+                if agent.id == target_id:
+                    x, y = _get_ball_xy(agent)
+                    break
+            else:
+                for agent in e.agents:
+                    if hasattr(agent, "agent_type") and agent.agent_type == "ball":
+                        x, y = _get_ball_xy(agent)
+                        break
+        else:
+            for agent in e.agents:
+                if hasattr(agent, "agent_type") and agent.agent_type == "ball":
+                    x, y = _get_ball_xy(agent)
+                    break
+
+        x = float(np.clip(x, -0.5, 2.0))
+        y = float(np.clip(y, -0.5, 3.0))
+        raw.append((x, y, et))
+
+    h_real = np.zeros((TRAJ_MAX_EVENTS, TRAJ_EVENT_DIM), dtype=np.float32)
+    n = min(len(raw), TRAJ_MAX_EVENTS)
+    for i, (x, y, et) in enumerate(raw[:n]):
+        h_real[i, 0] = x
+        h_real[i, 1] = y
+        h_real[i, 2 + _EVENT2IDX.get(et, 0)] = 1.0
+
+    return h_real, n
+
+
+# =============================================================================
 # Environment
 # =============================================================================
 
@@ -215,7 +292,7 @@ class BilliardsEnv(gym.Env):
             phi_deg    = np.degrees(phi_direct + delta_angle)
 
         self.system.strike(phi=phi_deg, V0=speed, cue_ball_id="cue")
-        pt.simulate(self.system, inplace=True)
+        pt.simulate(self.system, inplace=True, max_events=2000)
         self._step_count += 1
 
         # ── Scratch (cue ball pocketed) ───────────────────────────────────────
@@ -285,6 +362,17 @@ class BilliardsEnv(gym.Env):
                 "scratch"           : scratch,
                 "clear_bonus_earned": _cb_earned,
             }
+
+        # ── Trajectory (for World Model training) ────────────────────────────
+        # Opt-in: only populated when trajectory_in_info=True (set via env attr)
+        # Format: h_real (MAX_EVENTS, EVENT_DIM) float32, traj_len int
+        if getattr(self, "trajectory_in_info", False):
+            h_real, traj_len = _extract_trajectory(
+                self.system,
+                target_id=self._ball_ids[0] if self._ball_ids else "1",
+            )
+            info["h_real"]   = h_real
+            info["traj_len"] = traj_len
 
         return self._get_obs(), reward, terminated, truncated, info
 
