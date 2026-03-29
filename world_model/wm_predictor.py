@@ -46,6 +46,7 @@ EVENT_TYPES = [
 ]
 N_EVENT_TYPES    = len(EVENT_TYPES)        # 10
 BALL_POCKET_IDX  = EVENT_TYPES.index("ball_pocket")   # 5
+EVENT2IDX        = {e: i for i, e in enumerate(EVENT_TYPES)}
 MAX_EVENTS       = 32
 EVENT_DIM_V2     = 4 + N_EVENT_TYPES      # cue_xy + tgt_xy + one_hot = 14
 
