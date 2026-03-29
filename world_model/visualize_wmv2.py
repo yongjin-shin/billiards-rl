@@ -315,8 +315,7 @@ def visualize_grid(
 
         draw_table(ax)
 
-        obs_n = normalize_obs(obs_arr[idx:idx+1])[0]
-        draw_obs_balls(ax, obs_n)
+        draw_obs_balls(ax, obs_arr[idx])
 
         gt_len = int(lengths_arr[idx])
         gt_types = events_arr[idx, :, 4:].argmax(axis=-1)
@@ -420,8 +419,7 @@ def visualize_video(
             ]:
                 ax.set_facecolor("#1a1a1a")
                 draw_table(ax)
-                obs_n = normalize_obs(obs_arr[idx:idx+1])[0]
-                draw_obs_balls(ax, obs_n)
+                draw_obs_balls(ax, obs_arr[idx])
                 draw_trajectory_v2(ax, ev, cm, tm, typs,
                                    min(step, gt_len if lbl.startswith("G") else max_len),
                                    cue_c, tgt_c, lw=1.8, alpha=0.9)
