@@ -1,19 +1,15 @@
 """
 world_model/visualize_wmv2.py — WMPredictor v2 샷 inference 시각화
 
-GT(Ground Truth) vs Pred(AR Inference) 궤적을 비교.
-- 이미지: N 샘플 그리드 (cue path + tgt path 각각 표시)
-- 영상  : 스텝별 애니메이션 (GT | Pred 좌우 분할)
+각 샘플을 [GT | Pred] 좌우 패널로 분리해서 비교.
 
 Usage:
     python world_model/visualize_wmv2.py \\
         --ckpt world_model/checkpoints/wmv2_enc128_128_h256_l1_emb32_s0_aug_20260329_164446 \\
         [--data world_model/data_v2] \\
         [--tags sac_abs_test] \\
-        [--n-samples 16] \\
-        [--n-video 4] \\
-        [--seed 42] \\
-        [--device cpu]
+        [--n-samples 8] \\
+        [--n-video 4]
 """
 
 import os
@@ -40,7 +36,6 @@ from world_model.wm_predictor import (
 
 # ── 상수 ──────────────────────────────────────────────────────────────────────
 
-# 이벤트 타입별 색상 (type index → hex)
 TYPE_COLORS = {
     0: "#888888",  # none
     1: "#00bfff",  # stick_ball
@@ -53,21 +48,17 @@ TYPE_COLORS = {
     8: "#44ff44",  # rolling_stationary
     9: "#22cc22",  # spinning_stationary
 }
+TYPE_NAMES = EVENT_TYPES
 
-# GT / Pred 색상 테마
-GT_CUE_COLOR   = "#00e5ff"   # 청록  — GT cue path
-GT_TGT_COLOR   = "#aaff44"   # 연두  — GT tgt path
-PR_CUE_COLOR   = "#ff4466"   # 분홍  — Pred cue path
-PR_TGT_COLOR   = "#ff9900"   # 주황  — Pred tgt path
+CUE_COLOR = "#00e5ff"    # cue ball path
+TGT_COLOR = "#ffee44"    # target ball path
+BG_COLOR  = "#1a1a1a"
 
 
 # ── 모델 로드 ─────────────────────────────────────────────────────────────────
 
 def load_model(ckpt_dir: str, device):
-    cfg_path = os.path.join(ckpt_dir, "config.json")
-    pt_path  = os.path.join(ckpt_dir, "best.pt")
-
-    with open(cfg_path) as f:
+    with open(os.path.join(ckpt_dir, "config.json")) as f:
         cfg = json.load(f)
 
     model = WMPredictor(
@@ -77,13 +68,13 @@ def load_model(ckpt_dir: str, device):
         event_embed_dim = cfg["event_embed_dim"],
     ).to(device)
 
-    ckpt = torch.load(pt_path, map_location=device, weights_only=True)
+    ckpt = torch.load(os.path.join(ckpt_dir, "best.pt"),
+                      map_location=device, weights_only=True)
     model.load_state_dict(ckpt["state"])
     model.eval()
-
     print(f"Loaded  : {os.path.basename(ckpt_dir)}")
-    print(f"  epoch={ckpt['epoch']}  val_loss={ckpt['val_loss']:.4f}")
-    print(f"  n_params={sum(p.numel() for p in model.parameters()):,}")
+    print(f"  epoch={ckpt['epoch']}  val_loss={ckpt['val_loss']:.4f}"
+          f"  n_params={sum(p.numel() for p in model.parameters()):,}")
     return model, cfg
 
 
@@ -117,251 +108,276 @@ def load_data(data_dir: str, tags):
     if not obs_l:
         raise ValueError(f"No data found in {data_dir} (tags={tags})")
 
-    obs      = np.concatenate(obs_l)
-    actions  = np.concatenate(act_l)
-    events   = np.concatenate(ev_l)
-    cue_masks= np.concatenate(cm_l)
-    tgt_masks= np.concatenate(tm_l)
-    lengths  = np.concatenate(len_l)
-    pocketed = np.concatenate(poc_l)
-    n_bounces= np.concatenate(nb_l)
-
-    print(f"  Data: {len(obs):,} episodes  (tags={tags})")
-    print(f"  Pocketed: {pocketed.sum()} / {len(pocketed)}"
-          f"  ({100*pocketed.mean():.1f}%)")
-    return obs, actions, events, cue_masks, tgt_masks, lengths, pocketed, n_bounces
+    data = dict(
+        obs       = np.concatenate(obs_l),
+        actions   = np.concatenate(act_l),
+        events    = np.concatenate(ev_l),
+        cue_masks = np.concatenate(cm_l),
+        tgt_masks = np.concatenate(tm_l),
+        lengths   = np.concatenate(len_l),
+        pocketed  = np.concatenate(poc_l),
+        n_bounces = np.concatenate(nb_l),
+    )
+    print(f"  Data: {len(data['obs']):,} episodes  (tags={tags})")
+    print(f"  Pocketed: {data['pocketed'].sum()}/{len(data['pocketed'])} "
+          f"({100*data['pocketed'].mean():.1f}%)")
+    return data
 
 
 def normalize_obs(obs: np.ndarray) -> np.ndarray:
-    """obs (raw) → [0,1] 정규화. train_wm_predictor.py 와 동일 로직."""
-    obs_n = obs.copy()
-    obs_n[:, 0::2] /= TABLE_W
-    obs_n[:, 1::2] /= TABLE_H
-    return obs_n
-
-
-# ── 테이블 그리기 ─────────────────────────────────────────────────────────────
-
-def draw_table(ax, alpha=1.0):
-    rect = patches.Rectangle(
-        (0, 0), TABLE_W, TABLE_H,
-        facecolor="#2d7a2d", edgecolor="#1a4a1a", linewidth=2, alpha=alpha,
-    )
-    ax.add_patch(rect)
-
-    pocket_r  = 0.04
-    pocket_xy = [
-        (0,        0          ),  # BL
-        (TABLE_W,  0          ),  # BR
-        (0,        TABLE_H / 2),  # ML
-        (TABLE_W,  TABLE_H / 2),  # MR
-        (0,        TABLE_H    ),  # TL
-        (TABLE_W,  TABLE_H    ),  # TR
-    ]
-    for px, py in pocket_xy:
-        ax.add_patch(plt.Circle((px, py), pocket_r,
-                                color="black", zorder=5, alpha=alpha))
-
-    ax.set_xlim(-0.06, TABLE_W + 0.06)
-    ax.set_ylim(-0.06, TABLE_H + 0.06)
-    ax.set_aspect("equal")
-    ax.axis("off")
-
-
-def draw_obs_balls(ax, obs_norm, alpha=0.9):
-    """
-    obs_norm[0:2] = cue (white),  obs_norm[2:4] = tgt (yellow)
-    obs_norm 은 [0,1] → 실제 좌표로 변환 후 그림.
-    """
-    ball_info = [
-        (obs_norm[0] * TABLE_W, obs_norm[1] * TABLE_H, "white"),
-        (obs_norm[2] * TABLE_W, obs_norm[3] * TABLE_H, "#ffee44"),
-    ]
-    for bx, by, color in ball_info:
-        if 0 <= bx <= TABLE_W and 0 <= by <= TABLE_H:
-            ax.add_patch(plt.Circle((bx, by), 0.025,
-                                    facecolor=color, edgecolor="black",
-                                    linewidth=1.2, zorder=10, alpha=alpha))
-
-
-# ── 궤적 그리기 (v2) ──────────────────────────────────────────────────────────
-
-def _draw_masked_line(ax, xs, ys, mask, color, lw, alpha, ls="-"):
-    """mask=1 인 점들만 선으로 연결 (불연속 구간은 분리)."""
-    seg_x, seg_y = [], []
-    for x, y, m in zip(xs, ys, mask):
-        if m:
-            seg_x.append(x)
-            seg_y.append(y)
-        else:
-            if len(seg_x) >= 2:
-                ax.plot(seg_x, seg_y, color=color, lw=lw,
-                        alpha=alpha, zorder=6, linestyle=ls)
-            seg_x, seg_y = [], []
-    if len(seg_x) >= 2:
-        ax.plot(seg_x, seg_y, color=color, lw=lw,
-                alpha=alpha, zorder=6, linestyle=ls)
-
-
-def draw_trajectory_v2(ax, events_enc, cue_masks, tgt_masks, types_idx, n,
-                       cue_color, tgt_color, lw=1.4, alpha=0.85, ls="-"):
-    """
-    events_enc : (MAX_EVENTS, 14)  — 정규화된 좌표
-    cue_masks  : (MAX_EVENTS,)
-    tgt_masks  : (MAX_EVENTS,)
-    types_idx  : (MAX_EVENTS,)   int  event type index
-    n          : 유효 길이
-    """
-    if n == 0:
-        return
-
-    cue_xs = events_enc[:n, 0] * TABLE_W
-    cue_ys = events_enc[:n, 1] * TABLE_H
-    tgt_xs = events_enc[:n, 2] * TABLE_W
-    tgt_ys = events_enc[:n, 3] * TABLE_H
-    cm     = cue_masks[:n]
-    tm     = tgt_masks[:n]
-    typs   = types_idx[:n]
-
-    # ── 선 ────────────────────────────────────────────────────────────────────
-    _draw_masked_line(ax, cue_xs, cue_ys, cm, cue_color, lw, alpha, ls)
-    _draw_masked_line(ax, tgt_xs, tgt_ys, tm, tgt_color, lw, alpha, ls)
-
-    # ── 이벤트 점 ──────────────────────────────────────────────────────────────
-    for i in range(n):
-        c = TYPE_COLORS.get(int(typs[i]), "gray")
-        if cm[i]:
-            ax.scatter(cue_xs[i], cue_ys[i], s=22, color=c,
-                       marker="o", zorder=8, linewidths=0.4,
-                       edgecolors="white", alpha=alpha)
-        if tm[i]:
-            ax.scatter(tgt_xs[i], tgt_ys[i], s=22, color=c,
-                       marker="s", zorder=8, linewidths=0.4,
-                       edgecolors="white", alpha=alpha)
-
-    # ── 시작점 마커 ────────────────────────────────────────────────────────────
-    # cue 시작
-    if cm[0]:
-        ax.scatter(cue_xs[0], cue_ys[0], s=50, marker="^",
-                   color=cue_color, zorder=9, edgecolors="black", linewidths=0.8)
-    # tgt 시작
-    if tm[0]:
-        ax.scatter(tgt_xs[0], tgt_ys[0], s=50, marker="^",
-                   color=tgt_color, zorder=9, edgecolors="black", linewidths=0.8)
+    """WMDataset 과 동일 로직: obs → /[TABLE_W, TABLE_H, ...]"""
+    n = obs.copy()
+    n[:, 0::2] /= TABLE_W
+    n[:, 1::2] /= TABLE_H
+    return n
 
 
 # ── 배치 inference ────────────────────────────────────────────────────────────
 
 @torch.no_grad()
-def batch_predict(model, obs_arr, act_arr, events_arr, lengths_arr, device):
-    """
-    model.forward(tf_ratio=0.0) 으로 완전 AR inference.
-    Returns:
-        pred_types : (N, MAX_EVENTS)  int
-        pred_cue   : (N, MAX_EVENTS, 2)  normalized
-        pred_tgt   : (N, MAX_EVENTS, 2)  normalized
-    """
-    obs_n   = torch.from_numpy(normalize_obs(obs_arr)).float().to(device)
-    act_t   = torch.from_numpy(act_arr).float().to(device)
-    ev_t    = torch.from_numpy(events_arr).float().to(device)
-    len_t   = torch.from_numpy(lengths_arr).long().to(device)
+def batch_predict(model, data, indices, device):
+    """tf_ratio=0.0 (완전 AR) 로 배치 inference."""
+    obs_n = torch.from_numpy(normalize_obs(data["obs"][indices])).float().to(device)
+    act   = torch.from_numpy(data["actions"][indices]).float().to(device)
+    ev    = torch.from_numpy(data["events"][indices]).float().to(device)
+    lens  = torch.from_numpy(data["lengths"][indices]).long().to(device)
 
-    event_logits, pos_pred = model(obs_n, act_t, ev_t, len_t, tf_ratio=0.0)
+    event_logits, pos_pred = model(obs_n, act, ev, lens, tf_ratio=0.0)
+
     pred_types = event_logits.argmax(dim=-1).cpu().numpy()   # (N, T)
-    pred_cue   = pos_pred[:, :, 0:2].cpu().numpy()           # (N, T, 2)
-    pred_tgt   = pos_pred[:, :, 2:4].cpu().numpy()           # (N, T, 2)
+    pred_cue   = pos_pred[:, :, 0:2].cpu().numpy()           # (N, T, 2) normalized
+    pred_tgt   = pos_pred[:, :, 2:4].cpu().numpy()           # (N, T, 2) normalized
     return pred_types, pred_cue, pred_tgt
 
 
-def make_pred_events(pred_types, pred_cue, pred_tgt):
-    """pred 결과를 v2 events 포맷 (N, T, 14) 으로 합치기 (시각화 편의)."""
-    N, T = pred_types.shape
-    one_hot = np.zeros((N, T, N_EVENT_TYPES), dtype=np.float32)
-    one_hot[np.arange(N)[:, None], np.arange(T)[None, :], pred_types] = 1.0
-    return np.concatenate([pred_cue, pred_tgt, one_hot], axis=-1)   # (N, T, 14)
+# ── 테이블 그리기 ─────────────────────────────────────────────────────────────
+
+def draw_table(ax):
+    ax.add_patch(patches.Rectangle(
+        (0, 0), TABLE_W, TABLE_H,
+        facecolor="#2d7a2d", edgecolor="#1a4a1a", linewidth=1.5,
+    ))
+    pocket_r  = 0.038
+    for px, py in [(0, 0), (TABLE_W, 0),
+                   (0, TABLE_H/2), (TABLE_W, TABLE_H/2),
+                   (0, TABLE_H),   (TABLE_W, TABLE_H)]:
+        ax.add_patch(plt.Circle((px, py), pocket_r, color="black", zorder=5))
+    ax.set_xlim(-0.05, TABLE_W + 0.05)
+    ax.set_ylim(-0.05, TABLE_H + 0.05)
+    ax.set_aspect("equal")
+    ax.axis("off")
+    ax.set_facecolor(BG_COLOR)
+
+
+# ── 궤적 그리기 ───────────────────────────────────────────────────────────────
+
+def _to_abs(xy_norm, scale_x, scale_y):
+    """(N, 2) normalized → actual coords"""
+    return xy_norm[:, 0] * scale_x, xy_norm[:, 1] * scale_y
+
+
+def draw_panel(ax, obs, events, cue_masks, tgt_masks, length,
+               cue_color, tgt_color, label, title):
+    """
+    단일 패널 그리기: 테이블 + 공 초기 위치 + shot path + 궤적.
+
+    obs        : (16,)  raw [0,1]  (env normalized)
+    events     : (MAX_EVENTS, 14)  normalized
+    cue_masks  : (MAX_EVENTS,)
+    tgt_masks  : (MAX_EVENTS,)
+    length     : int
+    """
+    draw_table(ax)
+    L = int(length)
+
+    # ── 초기 공 위치 (obs) ────────────────────────────────────────────────────
+    cue0_x, cue0_y = obs[0] * TABLE_W, obs[1] * TABLE_H
+    tgt0_x, tgt0_y = obs[2] * TABLE_W, obs[3] * TABLE_H
+
+    ax.add_patch(plt.Circle((cue0_x, cue0_y), 0.028,
+                             facecolor="white", edgecolor="#aaaaaa",
+                             linewidth=1.0, zorder=10))
+    ax.add_patch(plt.Circle((tgt0_x, tgt0_y), 0.028,
+                             facecolor="#ffee44", edgecolor="#888800",
+                             linewidth=1.0, zorder=10))
+
+    if L == 0:
+        ax.set_title(f"{label}\n{title}", fontsize=7, color="white", pad=3)
+        return
+
+    # ── events → actual coords ────────────────────────────────────────────────
+    cue_abs_x = events[:L, 0] * TABLE_W
+    cue_abs_y = events[:L, 1] * TABLE_H
+    tgt_abs_x = events[:L, 2] * TABLE_W
+    tgt_abs_y = events[:L, 3] * TABLE_H
+    types     = events[:L, 4:].argmax(axis=-1).astype(int)
+    cm        = cue_masks[:L].astype(bool)
+    tm        = tgt_masks[:L].astype(bool)
+
+    # ── shot path: obs → 첫 번째 유효 이벤트 위치 ────────────────────────────
+    # cue shot path (obs_cue → first valid cue event)
+    first_cm = np.where(cm)[0]
+    if len(first_cm) > 0:
+        fi = first_cm[0]
+        ax.plot([cue0_x, cue_abs_x[fi]], [cue0_y, cue_abs_y[fi]],
+                color=cue_color, lw=0.8, alpha=0.45, ls="--", zorder=5)
+
+    # tgt shot path: only if first valid tgt event != obs_tgt (safety)
+    first_tm = np.where(tm)[0]
+    if len(first_tm) > 0:
+        fi = first_tm[0]
+        ax.plot([tgt0_x, tgt_abs_x[fi]], [tgt0_y, tgt_abs_y[fi]],
+                color=tgt_color, lw=0.8, alpha=0.45, ls="--", zorder=5)
+
+    # ── cue 궤적 선 ───────────────────────────────────────────────────────────
+    seg_x, seg_y = [], []
+    for i in range(L):
+        if cm[i]:
+            seg_x.append(cue_abs_x[i])
+            seg_y.append(cue_abs_y[i])
+        else:
+            if len(seg_x) >= 2:
+                ax.plot(seg_x, seg_y, color=cue_color, lw=1.5, alpha=0.9, zorder=6)
+            seg_x, seg_y = [], []
+    if len(seg_x) >= 2:
+        ax.plot(seg_x, seg_y, color=cue_color, lw=1.5, alpha=0.9, zorder=6)
+
+    # ── tgt 궤적 선 ───────────────────────────────────────────────────────────
+    seg_x, seg_y = [], []
+    for i in range(L):
+        if tm[i]:
+            seg_x.append(tgt_abs_x[i])
+            seg_y.append(tgt_abs_y[i])
+        else:
+            if len(seg_x) >= 2:
+                ax.plot(seg_x, seg_y, color=tgt_color, lw=1.5, alpha=0.9, zorder=6)
+            seg_x, seg_y = [], []
+    if len(seg_x) >= 2:
+        ax.plot(seg_x, seg_y, color=tgt_color, lw=1.5, alpha=0.9, zorder=6)
+
+    # ── 이벤트 점 ──────────────────────────────────────────────────────────────
+    for i in range(L):
+        c = TYPE_COLORS.get(types[i], "gray")
+        if cm[i]:
+            ax.scatter(cue_abs_x[i], cue_abs_y[i], s=20, c=c,
+                       marker="o", zorder=8, linewidths=0.3, edgecolors="white", alpha=0.9)
+        if tm[i]:
+            ax.scatter(tgt_abs_x[i], tgt_abs_y[i], s=20, c=c,
+                       marker="s", zorder=8, linewidths=0.3, edgecolors="white", alpha=0.9)
+
+    ax.set_title(f"{label}\n{title}", fontsize=6.5, color="white", pad=3)
 
 
 # ── 그리드 이미지 ─────────────────────────────────────────────────────────────
 
-def visualize_grid(
-    model, obs_arr, act_arr, events_arr, cue_masks_arr, tgt_masks_arr,
-    lengths_arr, pocketed_arr, n_bounces_arr, indices, out_dir, device,
-    prefix="grid"
-):
-    n     = len(indices)
-    ncols = min(4, n)
-    nrows = (n + ncols - 1) // ncols
+def visualize_grid(model, data, indices, out_dir, device, prefix="grid"):
+    """
+    각 샘플을 [GT | Pred] 2-패널로.
+    n 샘플 → n행 × 2열 subplots.
+    """
+    n = len(indices)
 
-    fig, axes = plt.subplots(nrows, ncols,
-                             figsize=(ncols * 3.4, nrows * 5.8),
-                             facecolor="#1a1a1a")
-    axes = np.array(axes).reshape(nrows, ncols)
+    # GT 데이터 수집
+    pred_types, pred_cue, pred_tgt = batch_predict(model, data, indices, device)
 
-    # ── 배치 inference ────────────────────────────────────────────────────────
-    sub_obs = obs_arr[indices]
-    sub_act = act_arr[indices]
-    sub_ev  = events_arr[indices]
-    sub_len = lengths_arr[indices]
+    # 레이아웃: 한 행에 2개 샘플씩 (GT|Pred GT|Pred), 즉 4열
+    n_per_row = 2   # 한 행에 몇 개 샘플
+    n_rows    = (n + n_per_row - 1) // n_per_row
+    n_cols    = n_per_row * 2   # 샘플당 GT + Pred 2열
 
-    pred_types, pred_cue, pred_tgt = batch_predict(
-        model, sub_obs, sub_act, sub_ev, sub_len, device
+    fig, axes = plt.subplots(
+        n_rows, n_cols,
+        figsize=(n_cols * 2.6, n_rows * 5.2),
+        facecolor=BG_COLOR,
     )
-    pred_events = make_pred_events(pred_types, pred_cue, pred_tgt)
+    if n_rows == 1:
+        axes = axes[np.newaxis, :]
+    if n_cols == 1:
+        axes = axes[:, np.newaxis]
 
     for k, idx in enumerate(indices):
-        r, c  = divmod(k, ncols)
-        ax    = axes[r, c]
-        ax.set_facecolor("#1a1a1a")
+        row      = k // n_per_row
+        col_base = (k %  n_per_row) * 2
+        L        = int(data["lengths"][idx])
 
-        draw_table(ax)
+        poc  = "✓" if data["pocketed"][idx] else "✗"
+        info = (f"#{idx}  {poc}  L={L}  nb={data['n_bounces'][idx]}\n"
+                f"φ={data['actions'][idx,0]:.2f}  v={data['actions'][idx,1]:.1f}")
 
-        draw_obs_balls(ax, obs_arr[idx])
+        # ── GT panel ──────────────────────────────────────────────────────────
+        ax_gt = axes[row, col_base]
+        draw_panel(
+            ax_gt,
+            obs       = data["obs"][idx],
+            events    = data["events"][idx],
+            cue_masks = data["cue_masks"][idx],
+            tgt_masks = data["tgt_masks"][idx],
+            length    = L,
+            cue_color = CUE_COLOR,
+            tgt_color = TGT_COLOR,
+            label     = "GT",
+            title     = info,
+        )
 
-        gt_len = int(lengths_arr[idx])
-        gt_types = events_arr[idx, :, 4:].argmax(axis=-1)
+        # ── Pred panel ────────────────────────────────────────────────────────
+        # pred_events 를 v2 format 으로 재구성
+        one_hot = np.zeros((MAX_EVENTS, N_EVENT_TYPES), dtype=np.float32)
+        one_hot[np.arange(MAX_EVENTS), pred_types[k]] = 1.0
+        pred_events = np.concatenate([pred_cue[k], pred_tgt[k], one_hot], axis=-1)
 
-        # GT 궤적
-        draw_trajectory_v2(ax,
-                           events_arr[idx], cue_masks_arr[idx], tgt_masks_arr[idx],
-                           gt_types, gt_len,
-                           cue_color=GT_CUE_COLOR, tgt_color=GT_TGT_COLOR,
-                           lw=1.8, alpha=0.9, ls="-")
-
-        # Pred 궤적 (GT 길이 기준으로 표시 — 비교 편의)
-        draw_trajectory_v2(ax,
-                           pred_events[k],
-                           np.ones(MAX_EVENTS, dtype=np.int8),   # pred는 mask 없음
-                           np.ones(MAX_EVENTS, dtype=np.int8),
-                           pred_types[k], gt_len,
-                           cue_color=PR_CUE_COLOR, tgt_color=PR_TGT_COLOR,
-                           lw=1.4, alpha=0.80, ls="--")
-
-        poc  = "✓" if pocketed_arr[idx] else "✗"
-        title = (f"#{idx}  {poc}  L={gt_len}  nb={n_bounces_arr[idx]}\n"
-                 f"φ={act_arr[idx,0]:.2f}  v={act_arr[idx,1]:.1f}")
-        ax.set_title(title, fontsize=7, pad=3, color="white")
+        ax_pr = axes[row, col_base + 1]
+        draw_panel(
+            ax_pr,
+            obs       = data["obs"][idx],
+            events    = pred_events,
+            # Pred는 GT mask 그대로 적용 — 같은 이벤트 슬롯에서 위치만 비교
+            cue_masks = data["cue_masks"][idx],
+            tgt_masks = data["tgt_masks"][idx],
+            length    = L,
+            cue_color = "#ff4466",
+            tgt_color = "#ff9900",
+            label     = "Pred (AR)",
+            title     = info,
+        )
 
     # 빈 칸 숨기기
-    for k in range(n, nrows * ncols):
-        r, c = divmod(k, ncols)
-        axes[r, c].axis("off")
-        axes[r, c].set_facecolor("#1a1a1a")
+    for k in range(n, n_rows * n_per_row):
+        row      = k // n_per_row
+        col_base = (k %  n_per_row) * 2
+        for dc in range(2):
+            ax = axes[row, col_base + dc]
+            ax.axis("off")
+            ax.set_facecolor(BG_COLOR)
+
+    # 분리선 (GT | Pred 사이에 세로 구분)
+    for c in range(1, n_cols, 2):
+        for r in range(n_rows):
+            ax = axes[r, c]
+            for spine in ax.spines.values():
+                spine.set_edgecolor("#444444")
 
     # 범례
     legend_elems = [
-        Line2D([0], [0], color=GT_CUE_COLOR, lw=2,   label="GT  cue"),
-        Line2D([0], [0], color=GT_TGT_COLOR, lw=2,   label="GT  tgt"),
-        Line2D([0], [0], color=PR_CUE_COLOR, lw=2, ls="--", label="Pred cue (AR)"),
-        Line2D([0], [0], color=PR_TGT_COLOR, lw=2, ls="--", label="Pred tgt (AR)"),
+        Line2D([0],[0], color=CUE_COLOR,  lw=2, label="cue path"),
+        Line2D([0],[0], color=TGT_COLOR,  lw=2, label="tgt path"),
+        Line2D([0],[0], marker="o", color="#ff6600", ms=5, ls="none",
+               label="ball_ball"),
+        Line2D([0],[0], marker="o", color="#ffdd00", ms=5, ls="none",
+               label="cushion"),
+        Line2D([0],[0], marker="o", color="#ff2222", ms=5, ls="none",
+               label="ball_pocket"),
+        Line2D([0],[0], marker="o", color="#44ff44", ms=5, ls="none",
+               label="rolling/*"),
     ]
-    fig.legend(handles=legend_elems, loc="lower center", ncol=4,
-               fontsize=8, framealpha=0.7, facecolor="#333333", labelcolor="white")
-    fig.suptitle("WMPredictor v2 — AR Inference  (GT vs Pred)",
-                 fontsize=11, color="white", y=1.002)
+    fig.legend(handles=legend_elems, loc="lower center", ncol=6,
+               fontsize=8, framealpha=0.6, facecolor="#333333",
+               labelcolor="white", bbox_to_anchor=(0.5, -0.01))
+    fig.suptitle("WMPredictor v2  |  GT (left)  vs  Pred (right)",
+                 fontsize=11, color="white", y=1.003)
 
-    plt.tight_layout()
+    plt.tight_layout(pad=0.5)
     fname = os.path.join(out_dir, f"{prefix}.png")
-    plt.savefig(fname, dpi=130, bbox_inches="tight", facecolor="#1a1a1a")
+    plt.savefig(fname, dpi=130, bbox_inches="tight", facecolor=BG_COLOR)
     plt.close()
     print(f"  Image → {fname}")
 
@@ -370,7 +386,7 @@ def visualize_grid(
 
 def _fig_to_rgb(fig):
     buf = BytesIO()
-    fig.savefig(buf, format="png", dpi=90, bbox_inches="tight", facecolor="#1a1a1a")
+    fig.savefig(buf, format="png", dpi=90, bbox_inches="tight", facecolor=BG_COLOR)
     buf.seek(0)
     img = imageio.imread(buf)
     buf.close()
@@ -382,129 +398,106 @@ def _fig_to_rgb(fig):
     return img
 
 
-def visualize_video(
-    model, obs_arr, act_arr, events_arr, cue_masks_arr, tgt_masks_arr,
-    lengths_arr, pocketed_arr, n_bounces_arr, indices, out_dir, device, fps=5
-):
-    sub_obs = obs_arr[indices]
-    sub_act = act_arr[indices]
-    sub_ev  = events_arr[indices]
-    sub_len = lengths_arr[indices]
-
-    pred_types, pred_cue, pred_tgt = batch_predict(
-        model, sub_obs, sub_act, sub_ev, sub_len, device
-    )
-    pred_events = make_pred_events(pred_types, pred_cue, pred_tgt)
+def visualize_video(model, data, indices, out_dir, device, fps=5):
+    pred_types, pred_cue, pred_tgt = batch_predict(model, data, indices, device)
 
     for k, idx in enumerate(indices):
-        gt_len  = int(lengths_arr[idx])
-        max_len = max(gt_len, 3)
+        L        = int(data["lengths"][idx])
+        max_step = max(L, 2)
+
+        one_hot = np.zeros((MAX_EVENTS, N_EVENT_TYPES), dtype=np.float32)
+        one_hot[np.arange(MAX_EVENTS), pred_types[k]] = 1.0
+        pred_events = np.concatenate([pred_cue[k], pred_tgt[k], one_hot], axis=-1)
+
+        poc_str = "Pocketed ✓" if data["pocketed"][idx] else "Miss ✗"
+        act_str = (f"φ={data['actions'][idx,0]:.2f}  "
+                   f"v={data['actions'][idx,1]:.1f}")
 
         frames = []
-        for step in range(1, max_len + 1):
-            fig, axes = plt.subplots(1, 2, figsize=(8.4, 6.0),
-                                     facecolor="#1a1a1a")
-            gt_types   = events_arr[idx, :, 4:].argmax(axis=-1)
-            pred_type_ = pred_types[k]
-
-            for ax, ev, cm, tm, typs, cue_c, tgt_c, lbl in [
-                (axes[0],
-                 events_arr[idx], cue_masks_arr[idx], tgt_masks_arr[idx],
-                 gt_types, GT_CUE_COLOR, GT_TGT_COLOR, "Ground Truth"),
-                (axes[1],
-                 pred_events[k],
-                 np.ones(MAX_EVENTS, dtype=np.int8),
-                 np.ones(MAX_EVENTS, dtype=np.int8),
-                 pred_type_, PR_CUE_COLOR, PR_TGT_COLOR, "Prediction (AR)"),
-            ]:
-                ax.set_facecolor("#1a1a1a")
-                draw_table(ax)
-                draw_obs_balls(ax, obs_arr[idx])
-                draw_trajectory_v2(ax, ev, cm, tm, typs,
-                                   min(step, gt_len if lbl.startswith("G") else max_len),
-                                   cue_c, tgt_c, lw=1.8, alpha=0.9)
-                ax.set_title(lbl, fontsize=9, color="white", pad=4)
-
-            poc_str = "Pocketed ✓" if pocketed_arr[idx] else "Miss ✗"
-            fig.suptitle(
-                f"#{idx}  {poc_str}  nb={n_bounces_arr[idx]}"
-                f"  |  φ={act_arr[idx,0]:.2f}  v={act_arr[idx,1]:.1f}"
-                f"  |  step {step}/{max_len}",
-                fontsize=9, color="white",
+        for step in range(1, max_step + 1):
+            fig, (ax_gt, ax_pr) = plt.subplots(
+                1, 2, figsize=(7.0, 5.5), facecolor=BG_COLOR,
             )
+
+            draw_panel(ax_gt,
+                       data["obs"][idx],
+                       data["events"][idx],
+                       data["cue_masks"][idx], data["tgt_masks"][idx],
+                       min(step, L),
+                       CUE_COLOR, TGT_COLOR,
+                       label=f"GT  (step {step}/{L})",
+                       title="")
+            draw_panel(ax_pr,
+                       data["obs"][idx],
+                       pred_events,
+                       data["cue_masks"][idx], data["tgt_masks"][idx],
+                       min(step, L),
+                       "#ff4466", "#ff9900",
+                       label=f"Pred (step {step}/{L})",
+                       title="")
+
+            fig.suptitle(f"#{idx}  {poc_str}  |  {act_str}  |  nb={data['n_bounces'][idx]}",
+                         fontsize=9, color="white")
             plt.tight_layout()
             frames.append(_fig_to_rgb(fig))
             plt.close(fig)
 
-        frames += [frames[-1]] * fps  # 마지막 프레임 1초 정지
-
+        frames += [frames[-1]] * fps
         fname = os.path.join(out_dir, f"video_{idx:04d}.mp4")
         imageio.mimwrite(fname, frames, fps=fps, macro_block_size=1)
         print(f"  Video → {fname}  ({len(frames)} frames)")
 
 
-# ── 이벤트 타입 정확도 분석 ────────────────────────────────────────────────────
+# ── 정확도 분석 ───────────────────────────────────────────────────────────────
 
-def analyze_accuracy(model, obs_arr, act_arr, events_arr, cue_masks_arr,
-                     tgt_masks_arr, lengths_arr, device):
-    """event type accuracy + pos MSE 를 콘솔에 출력."""
-    pred_types, pred_cue, pred_tgt = batch_predict(
-        model, obs_arr, act_arr, events_arr, lengths_arr, device
-    )
+def analyze_accuracy(model, data, device, n_eval=None):
+    N   = len(data["obs"]) if n_eval is None else min(n_eval, len(data["obs"]))
+    idx = np.arange(N)
+    pred_types, pred_cue, pred_tgt = batch_predict(model, data, idx, device)
 
-    N = len(obs_arr)
-    correct_total = 0
-    valid_total   = 0
-    cue_mse_sum = tgt_mse_sum = 0.0
-    cue_n = tgt_n = 0
+    correct = valid = 0
+    cue_mse_sum = tgt_mse_sum = cue_n = tgt_n = 0.0
 
     for i in range(N):
-        L = int(lengths_arr[i])
-        gt_types = events_arr[i, :L, 4:].argmax(axis=-1)
-        correct_total += (pred_types[i, :L] == gt_types).sum()
-        valid_total   += L
-
+        L = int(data["lengths"][i])
+        gt_t = data["events"][i, :L, 4:].argmax(axis=-1)
+        correct += (pred_types[i, :L] == gt_t).sum()
+        valid   += L
         for t in range(L):
-            if cue_masks_arr[i, t]:
-                dx = pred_cue[i, t, 0] - events_arr[i, t, 0]
-                dy = pred_cue[i, t, 1] - events_arr[i, t, 1]
+            if data["cue_masks"][i, t]:
+                dx = pred_cue[i,t,0] - data["events"][i,t,0]
+                dy = pred_cue[i,t,1] - data["events"][i,t,1]
                 cue_mse_sum += dx*dx + dy*dy
                 cue_n += 1
-            if tgt_masks_arr[i, t]:
-                dx = pred_tgt[i, t, 0] - events_arr[i, t, 2]
-                dy = pred_tgt[i, t, 1] - events_arr[i, t, 3]
+            if data["tgt_masks"][i, t]:
+                dx = pred_tgt[i,t,0] - data["events"][i,t,2]
+                dy = pred_tgt[i,t,1] - data["events"][i,t,3]
                 tgt_mse_sum += dx*dx + dy*dy
                 tgt_n += 1
 
-    type_acc   = correct_total / max(valid_total, 1)
-    cue_mse    = cue_mse_sum / max(cue_n, 1) / 2
-    tgt_mse    = tgt_mse_sum / max(tgt_n, 1) / 2
-
-    print(f"\n  ── Accuracy on {N} samples ──")
-    print(f"  Event type accuracy : {type_acc:.4f}  ({correct_total}/{valid_total})")
-    print(f"  Cue pos MSE         : {cue_mse:.4f}  ({cue_n} valid steps)")
-    print(f"  Tgt pos MSE         : {tgt_mse:.4f}  ({tgt_n} valid steps)")
-    print(f"  Pos MSE (avg)       : {(cue_mse+tgt_mse)/2:.4f}")
+    print(f"\n  ── Accuracy ({N} samples) ──────────────────")
+    print(f"  Event type acc: {correct/max(valid,1):.4f} "
+          f"({correct}/{valid})")
+    print(f"  Cue  pos MSE : {cue_mse_sum/max(cue_n,1)/2:.4f}  "
+          f"({cue_n} valid)")
+    print(f"  Tgt  pos MSE : {tgt_mse_sum/max(tgt_n,1)/2:.4f}  "
+          f"({tgt_n} valid)")
+    print(f"  Avg  pos MSE : {(cue_mse_sum/max(cue_n,1)+tgt_mse_sum/max(tgt_n,1))/4:.4f}")
 
 
 # ── main ──────────────────────────────────────────────────────────────────────
 
 def parse_args():
     p = argparse.ArgumentParser(
-        description="Visualize WMPredictor v2",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     p.add_argument("--ckpt", type=str,
                    default="world_model/checkpoints/"
                            "wmv2_enc128_128_h256_l1_emb32_s0_aug_20260329_164446")
     p.add_argument("--data",      type=str,   default="world_model/data_v2")
-    p.add_argument("--tags",      type=str,   nargs="+",
-                   default=["sac_abs_test"],
-                   help="None 이면 전체 데이터 사용")
-    p.add_argument("--n-samples", type=int,   default=16,
-                   help="그리드 이미지 샘플 수")
-    p.add_argument("--n-video",   type=int,   default=4,
-                   help="영상으로 저장할 샘플 수")
+    p.add_argument("--tags",      type=str,   nargs="+", default=["sac_abs_test"])
+    p.add_argument("--n-samples", type=int,   default=8)
+    p.add_argument("--n-video",   type=int,   default=4)
     p.add_argument("--seed",      type=int,   default=42)
     p.add_argument("--device",    type=str,   default="cpu")
     p.add_argument("--out-dir",   type=str,   default=None)
@@ -519,69 +512,53 @@ def main():
 
     ckpt_name = os.path.basename(args.ckpt.rstrip("/"))
     out_dir   = args.out_dir or os.path.join(
-        os.path.dirname(__file__), "results", ckpt_name
+        os.path.dirname(__file__), "results", ckpt_name,
     )
     os.makedirs(out_dir, exist_ok=True)
-    print(f"\nOutput  → {out_dir}")
+    print(f"\nOutput → {out_dir}")
 
-    # ── 모델 ──
     model, cfg = load_model(args.ckpt, device)
+    data       = load_data(args.data, args.tags)
 
-    # ── 데이터 ──
-    (obs, actions, events,
-     cue_masks, tgt_masks, lengths,
-     pocketed, n_bounces) = load_data(args.data, args.tags)
+    # 정확도
+    analyze_accuracy(model, data, device)
 
-    # ── 정확도 분석 ──
-    analyze_accuracy(model, obs, actions, events, cue_masks,
-                     tgt_masks, lengths, device)
-
-    # ── 샘플 선택: 포켓 성공 / 실패 절반씩 ──
-    pos_idx = np.where( pocketed)[0]
-    neg_idx = np.where(~pocketed)[0]
+    # 샘플 선택: pocketed / miss 절반씩
+    pos_idx = np.where( data["pocketed"])[0]
+    neg_idx = np.where(~data["pocketed"])[0]
     rng     = np.random.default_rng(args.seed)
 
-    def sample_balanced(n):
-        n_pos = n // 2
-        n_neg = n - n_pos
+    def balanced(n):
+        np_  = n // 2
+        nn_  = n - np_
         chosen = np.concatenate([
-            rng.choice(pos_idx, size=min(n_pos, len(pos_idx)), replace=False),
-            rng.choice(neg_idx, size=min(n_neg, len(neg_idx)), replace=False),
+            rng.choice(pos_idx, size=min(np_, len(pos_idx)), replace=False),
+            rng.choice(neg_idx, size=min(nn_, len(neg_idx)), replace=False),
         ])
         rng.shuffle(chosen)
         return chosen.tolist()
 
-    grid_idx  = sample_balanced(args.n_samples)
-    video_idx = sample_balanced(args.n_video)
+    grid_idx  = balanced(args.n_samples)
+    video_idx = balanced(args.n_video)
 
-    kw = dict(
-        obs_arr=obs, act_arr=actions,
-        events_arr=events, cue_masks_arr=cue_masks, tgt_masks_arr=tgt_masks,
-        lengths_arr=lengths, pocketed_arr=pocketed, n_bounces_arr=n_bounces,
-        device=device,
-    )
+    print(f"\n[1] Mixed grid ({args.n_samples} samples) ...")
+    visualize_grid(model, data, grid_idx, out_dir, device, prefix="grid_mixed")
 
-    # ── 그리드 ──
-    print("\n[1] Mixed grid ...")
-    visualize_grid(model, indices=grid_idx, out_dir=out_dir,
-                   prefix="grid_mixed", **kw)
-
-    pos_grid = rng.choice(pos_idx, size=min(8, len(pos_idx)), replace=False).tolist()
-    neg_grid = rng.choice(neg_idx, size=min(8, len(neg_idx)), replace=False).tolist()
+    pos_grid = rng.choice(pos_idx, size=min(args.n_samples, len(pos_idx)),
+                          replace=False).tolist()
+    neg_grid = rng.choice(neg_idx, size=min(args.n_samples, len(neg_idx)),
+                          replace=False).tolist()
 
     print("[2] Pocketed grid ...")
-    visualize_grid(model, indices=pos_grid, out_dir=out_dir,
-                   prefix="grid_pocketed", **kw)
+    visualize_grid(model, data, pos_grid, out_dir, device, prefix="grid_pocketed")
 
     print("[3] Miss grid ...")
-    visualize_grid(model, indices=neg_grid, out_dir=out_dir,
-                   prefix="grid_miss", **kw)
+    visualize_grid(model, data, neg_grid, out_dir, device, prefix="grid_miss")
 
-    # ── 영상 ──
-    print("\n[4] Videos ...")
-    visualize_video(model, indices=video_idx, out_dir=out_dir, fps=5, **kw)
+    print(f"\n[4] Videos ({args.n_video}) ...")
+    visualize_video(model, data, video_idx, out_dir, device, fps=5)
 
-    print(f"\nDone  →  {out_dir}/")
+    print(f"\nDone → {out_dir}/")
 
 
 if __name__ == "__main__":
