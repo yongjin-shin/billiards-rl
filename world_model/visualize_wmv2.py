@@ -214,46 +214,18 @@ def draw_panel(ax, obs, events, cue_masks, tgt_masks, length,
     cm        = cue_masks[:L].astype(bool)
     tm        = tgt_masks[:L].astype(bool)
 
-    # ── shot path: obs → 첫 번째 유효 이벤트 위치 ────────────────────────────
-    # cue shot path (obs_cue → first valid cue event)
-    first_cm = np.where(cm)[0]
-    if len(first_cm) > 0:
-        fi = first_cm[0]
-        ax.plot([cue0_x, cue_abs_x[fi]], [cue0_y, cue_abs_y[fi]],
-                color=cue_color, lw=0.8, alpha=0.45, ls="--", zorder=5)
+    # ── 공별로 mask=1 위치만 모아서 연속선으로 연결 (debug_sim_viz 와 동일 방식) ──
+    def draw_ball_path(init_x, init_y, abs_xs, abs_ys, mask, color):
+        """초기 위치 + 유효 이벤트 위치를 순서대로 이어 하나의 연속 경로로 그린다."""
+        valid_idx = np.where(mask)[0]
+        if len(valid_idx) == 0:
+            return
+        xs = [init_x] + [abs_xs[i] for i in valid_idx]
+        ys = [init_y] + [abs_ys[i] for i in valid_idx]
+        ax.plot(xs, ys, color=color, lw=1.6, alpha=0.9, zorder=6)
 
-    # tgt shot path: only if first valid tgt event != obs_tgt (safety)
-    first_tm = np.where(tm)[0]
-    if len(first_tm) > 0:
-        fi = first_tm[0]
-        ax.plot([tgt0_x, tgt_abs_x[fi]], [tgt0_y, tgt_abs_y[fi]],
-                color=tgt_color, lw=0.8, alpha=0.45, ls="--", zorder=5)
-
-    # ── cue 궤적 선 ───────────────────────────────────────────────────────────
-    seg_x, seg_y = [], []
-    for i in range(L):
-        if cm[i]:
-            seg_x.append(cue_abs_x[i])
-            seg_y.append(cue_abs_y[i])
-        else:
-            if len(seg_x) >= 2:
-                ax.plot(seg_x, seg_y, color=cue_color, lw=1.5, alpha=0.9, zorder=6)
-            seg_x, seg_y = [], []
-    if len(seg_x) >= 2:
-        ax.plot(seg_x, seg_y, color=cue_color, lw=1.5, alpha=0.9, zorder=6)
-
-    # ── tgt 궤적 선 ───────────────────────────────────────────────────────────
-    seg_x, seg_y = [], []
-    for i in range(L):
-        if tm[i]:
-            seg_x.append(tgt_abs_x[i])
-            seg_y.append(tgt_abs_y[i])
-        else:
-            if len(seg_x) >= 2:
-                ax.plot(seg_x, seg_y, color=tgt_color, lw=1.5, alpha=0.9, zorder=6)
-            seg_x, seg_y = [], []
-    if len(seg_x) >= 2:
-        ax.plot(seg_x, seg_y, color=tgt_color, lw=1.5, alpha=0.9, zorder=6)
+    draw_ball_path(cue0_x, cue0_y, cue_abs_x, cue_abs_y, cm, cue_color)
+    draw_ball_path(tgt0_x, tgt0_y, tgt_abs_x, tgt_abs_y, tm, tgt_color)
 
     # ── 이벤트 점 ──────────────────────────────────────────────────────────────
     for i in range(L):
