@@ -134,21 +134,29 @@ def parse_args():
     p.add_argument("--no-augment",    action="store_true",
                    help="데이터 augmentation 비활성화")
     # model
-    p.add_argument("--enc-hidden",    type=int,   nargs="+", default=[128, 128])
+    p.add_argument("--enc-hidden",    type=int,   nargs="+", default=[128, 256])
     p.add_argument("--lstm-hidden",   type=int,   default=256)
-    p.add_argument("--lstm-layers",   type=int,   default=1)
+    p.add_argument("--lstm-layers",   type=int,   default=2)
+    p.add_argument("--lstm-dropout",  type=float, default=0.1,
+                   help="LSTM inter-layer dropout (lstm_layers>1 일 때만 적용)")
     p.add_argument("--event-embed-dim", type=int, default=32)
     # training
     p.add_argument("--epochs",        type=int,   default=100)
     p.add_argument("--batch-size",    type=int,   default=256)
     p.add_argument("--lr",            type=float, default=3e-4)
-    p.add_argument("--lambda-event",  type=float, default=1.0,
+    p.add_argument("--lambda-event",     type=float, default=1.0,
                    help="Event CE loss weight")
-    p.add_argument("--lambda-pos",    type=float, default=1.0,
+    p.add_argument("--lambda-pos",       type=float, default=1.0,
                    help="Position MSE loss weight")
+    p.add_argument("--label-smoothing",  type=float, default=0.1,
+                   help="Label smoothing for event CE (0.0 = off)")
     p.add_argument("--ss-epochs",     type=int,   default=50,
                    help="Scheduled sampling: tf_ratio 1→0 감소 구간")
     p.add_argument("--ss-min-ratio",  type=float, default=0.0)
+    p.add_argument("--pct-start",     type=float, default=0.1,
+                   help="OneCycleLR warmup 비율 (default: 10%%)")
+    p.add_argument("--final-div-factor", type=float, default=1e3,
+                   help="min_lr = max_lr / final_div_factor (default: 1e3 → 1e-6)")
     # misc
     p.add_argument("--seed",          type=int,   default=42)
     p.add_argument("--device",        type=str,   default="cpu")
@@ -203,13 +211,21 @@ def train(args):
         enc_hidden      = args.enc_hidden,
         lstm_hidden     = args.lstm_hidden,
         lstm_layers     = args.lstm_layers,
+        lstm_dropout    = args.lstm_dropout,
         event_embed_dim = args.event_embed_dim,
     ).to(device)
     n_params = sum(p.numel() for p in model.parameters())
 
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, patience=10, factor=0.5, min_lr=1e-5,
+    steps_per_epoch = len(train_loader)   # floor 아닌 실제 배치 수
+    scheduler = torch.optim.lr_scheduler.OneCycleLR(
+        optimizer,
+        max_lr           = args.lr,
+        steps_per_epoch  = steps_per_epoch,
+        epochs           = args.epochs,
+        pct_start        = args.pct_start,
+        anneal_strategy  = "cos",
+        final_div_factor = args.final_div_factor,
     )
 
     # ── config ────────────────────────────────────────────────────────────────
@@ -222,14 +238,18 @@ def train(args):
         "enc_hidden":      args.enc_hidden,
         "lstm_hidden":     args.lstm_hidden,
         "lstm_layers":     args.lstm_layers,
+        "lstm_dropout":    args.lstm_dropout,
         "event_embed_dim": args.event_embed_dim,
         "epochs":          args.epochs,
         "batch_size":      args.batch_size,
         "lr":              args.lr,
         "lambda_event":    args.lambda_event,
         "lambda_pos":      args.lambda_pos,
+        "label_smoothing":    args.label_smoothing,
         "ss_epochs":       args.ss_epochs,
         "ss_min_ratio":    args.ss_min_ratio,
+        "pct_start":       args.pct_start,
+        "final_div_factor": args.final_div_factor,
         "seed":            args.seed,
         "device":          args.device,
         "n_params":        n_params,
@@ -257,7 +277,9 @@ def train(args):
           f"  layers={args.lstm_layers}  emb={args.event_embed_dim}")
     print(f"  n_params={n_params:,}  λ_event={args.lambda_event}"
           f"  λ_pos={args.lambda_pos}")
-    print(f"  epochs={args.epochs}  batch={args.batch_size}  lr={args.lr}")
+    print(f"  epochs={args.epochs}  batch={args.batch_size}  lr={args.lr}"
+          f"  pct_start={args.pct_start}  final_div={args.final_div_factor:.0e}"
+          f"  (min_lr={args.lr / args.final_div_factor:.1e})")
     print(f"  ss_epochs={args.ss_epochs}  ss_min={args.ss_min_ratio}"
           f"  augment={not args.no_augment}")
     print(f"  train={n_train:,}  val={n_val:,}")
@@ -286,13 +308,15 @@ def train(args):
             event_logits, pos_pred = model(obs_n, act, events, lengths, tf_ratio)
             loss, ev_l, cu_l, tg_l = wm_loss(
                 event_logits, pos_pred, events, cue_m, tgt_m, lengths,
-                args.lambda_event, args.lambda_pos,
+                args.lambda_event, args.lambda_pos, args.label_smoothing,
+                init_cue_tgt=obs_n[:, 0:4],
             )
 
             optimizer.zero_grad()
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
+            scheduler.step()
 
             bs        = obs_n.size(0)
             tr_total += loss.item() * bs
@@ -318,7 +342,8 @@ def train(args):
                                                tf_ratio=0.0)
                 loss, ev_l, cu_l, tg_l = wm_loss(
                     event_logits, pos_pred, events, cue_m, tgt_m, lengths,
-                    args.lambda_event, args.lambda_pos,
+                    args.lambda_event, args.lambda_pos, args.label_smoothing,
+                    init_cue_tgt=obs_n[:, 0:4],
                 )
 
                 bs        = obs_n.size(0)
@@ -330,7 +355,6 @@ def train(args):
         va_total /= n_val;  va_event /= n_val
         va_cue   /= n_val;  va_tgt   /= n_val
 
-        scheduler.step(va_total)
         lr_now = optimizer.param_groups[0]["lr"]
 
         # ── checkpoint ────────────────────────────────────────────────────────

@@ -82,9 +82,10 @@ class WMPredictor(nn.Module):
     """
     def __init__(
         self,
-        enc_hidden      : tuple = (128, 128),
+        enc_hidden      : tuple = (128, 256),
         lstm_hidden     : int   = 256,
-        lstm_layers     : int   = 1,
+        lstm_layers     : int   = 2,
+        lstm_dropout    : float = 0.1,
         event_embed_dim : int   = 32,
     ):
         super().__init__()
@@ -104,11 +105,15 @@ class WMPredictor(nn.Module):
         # ── Decoder ───────────────────────────────────────────────────────────
         self.event_embed = nn.Embedding(N_EVENT_TYPES, event_embed_dim)
 
-        # step input: event_embed(d) + cue_xy(2) + tgt_xy(2) = d+4
-        self.decoder   = nn.LSTM(event_embed_dim + 4, lstm_hidden,
-                                 lstm_layers, batch_first=True)
+        # step input: event_embed(d) + cue_xy(2) + tgt_xy(2) + Δcue(2) + Δtgt(2) = d+8
+        self.decoder   = nn.LSTM(event_embed_dim + 8, lstm_hidden,
+                                 lstm_layers, batch_first=True,
+                                 dropout=lstm_dropout if lstm_layers > 1 else 0.0)
+        # 두 head 완전 독립: gradient 간섭 없음
+        # pos_head  : hidden → Δpos (절대좌표 아닌 이동량 예측)
+        # event_head: hidden → event logits
+        self.pos_head   = nn.Linear(lstm_hidden, 4)
         self.event_head = nn.Linear(lstm_hidden, N_EVENT_TYPES)
-        self.pos_head   = nn.Linear(lstm_hidden + event_embed_dim, 4)
 
     # ─────────────────────────────────────────────────────────────────────────
 
@@ -123,20 +128,21 @@ class WMPredictor(nn.Module):
                .permute(1, 0, 2).contiguous())
         return h0, c0
 
-    def _step(self, prev_type_idx, prev_cue, prev_tgt, h, c):
-        """단일 LSTM step. Returns: event_logit(B,10), pos_pred(B,4), h, c"""
-        e_emb    = self.event_embed(prev_type_idx)                       # (B, d)
-        step_in  = torch.cat([e_emb, prev_cue, prev_tgt], dim=-1)       # (B, d+4)
+    def _step(self, prev_type_idx, prev_cue, prev_tgt, delta_cue, delta_tgt, h, c):
+        """LSTM step → hidden (B, H)"""
+        e_emb    = self.event_embed(prev_type_idx)                              # (B, d)
+        step_in  = torch.cat([e_emb, prev_cue, prev_tgt,
+                               delta_cue, delta_tgt], dim=-1)                  # (B, d+8)
         out, (h, c) = self.decoder(step_in.unsqueeze(1), (h, c))
-        hidden   = out.squeeze(1)                                         # (B, H)
+        return out.squeeze(1), h, c                                             # (B, H)
 
-        event_logit = self.event_head(hidden)                            # (B, 10)
-        return event_logit, hidden, h, c
+    def _pos(self, hidden):
+        """Position head: hidden → Δpos (Δcue_xy, Δtgt_xy)  (B, 4)"""
+        return self.pos_head(hidden)
 
-    def _pos_from_hidden(self, hidden, type_idx):
-        """Position head: [hidden | event_embed(type)] → (B, 4)"""
-        pos_emb = self.event_embed(type_idx)                             # (B, d)
-        return self.pos_head(torch.cat([hidden, pos_emb], dim=-1))       # (B, 4)
+    def _event(self, hidden):
+        """Event head: hidden → logits  (B, K)  — pos와 독립"""
+        return self.event_head(hidden)
 
     # ── Training forward ──────────────────────────────────────────────────────
 
@@ -159,34 +165,46 @@ class WMPredictor(nn.Module):
         gt_cue_tgt = events[:, :, :4]                          # (B, T, 4)
         gt_types   = events[:, :, 4:].argmax(dim=-1)           # (B, T)
 
-        # t=0 이전 상태: obs의 초기 위치
-        prev_type = torch.zeros(B, dtype=torch.long, device=device)   # none(0) as start
-        prev_cue  = obs_norm[:, 0:2]                                   # cue_pos_0
-        prev_tgt  = obs_norm[:, 2:4]                                   # tgt_pos_0
+        # t=0 이전 상태: obs의 초기 위치, delta는 0으로 시작
+        prev_type  = torch.zeros(B, dtype=torch.long, device=device)   # none(0) as start
+        prev_cue   = obs_norm[:, 0:2]                                   # cue_pos_0
+        prev_tgt   = obs_norm[:, 2:4]                                   # tgt_pos_0
+        delta_cue  = torch.zeros(B, 2, device=device)                   # Δcue_0 = 0
+        delta_tgt  = torch.zeros(B, 2, device=device)                   # Δtgt_0 = 0
 
         all_event_logits, all_pos_pred = [], []
 
         for t in range(MAX_EVENTS):
-            event_logit, hidden, h, c = self._step(prev_type, prev_cue, prev_tgt, h, c)
+            hidden, h, c = self._step(
+                prev_type, prev_cue, prev_tgt, delta_cue, delta_tgt, h, c)
+
+            use_tf = (tf_ratio == 1.0) or \
+                     (tf_ratio > 0 and torch.rand(1).item() < tf_ratio)
+
+            # pos_head: Δpos 예측, 절대좌표 복원
+            delta_pred = self._pos(hidden)                               # (B, 4): Δcue, Δtgt
+            abs_cue    = prev_cue + delta_pred[:, 0:2]                  # 절대좌표 복원
+            abs_tgt    = prev_tgt + delta_pred[:, 2:4]
+            all_pos_pred.append(delta_pred)                              # loss는 Δpos 기준
+
+            # event head: hidden에서 독립적으로 예측
+            event_logit = self._event(hidden)                            # (B, K)
             all_event_logits.append(event_logit)
 
-            # position head 에 줄 event type: TF = GT, AR = argmax
-            use_tf    = (tf_ratio == 1.0) or \
-                        (tf_ratio > 0 and torch.rand(1).item() < tf_ratio)
-            type_4pos = gt_types[:, t] if use_tf else event_logit.argmax(dim=-1)
-            pos_pred  = self._pos_from_hidden(hidden, type_4pos)
-            all_pos_pred.append(pos_pred)
-
-            # 다음 스텝 입력 결정
+            # 다음 스텝 입력: 절대좌표 기준
             if t < MAX_EVENTS - 1:
                 if use_tf:
+                    next_cue  = gt_cue_tgt[:, t, 0:2]
+                    next_tgt  = gt_cue_tgt[:, t, 2:4]
                     prev_type = gt_types[:, t]
-                    prev_cue  = gt_cue_tgt[:, t, 0:2]
-                    prev_tgt  = gt_cue_tgt[:, t, 2:4]
                 else:
+                    next_cue  = abs_cue.detach()
+                    next_tgt  = abs_tgt.detach()
                     prev_type = event_logit.argmax(dim=-1).detach()
-                    prev_cue  = pos_pred[:, 0:2].detach()
-                    prev_tgt  = pos_pred[:, 2:4].detach()
+                delta_cue = next_cue - prev_cue
+                delta_tgt = next_tgt - prev_tgt
+                prev_cue  = next_cue
+                prev_tgt  = next_tgt
 
         return (torch.stack(all_event_logits, dim=1),   # (B, T, 10)
                 torch.stack(all_pos_pred,     dim=1))   # (B, T, 4)
@@ -210,27 +228,36 @@ class WMPredictor(nn.Module):
         device = obs_norm.device
         h, c   = self._init_hidden(obs_norm, act)
 
-        prev_type = torch.zeros(1, dtype=torch.long, device=device)
-        prev_cue  = obs_norm[:, 0:2]
-        prev_tgt  = obs_norm[:, 2:4]
+        prev_type  = torch.zeros(1, dtype=torch.long, device=device)
+        prev_cue   = obs_norm[:, 0:2]
+        prev_tgt   = obs_norm[:, 2:4]
+        delta_cue  = torch.zeros(1, 2, device=device)
+        delta_tgt  = torch.zeros(1, 2, device=device)
 
         types, cue_xys, tgt_xys = [], [], []
 
         for _ in range(max_steps):
-            event_logit, hidden, h, c = self._step(prev_type, prev_cue, prev_tgt, h, c)
-            pred_type = event_logit.argmax(dim=-1)              # (1,)
-            pos_pred  = self._pos_from_hidden(hidden, pred_type)
+            hidden, h, c = self._step(
+                prev_type, prev_cue, prev_tgt, delta_cue, delta_tgt, h, c)
+
+            delta_pred  = self._pos(hidden)                      # Δpos
+            abs_cue     = prev_cue + delta_pred[:, 0:2]          # 절대좌표 복원
+            abs_tgt     = prev_tgt + delta_pred[:, 2:4]
+            event_logit = self._event(hidden)
+            pred_type   = event_logit.argmax(dim=-1)             # (1,)
 
             types.append(pred_type.item())
-            cue_xys.append(pos_pred[0, 0:2])
-            tgt_xys.append(pos_pred[0, 2:4])
+            cue_xys.append(abs_cue[0])
+            tgt_xys.append(abs_tgt[0])
 
             if pred_type.item() == BALL_POCKET_IDX:
                 break
 
+            delta_cue = abs_cue - prev_cue
+            delta_tgt = abs_tgt - prev_tgt
             prev_type = pred_type
-            prev_cue  = pos_pred[:, 0:2]
-            prev_tgt  = pos_pred[:, 2:4]
+            prev_cue  = abs_cue
+            prev_tgt  = abs_tgt
 
         return types, torch.stack(cue_xys), torch.stack(tgt_xys)
 
@@ -238,14 +265,16 @@ class WMPredictor(nn.Module):
 # ── Loss ──────────────────────────────────────────────────────────────────────
 
 def wm_loss(event_logits, pos_pred, events, cue_masks, tgt_masks, lengths,
-            lambda_event=1.0, lambda_pos=1.0):
+            lambda_event=1.0, lambda_pos=1.0, label_smoothing=0.1,
+            init_cue_tgt=None):
     """
     event_logits : (B, T, 10)
-    pos_pred     : (B, T, 4)    — (cue_xy, tgt_xy)
+    pos_pred     : (B, T, 4)    — 예측 Δpos (Δcue_xy, Δtgt_xy)
     events       : (B, T, 14)
     cue_masks    : (B, T)       — 1 if cue_xy valid
     tgt_masks    : (B, T)       — 1 if tgt_xy valid
     lengths      : (B,)
+    init_cue_tgt : (B, 4)       — obs에서의 초기 cue/tgt 절대좌표 (Δpos GT 계산용)
     """
     B, T   = event_logits.shape[:2]
     device = event_logits.device
@@ -254,23 +283,33 @@ def wm_loss(event_logits, pos_pred, events, cue_masks, tgt_masks, lengths,
     idx      = torch.arange(T, device=device).unsqueeze(0)
     len_mask = (idx < lengths.unsqueeze(1)).float()             # (B, T)
 
-    # ── event CE ────────────────────────────────────────────────────────────
+    # ── event CE (with label smoothing) ─────────────────────────────────────
     gt_types   = events[:, :, 4:].argmax(dim=-1)                # (B, T)
     ce         = F.cross_entropy(event_logits.reshape(-1, N_EVENT_TYPES),
                                  gt_types.reshape(-1),
+                                 label_smoothing=label_smoothing,
                                  reduction="none").view(B, T)
     event_loss = (ce * len_mask).sum() / len_mask.sum().clamp(min=1)
 
-    # ── cue position MSE ────────────────────────────────────────────────────
-    gt_cue   = events[:, :, 0:2]
+    # ── GT Δpos 계산 ─────────────────────────────────────────────────────────
+    # Δpos_t = pos_t - pos_{t-1},  t=0: pos_{-1} = init_cue_tgt (obs 초기 위치)
+    gt_abs  = events[:, :, :4]                                      # (B, T, 4)
+    if init_cue_tgt is not None:
+        prev_abs = torch.cat([init_cue_tgt.unsqueeze(1),
+                              gt_abs[:, :-1, :]], dim=1)            # (B, T, 4)
+    else:
+        prev_abs = torch.cat([gt_abs[:, :1, :],
+                              gt_abs[:, :-1, :]], dim=1)            # fallback
+    gt_delta = gt_abs - prev_abs                                     # (B, T, 4)
+
+    # ── cue Δpos MSE ────────────────────────────────────────────────────────
     cue_m    = len_mask * cue_masks
-    cue_loss = (F.mse_loss(pos_pred[:, :, 0:2], gt_cue, reduction="none")
+    cue_loss = (F.mse_loss(pos_pred[:, :, 0:2], gt_delta[:, :, 0:2], reduction="none")
                 .mean(-1) * cue_m).sum() / cue_m.sum().clamp(min=1)
 
-    # ── tgt position MSE ────────────────────────────────────────────────────
-    gt_tgt   = events[:, :, 2:4]
+    # ── tgt Δpos MSE ────────────────────────────────────────────────────────
     tgt_m    = len_mask * tgt_masks
-    tgt_loss = (F.mse_loss(pos_pred[:, :, 2:4], gt_tgt, reduction="none")
+    tgt_loss = (F.mse_loss(pos_pred[:, :, 2:4], gt_delta[:, :, 2:4], reduction="none")
                 .mean(-1) * tgt_m).sum() / tgt_m.sum().clamp(min=1)
 
     pos_loss = (cue_loss + tgt_loss) / 2
