@@ -26,10 +26,10 @@ run() {
 }
 
 # ── 1-layer h=256 (baseline, 이미 돌렸지만 비교 기준) ──
-ONE="--ctx-hidden 128 --lstm-hidden 256 --lstm-layers 1"
-run python -m world_model.train_predictor --model lstm $ONE $COMMON --seed 0
-run python -m world_model.train_predictor --model lstm $ONE $COMMON --seed 1
-run python -m world_model.train_predictor --model lstm $ONE $COMMON --seed 2
+# ONE="--ctx-hidden 128 --lstm-hidden 256 --lstm-layers 1"
+# run python -m world_model.train_predictor --model lstm $ONE $COMMON --seed 0
+# run python -m world_model.train_predictor --model lstm $ONE $COMMON --seed 1
+# run python -m world_model.train_predictor --model lstm $ONE $COMMON --seed 2
 
 # ── 2-layer h=148 ctx=120 (동일 파라미터, 계층 구조) ──
 TWO="--ctx-hidden 120 --lstm-hidden 148 --lstm-layers 2"
