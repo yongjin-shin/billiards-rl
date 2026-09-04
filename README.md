@@ -9,8 +9,8 @@ Reinforcement learning on a physics-accurate billiards simulator ([pooltool](htt
 
 | | |
 |---|---|
-| **현재 위치** | Exp-16 구현 검증 완료 — Phase 0/1 모두 VanillaSAC ≈ SB3 SAC, WM variant 실험 예정 |
-| **다음 실험** | Exp-16 WM variant (wm_coef 탐색) |
+| **현재 위치** | WMPredictor v3 아키텍처 완성 (Δpos·2-layer LSTM·OneCycleLR), 훈련 미완료 — 다음 실험 방향 탐색 중 |
+| **다음 실험** | TBD |
 | **Exp-16 vanilla** | Phase 1: pocket 62.2% ≈ SAC 63.6% (p=0.49) / Phase 0: pocket 56.9% ≈ SAC 55.3% (p=0.62) |
 
 ---
@@ -396,6 +396,58 @@ VanillaSAC (custom) vs SB3 SAC — 2M steps, n_balls=1, ms=1, seeds {0,1,2,3,42}
 - final pocket: diff=+1.6pp, t=0.54, **p=0.62** → not significant
 
 **결론: Phase 0에서도 VanillaSAC ≈ SB3 SAC. 구현 검증 완료.**
+
+---
+
+## WMPredictor 실험 · Exp-16 World Model 구성요소 개발
+
+Exp-16 WM critic의 `M(s, a) → ĥ` 컴포넌트를 위한 독립 trajectory predictor 개발 트랙.
+SAC/random 데이터로 사전훈련 후 Exp-16 critic에 통합 예정이었으나, 훈련 결과 확인 전에 방향 전환.
+
+### WMPredictor v1 (2026-03-28)
+
+`world_model/predictor.py` + `train_predictor.py`
+
+**비교축:** 아키텍처(MLP vs LSTM) × 훈련전략(curriculum vs tf_ratio) × scale-up(h=256/512/1024)
+
+- LSTM curriculum: TF ratio 1→0 점진 감소 (80 epoch에 걸쳐)
+- LSTM tf_ratio: scheduled sampling 방식
+- scale-up: h=256 → 512 → 1024 (scaleup 실험)
+
+### WMPredictor v2 (2026-03-29 ~ 2026-04-03)
+
+`world_model/wm_predictor.py` + `train_wm_predictor.py` (신규 포맷)
+
+**변경:** cue / target ball 궤적 분리 데이터 포맷(data_v2/) + dual-head LSTM
+
+```
+Encoder : MLP (obs_norm, act) → h0, c0
+Decoder : LSTM step input [e_emb | cue_xy | tgt_xy] (d+4)
+          ├── event_head : hidden → logits (K=10)
+          └── pos_head   : [hidden | event_embed] → abs cue_xy, tgt_xy
+```
+
+**실험 범위:** lstm_hidden {256, 512} × lstm_layers {1, 2} × aug {on, off} × seeds {0,1,2,42}
+**마지막 체크포인트:** `wmv2_enc128_256_h256_l2_emb32_s*_20260403_*`
+
+### WMPredictor v3 (2026-09-05, 아키텍처만 완성 — 훈련 미완료)
+
+**동기:** v2에서 abs좌표 직접 예측 시 오차 누적 + pos/event head 간 gradient 간섭 문제 관찰.
+
+**변경 사항:**
+
+| | v2 | v3 |
+|---|---|---|
+| pos 예측 | 절대좌표 직접 | **Δpos** 예측 후 누적 |
+| decoder input | `[e_emb\|cue\|tgt]` d+4 | `[e_emb\|cue\|tgt\|Δcue\|Δtgt]` d+8 |
+| LSTM | 1-layer | **2-layer + dropout=0.1** |
+| head 구조 | pos_head = hidden+event_embed | **pos_head / event_head 완전 독립** |
+| LR 스케줄 | ReduceLROnPlateau | **OneCycleLR** (batch 단위) |
+| event loss | CE | **CE + label_smoothing=0.1** |
+| enc_hidden | [128,128] | **[128,256]** |
+
+`run_wmv3.sh`: h=256 × lr {3e-4, 1e-3} × seeds {0,1,2} 총 6 run 계획.
+**2026-09-05 훈련 시작 직후 종료. 결과 없음. 이후 실험 방향 전환.**
 
 ---
 
