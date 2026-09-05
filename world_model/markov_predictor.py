@@ -8,12 +8,12 @@ Architecture:
     MarkovTransition: (event_state 24) → MLP → next event prediction (24 dims)
 
 Event state (24 dims):
-    [0:2]   cue_xy     normalized [0,1]
-    [2:4]   cue_vel    normalized /MAX_SPEED
-    [4:7]   cue_avel   normalized /MAX_AVEL
+    [0:2]   cue_xy     normalized [0,1]      충돌 발생 위치
+    [2:4]   cue_vel    normalized /MAX_SPEED  충돌 직후 속도 (post-collision)
+    [4:7]   cue_avel   normalized /MAX_AVEL   충돌 직후 회전 (post-collision)
     [7:9]   tgt_xy     normalized [0,1]
-    [9:11]  tgt_vel    normalized /MAX_SPEED
-    [11:14] tgt_avel   normalized /MAX_AVEL
+    [9:11]  tgt_vel    normalized /MAX_SPEED  충돌 직후 속도 (post-collision)
+    [11:14] tgt_avel   normalized /MAX_AVEL   충돌 직후 회전 (post-collision)
     [14:24] type one-hot (10)
 
 MarkovTransition output:

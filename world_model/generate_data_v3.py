@@ -67,18 +67,22 @@ COLLISION_IDXS = frozenset(
 
 def get_ball_state(agent):
     """
-    agent.initial에서 (xy, vel_xy, avel_xyz) 추출.
+    충돌 위치(agent.initial.xyz)와 충돌 이후 속도(agent.final.vel) 추출.
+
+    위치:   agent.initial  — 충돌이 발생한 좌표
+    속도:   agent.final    — 충돌 직후 진행 방향 (다음 이벤트 예측에 직접 유용)
+    회전:   agent.final    — 충돌 직후 회전 상태
 
     Returns:
         xy   : (float, float)              정규화 전 미터 단위
-        vel  : (float, float)              정규화 전 m/s
-        avel : (float, float, float)       정규화 전 rad/s
-        valid: bool                        agent.initial이 유효한지
+        vel  : (float, float)              정규화 전 m/s  (post-collision)
+        avel : (float, float, float)       정규화 전 rad/s (post-collision)
+        valid: bool
     """
     if agent.initial is None:
         return (0.0, 0.0), (0.0, 0.0), (0.0, 0.0, 0.0), False
 
-    # position
+    # position — 충돌 발생 위치
     if hasattr(agent.initial, "xyz"):
         x, y = float(agent.initial.xyz[0]), float(agent.initial.xyz[1])
     elif hasattr(agent.initial, "state"):
@@ -86,23 +90,22 @@ def get_ball_state(agent):
     else:
         return (0.0, 0.0), (0.0, 0.0), (0.0, 0.0, 0.0), False
 
-    # linear velocity
-    if hasattr(agent.initial, "vel"):
-        vx, vy = float(agent.initial.vel[0]), float(agent.initial.vel[1])
-    elif hasattr(agent.initial, "state"):
-        vx, vy = float(agent.initial.state.rvw[1, 0]), float(agent.initial.state.rvw[1, 1])
+    # velocity/avel — final(충돌 직후) 우선, 없으면 initial로 fallback
+    src = agent.final if (hasattr(agent, "final") and agent.final is not None) else agent.initial
+
+    if hasattr(src, "vel"):
+        vx, vy = float(src.vel[0]), float(src.vel[1])
+    elif hasattr(src, "state"):
+        vx, vy = float(src.state.rvw[1, 0]), float(src.state.rvw[1, 1])
     else:
         vx, vy = 0.0, 0.0
 
-    # angular velocity
-    if hasattr(agent.initial, "avel"):
-        wx = float(agent.initial.avel[0])
-        wy = float(agent.initial.avel[1])
-        wz = float(agent.initial.avel[2])
-    elif hasattr(agent.initial, "state"):
-        wx = float(agent.initial.state.rvw[2, 0])
-        wy = float(agent.initial.state.rvw[2, 1])
-        wz = float(agent.initial.state.rvw[2, 2])
+    if hasattr(src, "avel"):
+        wx, wy, wz = float(src.avel[0]), float(src.avel[1]), float(src.avel[2])
+    elif hasattr(src, "state"):
+        wx = float(src.state.rvw[2, 0])
+        wy = float(src.state.rvw[2, 1])
+        wz = float(src.state.rvw[2, 2])
     else:
         wx, wy, wz = 0.0, 0.0, 0.0
 
