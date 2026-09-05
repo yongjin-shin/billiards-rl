@@ -4,9 +4,10 @@
 set -e
 cd "$(dirname "$0")/.."
 
-SAC_5M=$(ls logs/experiments/SAC_5000k_s42_*/best_model/best_model.zip 2>/dev/null | head -1)
-SAC_2M_S42=$(ls logs/experiments/SAC_2000k_s42_*/best_model/best_model.zip 2>/dev/null | head -1)
-SAC_2M_S1=$(ls logs/experiments/SAC_2000k_s1_*/best_model/best_model.zip 2>/dev/null | head -1)
+# sp0.0_tp0.0 모델만 사용 — 현재 환경(obs_dim=16)과 obs space 일치
+SAC_5M=$(ls logs/experiments/SAC_5000k_s42_sp0.0_tp0.0_*/best_model/best_model.zip 2>/dev/null | head -1)
+SAC_2M_S42=$(ls logs/experiments/SAC_2000k_s42_sp0.0_tp0.0_*/best_model/best_model.zip 2>/dev/null | head -1)
+SAC_2M_S1=$(ls logs/experiments/SAC_2000k_s1_sp0.0_tp0.0_*/best_model/best_model.zip 2>/dev/null | head -1)
 
 SAC_ARGS=""
 for m in "$SAC_5M" "$SAC_2M_S42" "$SAC_2M_S1"; do

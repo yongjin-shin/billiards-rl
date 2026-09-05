@@ -266,14 +266,14 @@ def run_stage(stage_idx: int, stage_data: dict, args: SimpleNamespace,
 # ── 결과 출력 ─────────────────────────────────────────────────────────────────
 
 def print_summary(results: list[dict], csv_path: Path):
-    header = ["stage", "filter", "n_episodes",
-              "ball_ball", "linear_cushion", "circular_cushion", "ball_pocket"]
+    header = ["name", "filter", "n_episodes",
+              "ball_ball", "ball_linear_cushion", "ball_circular_cushion", "ball_pocket"]
     print(f"\n{'='*70}")
-    print(f"{'Stage':10s} {'Filter':18s} {'N':>7s}  "
+    print(f"{'Stage':16s} {'Filter':18s} {'N':>7s}  "
           f"{'ball_ball':>9s} {'lin_cush':>9s} {'circ_cush':>9s} {'pocket':>9s}")
     print("-" * 70)
     for r in results:
-        print(f"{r['name']:10s} {r['filter']:18s} {r['n_episodes']:>7d}  "
+        print(f"{r['name']:16s} {r['filter']:18s} {r['n_episodes']:>7d}  "
               f"{r.get('ball_ball', 0):>9.3f} "
               f"{r.get('ball_linear_cushion', 0):>9.3f} "
               f"{r.get('ball_circular_cushion', 0):>9.3f} "
@@ -296,6 +296,8 @@ def main():
     p.add_argument("--out-dir",           type=str, default=None)
     p.add_argument("--max-stage",         type=int, default=2,
                    help="최대 진행 stage (0=Stage0만, 1=0+1, 2=전체)")
+    p.add_argument("--start-stage",       type=int, default=0,
+                   help="이 stage부터 시작 (이전 stage 스킵, --prev-ckpt 필요)")
     p.add_argument("--advance-threshold", type=float, default=ADVANCE_THRESHOLD_DEFAULT)
     p.add_argument("--new-episodes",      type=int, default=15000,
                    help="Stage2 신규 생성 에피소드 수")
@@ -339,7 +341,18 @@ def main():
     results   = []
     prev_ckpt = None
 
-    for stage_idx in range(min(args.max_stage + 1, len(STAGES))):
+    # --start-stage: 이전 stage 스킵, 해당 stage의 기존 ckpt를 prev_ckpt로 사용
+    if args.start_stage > 0:
+        prev_stage_name = STAGES[args.start_stage - 1][0]
+        prev_ckpt_path  = Path(args.out_dir) / prev_stage_name
+        if not (prev_ckpt_path / "transition_best.pt").exists():
+            raise FileNotFoundError(
+                f"Cannot start at stage {args.start_stage}: "
+                f"no checkpoint at {prev_ckpt_path}")
+        prev_ckpt = prev_ckpt_path
+        print(f"Resuming from stage {args.start_stage - 1} ckpt: {prev_ckpt}\n")
+
+    for stage_idx in range(args.start_stage, min(args.max_stage + 1, len(STAGES))):
         name, filter_mode, trans_ep, enc_ep, max_per_class = STAGES[stage_idx]
 
         print(f"\n{'='*60}")
