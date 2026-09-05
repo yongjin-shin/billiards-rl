@@ -451,6 +451,177 @@ Decoder : LSTM step input [e_emb | cue_xy | tgt_xy] (d+4)
 
 ---
 
+## Markov World Model · 이벤트 기반 (2026-09-05)
+
+LSTM 기반 trajectory 예측에서 **순수 이벤트(충돌) 기반 Markov 모델**로 방향 전환.
+
+### 모델 구조
+
+```
+MarkovEncoder:    (obs(16) + act(2)) → first_event (type + state)
+MarkovTransition: event_state(24)    → (next_type, next_cue_state, next_tgt_state)
+```
+
+**Event state dim 24:**
+- cue_xy(2) + cue_vel(2) + cue_avel(3) — 충돌 직후(post-collision) 속도
+- tgt_xy(2) + tgt_vel(2) + tgt_avel(3)
+- type_onehot(10): ball_ball / linear_cushion / circular_cushion / ball_pocket + 6 non-coll
+
+**MarkovTransition 입력 확장 (최종 in_dim=58):**
+- type_embed(32) + phys(14) + pocket_dists(12) — 6포켓 × 2공
+
+### 데이터 (data_v4)
+
+- 55k 에피소드: SAC 3종 × 10k + random 25k
+- **post-collision velocity** (`agent.final.vel`) 사용 — 다음 이벤트 예측에 더 직접적
+- 정규화: pos/TABLE_WH, vel/12.0 m/s, avel/300 rad/s
+
+### 커리큘럼 5-stage
+
+| Stage | 데이터 필터 | max_per_class | trans_ep | enc_ep |
+|-------|-----------|--------------|---------|-------|
+| 0 | first_ball_ball (SAC) | 10,000 | 200 | 100 |
+| 1 | any_ball_ball | 20,000 | 75 | 40 |
+| 2 | any_ball_ball + 신규 15k | 40,000 | 50 | 25 |
+| 3 | all | 80,000 | 40 | 20 |
+| 4 | all (자연분포) | None | 30 | 15 |
+
+### 최종 결과 (Stage별 per-class accuracy)
+
+| Stage | ball_ball | linear_cushion | circular_cushion | ball_pocket |
+|-------|-----------|---------------|-----------------|------------|
+| 0 | 58.8% | 50.0% | 33.6% | 60.3% |
+| 1 | 64.4% | 47.8% | 46.5% | 64.2% |
+| 2 | 83.6% | 42.6% | 45.4% | 64.5% |
+| 3 | 79.9% | 48.3% | 49.2% | 68.8% |
+| **4** | **91.2%** | **39.1%** | **53.8%** | **70.3%** |
+
+### 한계
+
+1. **linear_cushion 39%**: 자연분포에서 78% 차지, Stage 4에서 ball_ball과 혼동
+2. **두 공 독립성 없음**: ball_ball 이후 cue/tgt가 독립적으로 움직이는데 단일 체인으로 예측
+3. **인과 없는 쌍**: ④ 타겟 포켓 → ⑤ 큐볼 쿠션처럼 관계없는 이벤트 쌍을 학습
+4. **gradient 불연속**: 다음 이벤트 타입이 discrete argmax → planning에 부적합
+
+→ **Fixed-Δt 연속 상태 모델로 방향 전환**
+
+---
+
+## Fixed-Δt World Model (2026-09-06)
+
+이벤트 기반의 구조적 문제를 해결하기 위해 **고정 시간 간격(Δt=0.05s) 연속 상태 예측** 방식 채택.
+
+### 설계 동기
+
+| 문제 (이벤트 기반) | 해결 (Fixed-Δt) |
+|-----------------|----------------|
+| discrete type argmax → gradient 끊김 | 연속 상태 → fully differentiable |
+| ball_ball 이후 두 공 혼재 | joint state (cue+tgt) 매 스텝 |
+| 인과 없는 이벤트 쌍 | 시간 순서 그대로, 연속 |
+
+### 모델 구조
+
+```
+StateEncoder φ  : s(14) + pocket_dist(12) → z(128)   ← SAC Critic 공유 예정
+Transition f    : z(128) → z'(128)
+StateHead       : z'(128) → ŝ(14)
+CollisionHead   : z(128) → (p_coll, type_logit[4])
+```
+
+**State s (14dim, normalized):**
+- cue_x, cue_y, cue_vx, cue_vy, cue_wx, cue_wy, cue_wz (7)
+- tgt_x, tgt_y, tgt_vx, tgt_vy, tgt_wx, tgt_wy, tgt_wz (7)
+
+**포켓 거리 (12dim):** 6포켓 × 2공, Markov 모델과 동일 방식 이식.
+
+### 데이터 (data_fixeddt)
+
+- 45k 에피소드: SAC 3종 × 10k + random 15k
+- Δt=0.05s → 평균 112 스텝/shot, 최대 220 스텝
+- 480만 (s_t, s_{t+1}) 쌍, 충돌 비율 5.7%
+- `pt.interpolate_ball_states()` 로 임의 시점 상태 쿼리
+
+### 학습 개선 이식 (Markov 모델에서)
+
+- **포켓 거리 12dim**: StateEncoder에 내장
+- **LR/TB 데이터 증강**: 좌우/상하 반전 50% 확률
+- **클래스 가중치**: ball_ball×0.60 / linear×0.075 / circular×0.87 / pocket×2.46
+
+### 결과
+
+| 항목 | 값 |
+|-----|---|
+| 충돌 감지 정확도 | 83.1% |
+| 타입 분류 (전체) | 88.7% |
+| ball_ball | **99.3%** |
+| linear_cushion | **87.4%** |
+| circular_cushion | **85.9%** |
+| ball_pocket | **91.8%** |
+
+이벤트 기반 대비 linear_cushion +48.3pp, circular +32.1pp.
+
+### 한계: AR 구조 → rollout 오차 누적
+
+```
+step t: 오차 ε_t
+step t+1: ε_t가 입력 → ε_{t+1} > ε_t
+충돌 순간: 속도 급변 → 방향 조금만 틀려도 이후 궤적 발산
+```
+
+6초 full shot rollout 시 위치 오차 최대 140cm (테이블 99×198cm).
+단일 스텝 정확도는 높으나, 연속 rollout에서 오차 누적.
+
+→ **Deterministic SSM으로 방향 전환 (feature/wm-ssm)**
+
+---
+
+## Next: Deterministic SSM (feature/wm-ssm, 예정)
+
+### 문제: 현재는 AR (Autoregressive)
+
+```
+현재: s_t →enc→ z_t →trans→ z_{t+1} →dec→ ŝ_{t+1} →enc→ z_{t+1}' → ...
+                                                              ↑
+                                                        매 스텝 re-encode (AR)
+```
+
+rollout 때 ŝ를 observation space로 decode 후 다시 encode → 오차 누적.
+
+### SSM 구조식
+
+$$z_{t+1} = f_\theta(z_t)$$
+$$s_t = g_\phi(z_t)$$
+$$z_0 = \text{enc}_\psi(s_0)$$
+
+### closed-loop rollout 학습
+
+```
+s_0 →enc→ z_0 →f→ z_1 →f→ z_2 → ... →f→ z_T   (z space에서만)
+               ↓g     ↓g              ↓g
+               ŝ_1    ŝ_2             ŝ_T
+
+Loss = Σ ||ŝ_t - s_t||²   (gradient가 z_0까지 역전파)
+```
+
+### Critic 공유
+
+```
+Q(s, a) = Q_head( ψ(s), a )   ← Encoder ψ 공유
+```
+
+### 핵심 변경
+
+| | Fixed-Δt (AR) | SSM |
+|--|--------------|-----|
+| rollout | obs space 왔다갔다 | z space에서만 |
+| Transition 학습 | single-step loss | multi-step rollout loss |
+| Encoder | obs→z, 매 스텝 | 초기 z_0 한 번만 |
+| gradient | 1 스텝 | T 스텝 역전파 |
+
+Transition에 skip connection (z_{t+1} = z_t + f(z_t)) 추가 — T step gradient vanishing 방지.
+
+---
+
 ## Future: Exp-17 · Phase 0 HRL
 
 ### 설계 근거

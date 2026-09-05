@@ -56,23 +56,33 @@ MAX_SPEED_V3 = 12.0  # m/s  — wm_predictor.MAX_SPEED=8.0은 action 범위; 실
 
 EVENT_DIM_V3 = 2 + 2 + 3 + 2 + 2 + 3 + N_EVENT_TYPES  # 24
 
+BALL_BALL_IDX  = EVENT2IDX["ball_ball"]           # 2
+COLLISION_IDXS = frozenset(
+    EVENT2IDX[t] for t in
+    ["ball_ball", "ball_linear_cushion", "ball_circular_cushion", "ball_pocket"]
+)  # {2, 3, 4, 5}
+
 
 # ── Ball state 추출 헬퍼 ───────────────────────────────────────────────────────
 
 def get_ball_state(agent):
     """
-    agent.initial에서 (xy, vel_xy, avel_xyz) 추출.
+    충돌 위치(agent.initial.xyz)와 충돌 이후 속도(agent.final.vel) 추출.
+
+    위치:   agent.initial  — 충돌이 발생한 좌표
+    속도:   agent.final    — 충돌 직후 진행 방향 (다음 이벤트 예측에 직접 유용)
+    회전:   agent.final    — 충돌 직후 회전 상태
 
     Returns:
         xy   : (float, float)              정규화 전 미터 단위
-        vel  : (float, float)              정규화 전 m/s
-        avel : (float, float, float)       정규화 전 rad/s
-        valid: bool                        agent.initial이 유효한지
+        vel  : (float, float)              정규화 전 m/s  (post-collision)
+        avel : (float, float, float)       정규화 전 rad/s (post-collision)
+        valid: bool
     """
     if agent.initial is None:
         return (0.0, 0.0), (0.0, 0.0), (0.0, 0.0, 0.0), False
 
-    # position
+    # position — 충돌 발생 위치
     if hasattr(agent.initial, "xyz"):
         x, y = float(agent.initial.xyz[0]), float(agent.initial.xyz[1])
     elif hasattr(agent.initial, "state"):
@@ -80,23 +90,22 @@ def get_ball_state(agent):
     else:
         return (0.0, 0.0), (0.0, 0.0), (0.0, 0.0, 0.0), False
 
-    # linear velocity
-    if hasattr(agent.initial, "vel"):
-        vx, vy = float(agent.initial.vel[0]), float(agent.initial.vel[1])
-    elif hasattr(agent.initial, "state"):
-        vx, vy = float(agent.initial.state.rvw[1, 0]), float(agent.initial.state.rvw[1, 1])
+    # velocity/avel — final(충돌 직후) 우선, 없으면 initial로 fallback
+    src = agent.final if (hasattr(agent, "final") and agent.final is not None) else agent.initial
+
+    if hasattr(src, "vel"):
+        vx, vy = float(src.vel[0]), float(src.vel[1])
+    elif hasattr(src, "state"):
+        vx, vy = float(src.state.rvw[1, 0]), float(src.state.rvw[1, 1])
     else:
         vx, vy = 0.0, 0.0
 
-    # angular velocity
-    if hasattr(agent.initial, "avel"):
-        wx = float(agent.initial.avel[0])
-        wy = float(agent.initial.avel[1])
-        wz = float(agent.initial.avel[2])
-    elif hasattr(agent.initial, "state"):
-        wx = float(agent.initial.state.rvw[2, 0])
-        wy = float(agent.initial.state.rvw[2, 1])
-        wz = float(agent.initial.state.rvw[2, 2])
+    if hasattr(src, "avel"):
+        wx, wy, wz = float(src.avel[0]), float(src.avel[1]), float(src.avel[2])
+    elif hasattr(src, "state"):
+        wx = float(src.state.rvw[2, 0])
+        wy = float(src.state.rvw[2, 1])
+        wz = float(src.state.rvw[2, 2])
     else:
         wx, wy, wz = 0.0, 0.0, 0.0
 
@@ -219,15 +228,55 @@ def extract_trajectory_v3(system):
     return events_enc, cue_masks, tgt_masks, idx, n_bounces, init_cue_state
 
 
+# ── 품질 필터 ─────────────────────────────────────────────────────────────────
+
+def passes_filter(events_enc, length, min_ball_ball: int, first_ball_ball: bool) -> bool:
+    """에피소드가 품질 기준을 만족하는지 확인."""
+    if length == 0:
+        return min_ball_ball == 0 and not first_ball_ball
+
+    all_types = events_enc[:length, 14:24].argmax(axis=1)  # (length,)
+
+    if min_ball_ball > 0:
+        if int((all_types == BALL_BALL_IDX).sum()) < min_ball_ball:
+            return False
+
+    if first_ball_ball:
+        # 첫 번째 충돌 이벤트가 ball_ball이어야 함
+        for t in range(length):
+            tt = int(all_types[t])
+            if tt in COLLISION_IDXS:
+                if tt != BALL_BALL_IDX:
+                    return False
+                break
+        else:
+            return False  # 충돌 이벤트 없음
+
+    return True
+
+
 # ── Data generation loop ───────────────────────────────────────────────────────
 
-def generate(env, policy_fn, n_episodes, rng):
+def generate(env, policy_fn, n_episodes, rng,
+             min_ball_ball: int = 0, first_ball_ball: bool = False):
+    """
+    n_episodes개의 (품질 필터를 통과한) 에피소드를 생성.
+
+    Args:
+        min_ball_ball  : ball_ball 충돌 최소 횟수 (0 = 필터 없음)
+        first_ball_ball: True이면 첫 충돌 이벤트가 반드시 ball_ball이어야 함
+    """
+    use_filter = min_ball_ball > 0 or first_ball_ball
+
     obs_list, action_list = [], []
     events_list, cue_masks_list, tgt_masks_list = [], [], []
     lengths_list, pocketed_list, bounces_list    = [], [], []
     init_cue_state_list = []
 
-    for ep in range(n_episodes):
+    saved, attempted = 0, 0
+
+    while saved < n_episodes:
+        attempted += 1
         seed = int(rng.integers(0, 2**31))
         obs, _  = env.reset(seed=seed)
         action  = policy_fn(obs)
@@ -236,6 +285,10 @@ def generate(env, policy_fn, n_episodes, rng):
 
         events_enc, cue_masks, tgt_masks, length, n_bounces, init_cue_state = \
             extract_trajectory_v3(env.system)
+
+        # 품질 필터
+        if use_filter and not passes_filter(events_enc, length, min_ball_ball, first_ball_ball):
+            continue
 
         obs_list.append(obs.copy())
         action_list.append(action.copy())
@@ -246,12 +299,18 @@ def generate(env, policy_fn, n_episodes, rng):
         pocketed_list.append(bool(info.get("pocketed", False)))
         bounces_list.append(n_bounces)
         init_cue_state_list.append(init_cue_state)
+        saved += 1
 
-        if (ep + 1) % 1000 == 0:
-            pr = sum(pocketed_list) / (ep + 1) * 100
-            print(f"  [{ep+1:>6}/{n_episodes}]  pocket={pr:.1f}%"
+        if saved % 1000 == 0:
+            pr  = sum(pocketed_list) / saved * 100
+            acc = saved / attempted * 100 if use_filter else 100.0
+            print(f"  [{saved:>6}/{n_episodes}]  pocket={pr:.1f}%"
                   f"  avg_len={np.mean(lengths_list):.1f}"
-                  f"  avg_bounces={np.mean(bounces_list):.1f}")
+                  f"  avg_bounces={np.mean(bounces_list):.1f}"
+                  + (f"  accept={acc:.1f}%" if use_filter else ""))
+
+    if use_filter:
+        print(f"  Acceptance rate: {saved}/{attempted} = {saved/attempted*100:.1f}%")
 
     return dict(
         obs            = np.stack(obs_list).astype(np.float32),           # (N, 16)
@@ -270,12 +329,16 @@ def generate(env, policy_fn, n_episodes, rng):
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--tag",        type=str, required=True)
-    p.add_argument("--model",      type=str, default=None)
-    p.add_argument("--n-episodes", type=int, default=25000)
-    p.add_argument("--seed",       type=int, default=0)
-    p.add_argument("--out-dir",    type=str,
+    p.add_argument("--tag",             type=str, required=True)
+    p.add_argument("--model",           type=str, default=None)
+    p.add_argument("--n-episodes",      type=int, default=25000)
+    p.add_argument("--seed",            type=int, default=0)
+    p.add_argument("--out-dir",         type=str,
                    default=os.path.join(os.path.dirname(__file__), "data_v3"))
+    p.add_argument("--min-ball-ball",   type=int, default=0,
+                   help="에피소드당 ball_ball 충돌 최소 횟수 (0=필터 없음)")
+    p.add_argument("--first-ball-ball", action="store_true",
+                   help="첫 충돌 이벤트가 ball_ball이어야 함")
     args = p.parse_args()
 
     os.makedirs(args.out_dir, exist_ok=True)
@@ -294,9 +357,16 @@ def main():
     print(f"\nGenerating {args.n_episodes} episodes  [tag={args.tag}]")
     print(f"Table: {TABLE_W:.4f} × {TABLE_H:.4f} m")
     print(f"MAX_SPEED_V3={MAX_SPEED_V3}  MAX_AVEL={MAX_AVEL}")
-    print(f"Event dim: {EVENT_DIM_V3}\n")
+    print(f"Event dim: {EVENT_DIM_V3}")
+    if args.min_ball_ball > 0:
+        print(f"Filter: min_ball_ball={args.min_ball_ball}")
+    if args.first_ball_ball:
+        print(f"Filter: first_ball_ball=True")
+    print()
 
-    data = generate(env, policy_fn, args.n_episodes, rng)
+    data = generate(env, policy_fn, args.n_episodes, rng,
+                    min_ball_ball=args.min_ball_ball,
+                    first_ball_ball=args.first_ball_ball)
 
     # ── 통계 ──────────────────────────────────────────────────────────────────
     pocket_rate = data["pocketed"].mean() * 100

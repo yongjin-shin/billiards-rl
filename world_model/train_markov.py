@@ -344,11 +344,15 @@ def main():
     p.add_argument("--enc-hidden",   nargs="+", type=int, default=[128, 256, 256])
     p.add_argument("--embed-dim",    type=int, default=32)
     p.add_argument("--out-dir",      type=str, default=None)
-    p.add_argument("--wandb",              action="store_true")
-    p.add_argument("--skip-trans",        action="store_true")
-    p.add_argument("--skip-enc",          action="store_true")
+    p.add_argument("--wandb",               action="store_true")
+    p.add_argument("--skip-trans",         action="store_true")
+    p.add_argument("--skip-enc",           action="store_true")
     p.add_argument("--max-pairs-per-class", type=int, default=None,
                    help="Undersample: max pairs per next-event class (e.g. 30000)")
+    p.add_argument("--resume-trans",       type=str, default=None,
+                   help="transition_best.pt 경로 — 해당 가중치에서 fine-tune 시작")
+    p.add_argument("--resume-enc",         type=str, default=None,
+                   help="encoder_best.pt 경로 — 해당 가중치에서 fine-tune 시작")
     args = p.parse_args()
 
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -391,6 +395,10 @@ def main():
                                 num_workers=0, pin_memory=True)
 
         trans = MarkovTransition(tuple(args.trans_hidden), args.embed_dim).to(device)
+        if args.resume_trans:
+            ck = torch.load(args.resume_trans, weights_only=False)
+            trans.load_state_dict(ck["state"])
+            print(f"[Trans] Resumed from {args.resume_trans}")
         train_transition(trans, tr_loader, val_loader, args, device,
                          class_weights=tr_ds.class_weights)
 
@@ -407,6 +415,10 @@ def main():
                                     num_workers=0, pin_memory=True)
 
         enc = MarkovEncoder(tuple(args.enc_hidden)).to(device)
+        if args.resume_enc:
+            ck = torch.load(args.resume_enc, weights_only=False)
+            enc.load_state_dict(ck["state"])
+            print(f"[Enc]   Resumed from {args.resume_enc}")
         train_encoder(enc, enc_tr_loader, enc_val_loader, args, device)
 
     if WANDB and args.wandb:

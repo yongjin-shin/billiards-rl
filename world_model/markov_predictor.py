@@ -8,12 +8,12 @@ Architecture:
     MarkovTransition: (event_state 24) → MLP → next event prediction (24 dims)
 
 Event state (24 dims):
-    [0:2]   cue_xy     normalized [0,1]
-    [2:4]   cue_vel    normalized /MAX_SPEED
-    [4:7]   cue_avel   normalized /MAX_AVEL
+    [0:2]   cue_xy     normalized [0,1]      충돌 발생 위치
+    [2:4]   cue_vel    normalized /MAX_SPEED  충돌 직후 속도 (post-collision)
+    [4:7]   cue_avel   normalized /MAX_AVEL   충돌 직후 회전 (post-collision)
     [7:9]   tgt_xy     normalized [0,1]
-    [9:11]  tgt_vel    normalized /MAX_SPEED
-    [11:14] tgt_avel   normalized /MAX_AVEL
+    [9:11]  tgt_vel    normalized /MAX_SPEED  충돌 직후 속도 (post-collision)
+    [11:14] tgt_avel   normalized /MAX_AVEL   충돌 직후 회전 (post-collision)
     [14:24] type one-hot (10)
 
 MarkovTransition output:
@@ -110,6 +110,15 @@ class MarkovEncoder(nn.Module):
                           type_oh], dim=-1)
 
 
+# 포켓 6개 정규화 좌표 (pooltool 표준 테이블, [0,1])
+# 순서: top-left, top-right, mid-left, mid-right, bottom-left, bottom-right
+POCKET_XY_NORM = torch.tensor([
+    [0.0, 0.0], [1.0, 0.0],
+    [0.0, 0.5], [1.0, 0.5],
+    [0.0, 1.0], [1.0, 1.0],
+], dtype=torch.float32)   # (6, 2)
+
+
 # ── MarkovTransition ──────────────────────────────────────────────────────────
 
 class MarkovTransition(nn.Module):
@@ -118,7 +127,9 @@ class MarkovTransition(nn.Module):
 
     Input 인코딩:
         type_embed(d) + cue_xy(2) + cue_vel(2) + cue_avel(3)
-                      + tgt_xy(2) + tgt_vel(2) + tgt_avel(3) = d+14
+                      + tgt_xy(2) + tgt_vel(2) + tgt_avel(3)
+                      + cue→pocket 거리(6) + tgt→pocket 거리(6)
+                      = d + 14 + 12
 
     Output heads:
         event_head : type_logits (10)
@@ -128,18 +139,27 @@ class MarkovTransition(nn.Module):
     def __init__(self, hidden: tuple = (256, 512, 256), embed_dim: int = 32):
         super().__init__()
         self.embed      = nn.Embedding(N_EVENT_TYPES, embed_dim)
-        in_dim          = embed_dim + 14
+        in_dim          = embed_dim + 14 + 12          # +12: 포켓 거리 6×2
         self.trunk      = _mlp(in_dim, hidden[:-1], hidden[-1])
         self.event_head = nn.Linear(hidden[-1], N_EVENT_TYPES)
         self.cue_head   = nn.Linear(hidden[-1], 7)   # Δcue_xy + cue_vel + cue_avel
         self.tgt_head   = nn.Linear(hidden[-1], 7)   # Δtgt_xy + tgt_vel + tgt_avel
+        self.register_buffer("pocket_xy", POCKET_XY_NORM)  # (6, 2), 고정값
+
+    def _pocket_dists(self, xy: torch.Tensor) -> torch.Tensor:
+        """xy (B, 2) → 각 포켓까지 유클리드 거리 (B, 6)."""
+        # pocket_xy: (6, 2) → (1, 6, 2), xy: (B, 2) → (B, 1, 2)
+        diff = xy.unsqueeze(1) - self.pocket_xy.unsqueeze(0)   # (B, 6, 2)
+        return diff.norm(dim=-1)                                 # (B, 6)
 
     def _encode(self, state: torch.Tensor) -> torch.Tensor:
-        """state (B, 24) → trunk input (B, embed_dim+14)."""
-        type_idx = state[:, S_TYPE_OH].argmax(dim=-1)          # (B,)
-        e        = self.embed(type_idx)                         # (B, d)
-        phys     = state[:, :14]                                # (B, 14): pos+vel+avel
-        return torch.cat([e, phys], dim=-1)
+        """state (B, 24) → trunk input (B, embed_dim+26)."""
+        type_idx = state[:, S_TYPE_OH].argmax(dim=-1)           # (B,)
+        e        = self.embed(type_idx)                          # (B, d)
+        phys     = state[:, :14]                                 # (B, 14): pos+vel+avel
+        cue_d    = self._pocket_dists(state[:, S_CUE_XY])       # (B, 6)
+        tgt_d    = self._pocket_dists(state[:, S_TGT_XY])       # (B, 6)
+        return torch.cat([e, phys, cue_d, tgt_d], dim=-1)       # (B, d+26)
 
     def forward(self, state: torch.Tensor):
         """
