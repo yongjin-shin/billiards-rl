@@ -23,26 +23,27 @@ from world_model.fixeddt_model import (
     POCKET_XY_NORM, STATE_DIM, N_COLL_TYPES,
 )
 
-LATENT_DIM = 64   # AR(128)에서 축소 — encode 한 번만이라 충분
+LATENT_DIM = 128   # AR와 동일 — z가 T step 정보를 혼자 유지해야 하므로 충분한 용량 필요
 
 
 class ResTransition(nn.Module):
     """
-    z(64) → z(64), skip connection.
-    z_{t+1} = z_t + MLP(z_t)
-    gradient vanishing 방지 (T step 역전파).
+    z → z, skip connection + LayerNorm.
+    z_{t+1} = LayerNorm(z_t + MLP(z_t))
+    LayerNorm: z_norm이 step마다 증가하는 현상 방지 (T=60까지 안정적 rollout 보장).
     """
 
     def __init__(self, latent_dim: int = LATENT_DIM):
         super().__init__()
         self.net = nn.Sequential(
-            nn.Linear(latent_dim, 128), nn.SiLU(),
-            nn.Linear(128, 128),        nn.SiLU(),
-            nn.Linear(128, latent_dim),
+            nn.Linear(latent_dim, 256), nn.SiLU(),
+            nn.Linear(256, 256),        nn.SiLU(),
+            nn.Linear(256, latent_dim),
         )
+        self.norm = nn.LayerNorm(latent_dim)
 
     def forward(self, z: torch.Tensor) -> torch.Tensor:
-        return z + self.net(z)
+        return self.norm(z + self.net(z))
 
 
 class SSMWorldModel(nn.Module):

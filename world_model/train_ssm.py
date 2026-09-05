@@ -135,7 +135,7 @@ def evaluate_rollout_error(model: SSMWorldModel, episodes, device: str,
             ep_s, _, _ = episodes[ep_idx]
             L = len(ep_s)
             T = min(rollout_steps, L - 1)
-            if T < max(checkpoints.values()):
+            if T < 1:
                 continue
 
             s0 = torch.from_numpy(ep_s[0:1]).float().to(device)
@@ -143,7 +143,7 @@ def evaluate_rollout_error(model: SSMWorldModel, episodes, device: str,
             s_hat_np = s_hat[0].cpu().numpy()   # (T+1, 14)
 
             for label, t in checkpoints.items():
-                if t >= T:
+                if t > T:   # s_hat has shape (T+1,) — index T is valid
                     continue
                 # cue 오차
                 cue_err = np.sqrt(
@@ -284,7 +284,7 @@ def train(args):
         rollout_str = ""
         if epoch % 10 == 0 or epoch == args.epochs:
             rerr = evaluate_rollout_error(model, val_episodes_list, device,
-                                          n_eval=100, rollout_steps=args.rollout_steps)
+                                          n_eval=100, rollout_steps=60)
             rollout_str = "  rollout_err: " + " | ".join(
                 f"{k}={v:.1f}cm" for k, v in rerr.items()
             )
