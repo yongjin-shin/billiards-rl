@@ -44,13 +44,29 @@ from world_model.train_markov import (
 )
 
 # ── 커리큘럼 단계 정의 ─────────────────────────────────────────────────────────
-
+#
+# max_per_class를 단계적으로 완화: 균등 분포 → 자연 분포
+#
+# 자연 pair 수 (stage2 기준, ~48k ep):
+#   ball_ball       ~9,800  (3.2%)
+#   linear_cushion ~236,000 (78%)
+#   circular        ~22,900  (8%)
+#   pocket          ~32,900 (11%)
+#
+# max_per_class별 ball_ball 비율:
+#   10k → 24.6%  /  20k → 14.0%  /  40k → 9.3%  /  80k → 6.7%  /  None → 3.2%
+#
 # (name, filter_mode, trans_epochs, enc_epochs, max_per_class)
 STAGES = [
-    ("stage0_direct",  "first_ball_ball", 200, 100, 10000),
-    ("stage1_bankshot", "any_ball_ball",   75,  40,  None),
-    ("stage2_expanded", "any_ball_ball",   50,  25,  None),
+    ("stage0_direct",   "first_ball_ball", 200, 100, 10_000),  # 균등, 직접 타격만
+    ("stage1_bankshot", "any_ball_ball",    75,  40, 20_000),  # 뱅샷 추가
+    ("stage2_newdata",  "any_ball_ball",    50,  25, 40_000),  # 신규 데이터 +15k
+    ("stage3_relax",    "all",              40,  20, 80_000),  # 전체 에피소드 허용
+    ("stage4_natural",  "all",              30,  15,    None), # 자연 분포
 ]
+
+# 신규 데이터 생성이 시작되는 stage 인덱스
+NEW_DATA_STAGE = 2
 
 ADVANCE_THRESHOLD_DEFAULT = 0.72   # ball_ball accuracy
 
@@ -352,33 +368,48 @@ def main():
         prev_ckpt = prev_ckpt_path
         print(f"Resuming from stage {args.start_stage - 1} ckpt: {prev_ckpt}\n")
 
+    # NEW_DATA_STAGE 이후를 시작점으로 삼는 경우 미리 신규 데이터 병합
+    new_data_merged = False
+    if args.start_stage >= NEW_DATA_STAGE:
+        new_data_dir  = Path(args.new_data_dir)
+        cached = list(new_data_dir.glob("active_v3_*.npz"))
+        if cached:
+            print(f"Pre-loading cached active data: {[p.name for p in cached]}")
+            new_d = load_data(str(new_data_dir), tags=["active_v3"])
+            pool_data = {k: np.concatenate([pool_data[k], new_d[k]], axis=0)
+                         for k in pool_data}
+            new_data_merged = True
+            print(f"  Pool size after merge: {len(pool_data['obs'])} episodes\n")
+
     for stage_idx in range(args.start_stage, min(args.max_stage + 1, len(STAGES))):
         name, filter_mode, trans_ep, enc_ep, max_per_class = STAGES[stage_idx]
 
         print(f"\n{'='*60}")
-        print(f"Stage {stage_idx}: {name}  [filter={filter_mode}]")
+        print(f"Stage {stage_idx}: {name}  [filter={filter_mode}, max_per_class={max_per_class}]")
 
-        # Stage 2: 신규 데이터 생성 및 병합
-        if stage_idx == 2:
-            new_data_dir = Path(args.new_data_dir)
+        # NEW_DATA_STAGE 도달 시 신규 데이터 생성/로드 (한 번만)
+        if stage_idx == NEW_DATA_STAGE and not new_data_merged:
+            new_data_dir  = Path(args.new_data_dir)
             new_data_path = list(new_data_dir.glob("active_v3_*.npz"))
 
             if not new_data_path:
                 if not args.sac_models:
-                    print("  ⚠ No SAC models provided and no cached active data. Skipping Stage 2.")
-                    break
-                print(f"\n  Generating {args.new_episodes} new episodes...")
-                new_d = generate_new_data(args.sac_models, new_data_dir,
-                                          args.new_episodes, seed=args.seed + 42)
-            else:
+                    print("  ⚠ No SAC models provided and no cached active data. Skipping new data.")
+                else:
+                    print(f"\n  Generating {args.new_episodes} new episodes...")
+                    generate_new_data(args.sac_models, new_data_dir,
+                                      args.new_episodes, seed=args.seed + 42)
+                    new_data_path = list(new_data_dir.glob("active_v3_*.npz"))
+
+            if new_data_path:
                 print(f"  Loading cached active data: {[p.name for p in new_data_path]}")
                 new_d = load_data(str(new_data_dir), tags=["active_v3"])
+                pool_data = {k: np.concatenate([pool_data[k], new_d[k]], axis=0)
+                             for k in pool_data}
+                new_data_merged = True
+                print(f"  Pool size after merge: {len(pool_data['obs'])} episodes")
 
-            # pool_data에 병합
-            stage_pool = {k: np.concatenate([pool_data[k], new_d[k]], axis=0)
-                          for k in pool_data}
-        else:
-            stage_pool = pool_data
+        stage_pool = pool_data
 
         # ── Stage 학습 ────────────────────────────────────────────────────────
         ckpt = run_stage(stage_idx, stage_pool, args, device, prev_ckpt)
