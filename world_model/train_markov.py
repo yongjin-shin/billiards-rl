@@ -30,12 +30,15 @@ from torch.utils.data import Dataset, DataLoader
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from world_model.generate_data_v3 import EVENT_DIM_V3
-from world_model.wm_predictor import TABLE_W, TABLE_H, MAX_EVENTS
+from world_model.wm_predictor import TABLE_W, TABLE_H, MAX_EVENTS, EVENT_TYPES
 from world_model.markov_predictor import (
     MarkovEncoder, MarkovTransition,
     S_CUE_XY, S_TGT_XY, S_TYPE_OH,
     encoder_loss, transition_loss,
 )
+
+# Collision event type indices (state-transition events 6-9 are excluded)
+COLLISION_TYPES = frozenset({2, 3, 4, 5})  # ball_ball, linear/circular_cushion, ball_pocket
 
 try:
     import wandb
@@ -48,10 +51,13 @@ except ImportError:
 
 class TransitionDataset(Dataset):
     """
-    인접 이벤트 쌍 (event_t, event_{t+1}) 데이터셋.
-    에피소드 × (len-1) 쌍을 flatten → 순수 Markov 학습.
+    충돌 이벤트 전용 (event_t, event_{t+1}) 쌍 데이터셋.
+    state-transition 이벤트(6-9)를 건너뛰고 collision끼리만 쌍으로 묶음.
+    max_per_class: 다음 이벤트 타입별 최대 샘플 수 (undersampling).
+    class_weights: inverse-frequency 가중치 tensor (10,) — transition_loss에 전달.
     """
-    def __init__(self, data: dict, indices: np.ndarray, augment: bool = True):
+    def __init__(self, data: dict, indices: np.ndarray,
+                 augment: bool = True, max_per_class: int | None = None):
         events    = data["events"][indices]      # (N, T, 24)
         cue_masks = data["cue_masks"][indices]   # (N, T)
         tgt_masks = data["tgt_masks"][indices]   # (N, T)
@@ -60,20 +66,62 @@ class TransitionDataset(Dataset):
         if augment:
             events, cue_masks, tgt_masks = self._augment(events, cue_masks, tgt_masks)
 
-        # flatten (event_t, event_{t+1}) 쌍
+        # Precompute event type index per (episode, timestep)
+        all_types    = events[:, :, 14:24].argmax(axis=2)          # (N, T)
+        is_collision = np.isin(all_types, list(COLLISION_TYPES))    # (N, T)
+
+        # Build collision-only pairs: skip state-transition events
         pairs_s, pairs_s1 = [], []
         pairs_cm, pairs_tm = [], []
         for i, L in enumerate(lengths):
-            for t in range(int(L) - 1):
+            coll_ts = np.where(is_collision[i, :int(L)])[0]
+            for k in range(len(coll_ts) - 1):
+                t, t1 = coll_ts[k], coll_ts[k + 1]
                 pairs_s.append(events[i, t])
-                pairs_s1.append(events[i, t + 1])
-                pairs_cm.append(cue_masks[i, t + 1])
-                pairs_tm.append(tgt_masks[i, t + 1])
+                pairs_s1.append(events[i, t1])
+                pairs_cm.append(cue_masks[i, t1])
+                pairs_tm.append(tgt_masks[i, t1])
 
-        self.state_t  = torch.from_numpy(np.stack(pairs_s)).float()
-        self.state_t1 = torch.from_numpy(np.stack(pairs_s1)).float()
-        self.cue_m    = torch.from_numpy(np.array(pairs_cm)).float()
-        self.tgt_m    = torch.from_numpy(np.array(pairs_tm)).float()
+        pairs_s   = np.stack(pairs_s)                           # (M, 24)
+        pairs_s1  = np.stack(pairs_s1)
+        pairs_cm  = np.array(pairs_cm, dtype=np.float32)
+        pairs_tm  = np.array(pairs_tm, dtype=np.float32)
+        next_types = pairs_s1[:, 14:24].argmax(axis=1)          # (M,)
+
+        # Per-class undersampling cap
+        if max_per_class is not None:
+            rng  = np.random.default_rng(0)
+            keep = []
+            for cls in np.unique(next_types):
+                idx = np.where(next_types == cls)[0]
+                if len(idx) > max_per_class:
+                    idx = rng.choice(idx, max_per_class, replace=False)
+                keep.append(idx)
+            keep       = np.concatenate(keep)
+            pairs_s    = pairs_s[keep]
+            pairs_s1   = pairs_s1[keep]
+            pairs_cm   = pairs_cm[keep]
+            pairs_tm   = pairs_tm[keep]
+            next_types = next_types[keep]
+
+        # Class distribution summary
+        counts = np.bincount(next_types, minlength=10)
+        total  = counts.sum()
+        print("  Next-event distribution (collision pairs):")
+        for cls, cnt in enumerate(counts):
+            if cnt > 0:
+                print(f"    {EVENT_TYPES[cls]:28s} {cnt:7d}  ({cnt/total*100:.1f}%)")
+
+        # Inverse-frequency class weights (balanced, 0 for absent classes)
+        present = counts > 0
+        weights = np.zeros(10, dtype=np.float32)
+        weights[present] = total / (counts[present] * present.sum())
+        self.class_weights = torch.from_numpy(weights).float()
+
+        self.state_t  = torch.from_numpy(pairs_s).float()
+        self.state_t1 = torch.from_numpy(pairs_s1).float()
+        self.cue_m    = torch.from_numpy(pairs_cm).float()
+        self.tgt_m    = torch.from_numpy(pairs_tm).float()
 
     @staticmethod
     def _augment(events, cue_masks, tgt_masks):
@@ -103,22 +151,34 @@ class TransitionDataset(Dataset):
 
 
 class EncoderDataset(Dataset):
-    """(obs, act) → 첫 이벤트 예측 데이터셋. length > 0 에피소드만."""
+    """(obs, act) → 첫 충돌 이벤트 예측 데이터셋. length > 0 에피소드만.
+    12%의 에피소드는 index 0이 sliding_rolling이므로, 첫 COLLISION 이벤트를 찾아 사용."""
     def __init__(self, data: dict, indices: np.ndarray):
         valid = data["lengths"][indices] > 0
         idx   = indices[valid]
 
-        obs      = data["obs"][idx].astype(np.float32)          # (N, 16)
-        # obs normalize: pos 좌표를 [0,1]로
-        obs_norm = obs.copy()
+        ev_arr = data["events"][idx]     # (N, T, 24)
+        L_arr  = data["lengths"][idx]    # (N,)
+
+        # Find first collision event index per episode
+        all_types    = ev_arr[:, :, 14:24].argmax(axis=2)       # (N, T)
+        is_collision = np.isin(all_types, list(COLLISION_TYPES)) # (N, T)
+        first_t = np.zeros(len(idx), dtype=int)
+        for i, L in enumerate(L_arr):
+            coll_ts = np.where(is_collision[i, :int(L)])[0]
+            if len(coll_ts) > 0:
+                first_t[i] = coll_ts[0]
+
+        obs_norm = data["obs"][idx].astype(np.float32).copy()
         obs_norm[:, 0::2] /= TABLE_W
         obs_norm[:, 1::2] /= TABLE_H
 
+        row = np.arange(len(idx))
         self.obs_norm  = torch.from_numpy(obs_norm).float()
         self.act       = torch.from_numpy(data["actions"][idx]).float()
-        self.event0    = torch.from_numpy(data["events"][idx, 0, :]).float()
-        self.cue_m     = torch.from_numpy(data["cue_masks"][idx, 0]).float()
-        self.tgt_m     = torch.from_numpy(data["tgt_masks"][idx, 0]).float()
+        self.event0    = torch.from_numpy(ev_arr[row, first_t, :]).float()
+        self.cue_m     = torch.from_numpy(data["cue_masks"][idx][row, first_t]).float()
+        self.tgt_m     = torch.from_numpy(data["tgt_masks"][idx][row, first_t]).float()
 
     def __len__(self): return len(self.obs_norm)
 
@@ -156,13 +216,15 @@ def load_data(data_dir: str, tags: list[str] | None) -> dict:
 
 # ── 학습 루틴 ─────────────────────────────────────────────────────────────────
 
-def train_transition(model, train_loader, val_loader, args, device):
+def train_transition(model, train_loader, val_loader, args, device,
+                     class_weights: torch.Tensor | None = None):
     opt   = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=1e-5)
     sched = torch.optim.lr_scheduler.OneCycleLR(
         opt, max_lr=args.lr, epochs=args.trans_epochs,
         steps_per_epoch=len(train_loader), pct_start=0.1,
     )
 
+    cw      = class_weights.to(device) if class_weights is not None else None
     best_val, best_state = float("inf"), None
     out_dir = Path(args.out_dir)
 
@@ -175,7 +237,8 @@ def train_transition(model, train_loader, val_loader, args, device):
 
             logits, cue_out, tgt_out = model(state_t)
             loss, *_ = transition_loss(logits, cue_out, tgt_out,
-                                       state_t, state_t1, cue_m, tgt_m)
+                                       state_t, state_t1, cue_m, tgt_m,
+                                       class_weights=cw)
             opt.zero_grad()
             loss.backward()
             nn.utils.clip_grad_norm_(model.parameters(), 1.0)
@@ -191,7 +254,8 @@ def train_transition(model, train_loader, val_loader, args, device):
                 cue_m    = cue_m.to(device);    tgt_m    = tgt_m.to(device)
                 logits, cue_out, tgt_out = model(state_t)
                 loss, *_ = transition_loss(logits, cue_out, tgt_out,
-                                           state_t, state_t1, cue_m, tgt_m)
+                                           state_t, state_t1, cue_m, tgt_m,
+                                           class_weights=cw)
                 val_losses.append(loss.item())
 
         tr = np.mean(train_losses);  vl = np.mean(val_losses)
@@ -280,9 +344,11 @@ def main():
     p.add_argument("--enc-hidden",   nargs="+", type=int, default=[128, 256, 256])
     p.add_argument("--embed-dim",    type=int, default=32)
     p.add_argument("--out-dir",      type=str, default=None)
-    p.add_argument("--wandb",        action="store_true")
-    p.add_argument("--skip-trans",   action="store_true")
-    p.add_argument("--skip-enc",     action="store_true")
+    p.add_argument("--wandb",              action="store_true")
+    p.add_argument("--skip-trans",        action="store_true")
+    p.add_argument("--skip-enc",          action="store_true")
+    p.add_argument("--max-pairs-per-class", type=int, default=None,
+                   help="Undersample: max pairs per next-event class (e.g. 30000)")
     args = p.parse_args()
 
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -314,7 +380,8 @@ def main():
     # ── Transition 학습 ───────────────────────────────────────────────────────
     if not args.skip_trans:
         print("\n── Transition Model ─────────────────────────────────────────")
-        tr_ds  = TransitionDataset(data, train_idx, augment=True)
+        tr_ds  = TransitionDataset(data, train_idx, augment=True,
+                                   max_per_class=args.max_pairs_per_class)
         val_ds = TransitionDataset(data, val_idx,   augment=False)
         print(f"Transition pairs: train={len(tr_ds)}  val={len(val_ds)}")
 
@@ -324,7 +391,8 @@ def main():
                                 num_workers=0, pin_memory=True)
 
         trans = MarkovTransition(tuple(args.trans_hidden), args.embed_dim).to(device)
-        train_transition(trans, tr_loader, val_loader, args, device)
+        train_transition(trans, tr_loader, val_loader, args, device,
+                         class_weights=tr_ds.class_weights)
 
     # ── Encoder 학습 ─────────────────────────────────────────────────────────
     if not args.skip_enc:

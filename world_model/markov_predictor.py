@@ -257,19 +257,21 @@ def encoder_loss(
 
 
 def transition_loss(
-    event_logits: torch.Tensor,  # (B, 10)
-    cue_out     : torch.Tensor,  # (B, 7)  Δcue_xy + cue_vel + cue_avel
-    tgt_out     : torch.Tensor,  # (B, 7)  Δtgt_xy + tgt_vel + tgt_avel
-    state_t     : torch.Tensor,  # (B, 24) current event GT
-    state_t1    : torch.Tensor,  # (B, 24) next event GT
-    cue_masks   : torch.Tensor,  # (B,)    next event cue valid
-    tgt_masks   : torch.Tensor,  # (B,)    next event tgt valid
+    event_logits : torch.Tensor,         # (B, 10)
+    cue_out      : torch.Tensor,         # (B, 7)  Δcue_xy + cue_vel + cue_avel
+    tgt_out      : torch.Tensor,         # (B, 7)  Δtgt_xy + tgt_vel + tgt_avel
+    state_t      : torch.Tensor,         # (B, 24) current event GT
+    state_t1     : torch.Tensor,         # (B, 24) next event GT
+    cue_masks    : torch.Tensor,         # (B,)    next event cue valid
+    tgt_masks    : torch.Tensor,         # (B,)    next event tgt valid
     label_smoothing: float = 0.1,
+    class_weights: torch.Tensor | None = None,  # (10,) inverse-freq weights
 ):
     """Loss for MarkovTransition: (state_t) → (state_{t+1})."""
     gt_type = state_t1[:, S_TYPE_OH].argmax(dim=-1)
     ce      = F.cross_entropy(event_logits, gt_type,
-                              label_smoothing=label_smoothing)
+                              label_smoothing=label_smoothing,
+                              weight=class_weights)
 
     cm = cue_masks.float().unsqueeze(1)
     tm = tgt_masks.float().unsqueeze(1)
