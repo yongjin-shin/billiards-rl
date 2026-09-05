@@ -67,13 +67,13 @@ def load_model(ckpt_dir: str, device):
 
     encoder = MarkovEncoder(tuple(cfg["enc_hidden"])).to(device)
     ckpt_e  = torch.load(os.path.join(ckpt_dir, "encoder_best.pt"),
-                         map_location=device, weights_only=True)
+                         map_location=device, weights_only=False)
     encoder.load_state_dict(ckpt_e["state"])
     encoder.eval()
 
     trans  = MarkovTransition(tuple(cfg["trans_hidden"]), cfg["embed_dim"]).to(device)
     ckpt_t = torch.load(os.path.join(ckpt_dir, "transition_best.pt"),
-                        map_location=device, weights_only=True)
+                        map_location=device, weights_only=False)
     trans.load_state_dict(ckpt_t["state"])
     trans.eval()
 
