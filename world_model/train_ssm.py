@@ -27,6 +27,7 @@ from world_model.ssm_model import SSMWorldModel, ssm_rollout_loss, LATENT_DIM
 from world_model.train_fixeddt import augment_state
 from world_model.generate_data_fixeddt import DT
 from world_model.wm_predictor import TABLE_W, TABLE_H
+from log_utils import Logger
 
 
 class SSMDataset(Dataset):
@@ -40,13 +41,14 @@ class SSMDataset(Dataset):
     """
 
     def __init__(self, data_dir: str, rollout_steps: int = 16,
-                 augment: bool = True):
+                 augment: bool = True, logger: "Logger | None" = None):
         meta_path = Path(data_dir) / "metadata.json"
         assert meta_path.exists(), f"metadata.json not found in {data_dir}"
         meta = json.load(open(meta_path))
 
         self.rollout_steps = rollout_steps
         self.augment = augment
+        self._log = logger.log if logger is not None else print
 
         # 에피소드 단위로 저장 (메모리 절약: 유효 길이만)
         self.episodes = []   # list of (states, coll_flags, coll_types) arrays
@@ -77,11 +79,10 @@ class SSMDataset(Dataset):
         inv = 1.0 / counts
         self.class_weights = torch.from_numpy((inv / inv.sum() * 4).astype(np.float32))
 
-        total_colls = n_coll_per_type.sum()
-        print(f"SSMDataset: {len(self.episodes):,} episodes  rollout_steps={rollout_steps}")
-        print(f"  충돌 타입 분포:")
+        self._log(f"SSMDataset: {len(self.episodes):,} episodes  rollout_steps={rollout_steps}")
+        self._log(f"  충돌 타입 분포:")
         for i, name in enumerate(["ball_ball", "linear", "circular", "pocket"]):
-            print(f"    {name}: {n_coll_per_type[i]:,}  weight={self.class_weights[i]:.3f}")
+            self._log(f"    {name}: {n_coll_per_type[i]:,}  weight={self.class_weights[i]:.3f}")
 
     def __len__(self):
         return len(self.episodes) * 4   # 에피소드당 여러 chunk (oversampling)
@@ -166,9 +167,14 @@ def evaluate_rollout_error(model: SSMWorldModel, episodes, device: str,
 def train(args):
     device = "mps" if torch.backends.mps.is_available() else \
              "cuda" if torch.cuda.is_available() else "cpu"
-    print(f"Device: {device}")
 
-    dataset = SSMDataset(args.data_dir, args.rollout_steps)
+    out_dir = Path(args.out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    logger = Logger(out_dir)
+
+    logger.log(f"Device: {device}")
+
+    dataset = SSMDataset(args.data_dir, args.rollout_steps, logger=logger)
     n_val   = max(200, int(len(dataset.episodes) * 0.1))
     n_train = len(dataset.episodes) - n_val
 
@@ -216,16 +222,13 @@ def train(args):
 
     model = SSMWorldModel(args.latent_dim).to(device)
     n_params = sum(p.numel() for p in model.parameters())
-    print(f"Parameters: {n_params:,}")
+    logger.log(f"Parameters: {n_params:,}")
 
     opt   = torch.optim.Adam(model.parameters(), lr=args.lr)
     sched = torch.optim.lr_scheduler.OneCycleLR(
         opt, max_lr=args.lr, steps_per_epoch=len(train_loader),
         epochs=args.epochs, pct_start=0.1,
     )
-
-    out_dir = Path(args.out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
 
     best_val = float("inf")
 
@@ -289,13 +292,13 @@ def train(args):
                 f"{k}={v:.1f}cm" for k, v in rerr.items()
             )
 
-        print(f"Epoch {epoch:3d}/{args.epochs}"
-              f"  tr={np.mean(tr_losses):.4f}"
-              f"  val={val_loss:.4f}"
-              f"  state={d['loss_state']:.4f}"
-              f"  coll={d['loss_coll']:.4f}"
-              f"  type_acc={type_acc:.3f}"
-              + rollout_str)
+        logger.log(f"Epoch {epoch:3d}/{args.epochs}"
+                   f"  tr={np.mean(tr_losses):.4f}"
+                   f"  val={val_loss:.4f}"
+                   f"  state={d['loss_state']:.4f}"
+                   f"  coll={d['loss_coll']:.4f}"
+                   f"  type_acc={type_acc:.3f}"
+                   + rollout_str)
 
         if val_loss < best_val:
             best_val = val_loss
@@ -317,7 +320,8 @@ def train(args):
         "best_val_loss": best_val,
     }
     json.dump(cfg, open(out_dir / "config.json", "w"), indent=2)
-    print(f"\nSaved → {out_dir}  best_val={best_val:.4f}")
+    logger.log(f"\nSaved → {out_dir}  best_val={best_val:.4f}")
+    logger.close()
 
 
 def main():
