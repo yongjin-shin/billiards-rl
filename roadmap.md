@@ -112,54 +112,69 @@ Message passing runs at every rollout step — necessary for multi-collision cha
 - Billiards is Markovian: current state [pos + vel + spin] fully determines future
 - Message passing handles inter-ball dependencies; no temporal memory needed
 
-**3. Mixture transition — NLL loss (replaces MSE + RSSM-lite)**
+**3. Multi-step latent self-prediction with MDN (SPR-MDN)**
 
-Billiards physics is deterministic but chaotic (positive Lyapunov exponent). At bifurcation points (e.g., grazing collision — ball deflects left vs. right depending on sub-mm difference in contact point), a unimodal predictor (MSE or single Gaussian) averages over both modes and outputs a physically impossible middle trajectory.
+**One-line idea**: train the model to predict the next latent using its *own previous prediction* as input — the same condition it faces during planning, where GT states are never available beyond step 0.
 
-**Why not single Gaussian RSSM**: `z_{t+1} ~ N(μ(z_t), σ(z_t))` has closed-form KL but collapses to mode-averaging. Gaussian-Gaussian KL is correct math, wrong problem.
+**The training-deployment gap**: at planning time, only $s_t$ (step 0) is real; steps 1, 2, 3, ... use the model's own sampled outputs as the next input. If training always feeds GT at every step (teacher forcing), the model never practices "self-chained" rollout and fails when compounding errors enter at deployment.
 
-**Design (MDN, no KL, no posterior)**:
+**Why this is BYOL-family, not just NLL**: the defining mechanism of BYOL is EMA target encoder + stop-gradient for stable self-prediction without collapse. Both are present here:
+- $\phi' \leftarrow \tau\phi' + (1-\tau)\phi$ — EMA target
+- $\bar{z}_{h+1} = \mathrm{sg}(\mathrm{Enc}_{\phi'}(s_{t+h+1}))$ — stop-gradient
+
+This is exactly what SPR (Self-Predictive Representations, Schwarzer et al. 2021) does: BYOL + multi-step latent transition model. Our variant replaces SPR's deterministic predictor with an MDN, adding mixture density to capture bifurcations in chaotic billiards. The cosine similarity loss in vanilla BYOL becomes NLL here — stricter because it requires the correct distribution shape, not just direction.
+
+**Design (MDN transition, no KL, no posterior)**:
 
 Notation: $z_t = \mathrm{Enc}_\phi(s_t)$, $\phi'$ = EMA copy of $\phi$ (no gradient), $H$ = rollout length.
 
 ```
-# MDN transition head — per ball, per step:
-(π, μ, σ) = MixtureHead_θ(z_h)     # π:(B,N,K)  μ:(B,N,K,7)  σ:(B,N,K,7)  K=5
+# Starting point: only step 0 uses GT
+ẑ_0 = Enc_φ(s_t)
+
+# Per step h = 0 … H-1:
+
+# MDN transition — predict next latent distribution
+(π, μ, σ) = MixtureHead_θ(ẑ_h)     # π:(B,N,K)  μ:(B,N,K,7)  σ:(B,N,K,7)  K=5
 σ_k = softplus(σ_raw_k) + ε
 
-# NLL target: EMA-encoded GT next state (stable anchor in z-space)
+# Scoring target: EMA-encoded GT next state (stable anchor)
 z̄_{h+1} = sg( Enc_φ'(s_{t+h+1}) )
 
+# NLL loss at step h: how likely is the actual future under my predicted mixture?
 L_NLL^h = -log Σ_k π_k · N(z̄_{h+1} ; μ_k, diag(σ_k²))
 
-# Sampled next latent for rollout (stop-grad — cuts gradient through sampling):
+# Next input: sample from own prediction, NOT from GT (the key)
 k ~ Cat(π),  ẑ_{h+1} = sg( μ_k + σ_k ⊙ ε ),  ε ~ N(0, I)
+# sg: treat sampled value as a constant; gradient flows into MixtureHead only via L_NLL
 
 L_NLL = Σ_{h=0}^{H-1} L_NLL^h
 ```
 
-**Reconstruction** (encoder/decoder grounding — prevents z-space collapse):
+**Reconstruction** (encoder/decoder grounding — closes the NLL conspiracy failure mode):
 ```
 L_recon = Σ_{h=0}^{H} || Dec_ψ(ẑ_h) - s_{t+h} ||²
 ```
+Without this, encoder and transition could jointly find a degenerate z-space that minimizes NLL while losing physical meaning. $L_{\text{recon}}$ keeps z grounded to real ball states at every rollout step.
 
 **Total loss**:
 ```
 L_total = L_NLL + λ · L_recon + L_type
 ```
 
-Why z-space NLL target (not s-space directly): the EMA encoder $\phi'$ provides a stable target that does not shift with every gradient step of $\phi$. Using raw $s_{t+1}$ would require decoding each mixture component — more expensive and loses the latent structure.
+**Lineage**:
+```
+BYOL (EMA + stop-grad self-prediction)
+  └─ SPR (BYOL + multi-step latent transition)
+       └─ SPR-MDN [ours] (SPR + mixture density for chaotic bifurcations)
+```
+The specific combination (EMA + stop-grad + MDN + multi-step chaining) has not been published as far as we know — each component is validated independently.
 
-Why reconstruction prevents collapse: encoder and transition cannot "conspire" to lower NLL while abandoning physical meaning — $L_{\text{recon}}$ forces $\text{Dec}_\psi(\hat{z}_h) \approx s_{t+h}$ at every rollout step, keeping z grounded.
-
-**4. BYOL — deferred**
-
-BYOL was considered to force the transition to encode future dynamics. However:
-- $L_{\text{recon}}$ already prevents representational collapse
-- The natural BYOL summary $\tilde{z}_h = \sum_k \pi_k \mu_k$ (mixture mean) reintroduces mode-averaging — the exact problem MDN was designed to solve
-- The residual role ("prevent encoder-transition conspiracy") is already covered by the reconstruction constraint
-
-**Decision**: omit BYOL from the baseline. Add only if reconstruction + NLL proves insufficient after empirical validation.
+**4. Label smoothing**
+```python
+F.cross_entropy(logits, targets, label_smoothing=0.1)
+```
+Implemented in `ssm_model.py` and `gnn_model.py` via `--label-smoothing` arg.
 
 **5. Label smoothing**
 ```python
@@ -177,7 +192,7 @@ v18 (no ar_state, epoch 180): episode recall 0.234. No meaningful improvement ov
 Rationale:
 - The fundamental bottleneck is chaos-induced error accumulation in step-by-step prediction, not the ar_state or training objective
 - `pocket_prob = max(type_logit[..., 4])` still provides a useful (if noisy) signal for Q-target augmentation
-- Architectural improvements (stochastic z, BYOL auxiliary loss) are better addressed in the 3-ball rewrite than incrementally
+- Architectural improvements (MDN mixture transition, SPR-MDN self-prediction) are better addressed in the 3-ball rewrite than incrementally
 
 **Key finding from v17 vs v18 comparison**:
 - ar_state removal had minimal impact on performance (err: 30.7 → 32.6cm; recall: 0.549 → 0.517)

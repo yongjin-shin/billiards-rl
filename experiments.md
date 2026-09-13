@@ -1310,10 +1310,9 @@ Checkpoint: `world_model/results/ssm_v18_scratch/best.pt`
 #### Architectural Lessons for GNN Rewrite
 
 1. **No GRU**: Markov property confirmed; message passing handles inter-ball dependencies
-2. **MDN mixture transition** (not single Gaussian or RSSM-lite): unimodal predictors mode-average at bifurcation points → physically impossible mean trajectories. Mixture + NLL loss, no KL, no posterior encoder.
-   - NLL target: EMA-encoded GT state `z̄_{h+1} = sg(Enc_φ'(s_{t+h+1}))` — stable anchor that does not shift with each gradient step
-   - Reconstruction `L_recon` grounds the encoder and prevents z-space collapse; together with NLL it closes the "conspiracy" failure mode without BYOL
-3. **BYOL omitted from baseline**: `L_recon` already prevents collapse. The natural BYOL summary (mixture mean $\sum_k \pi_k \mu_k$) reintroduces mode-averaging — the problem MDN was designed to solve. Deferred until reconstruction + NLL proves insufficient.
+2. **SPR-MDN self-prediction** (replaces MSE + RSSM-lite): training uses own predicted latent as the next step input (not GT teacher forcing) — same condition as planning. EMA target encoder + stop-gradient (BYOL mechanism) provides stable self-prediction anchor. MDN (K=5 mixture) replaces SPR's deterministic predictor to handle chaotic bifurcations. Lineage: BYOL → SPR → SPR-MDN [ours].
+   - NLL target: `z̄_{h+1} = sg(Enc_φ'(s_{t+h+1}))` — EMA-encoded GT, stable across gradient steps
+   - Reconstruction `L_recon` grounds z to real ball states; closes the "NLL conspiracy" failure mode (encoder and transition minimizing NLL in a degenerate z-space)
 4. **Label smoothing**: apply from the start (`--label-smoothing 0.1`)
 
 ---
