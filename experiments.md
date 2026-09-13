@@ -1209,7 +1209,7 @@ Step-by-step error accumulation fundamentally limits pocket prediction.
 
 ---
 
-### v18 · Pure Latent Dynamics (no AR state, in progress)
+### v18 · Pure Latent Dynamics (no AR state)
 
 #### Design Motivation
 
@@ -1250,13 +1250,13 @@ $$\hat{s}^{\text{cue}}_t = g_{\text{cue}}(z_t), \quad \hat{s}^{\text{tgt}}_t = g
 transition.net.0.weight: (256, 147) → (256, 128) — shape changed, skip.  
 encoder + decoder heads (26 total): loaded directly from v17 best.pt.
 
-#### Setup
+#### v18-pretrained Setup
 
 - v17 best.pt fine-tune (encoder/decoder loaded, transition random init)
 - lr=1e-4, 400 epochs, pocket_weight=20, focal_gamma=2.0
 - T~Uniform(10,60), no curriculum
 
-#### Training Progress
+#### v18-pretrained Training Progress
 
 | epoch | err | coll recall | pocket ep. recall | Note |
 |-------|-----|-------------|-------------------|------|
@@ -1264,28 +1264,55 @@ encoder + decoder heads (26 total): loaded directly from v17 best.pt.
 | 10 | 47.0cm | 0.398 | — | |
 | 44 | 38.7cm | 0.440 | — | |
 | 180 | 33.6cm | 0.509 | **0.234** | mid-run pocket eval |
-| 252 (current) | 32.6cm | 0.517 | — | training in progress |
+| 252 | 32.6cm | 0.517 | — | |
+| **400 (final)** | **31.6cm** | **0.549** | **0.312** | best ckpt |
 
-#### Key Finding: ar_state Is Not the Critical Factor
+Checkpoint: `world_model/results/ssm_v18/best.pt`
 
-Comparing v17 (ar_state present) and v18 (ar_state removed):
+---
 
-| | v17 final | v18 ep.252 |
-|--|-----------|------------|
-| err | 30.7cm | 32.6cm |
-| collision recall | 0.549 | 0.517 |
-| episode pocket recall | 0.250 | 0.234 |
+### v18-scratch · Pure Latent from Random Init
 
-The difference is marginal. The v16→v17 improvement came from **focal loss + class weights**, not from ar_state. History tracking (ar_state as implicit RNN) provides no meaningful benefit for this Markovian physics problem.
+**Question**: Does v17 pretraining actually matter, or can v18 train from random init?
 
-**Decision**: accept current pocket recall (~0.25) and move to 3-ball architecture. Chasing the recall≥0.5 target with further 2-ball tuning has diminishing returns.
+#### Setup
 
-#### Architectural Lessons for Next WM
+- Random init (no v17 weights loaded)
+- Same hyperparams: lr=1e-4, 400 epochs, pocket_weight=20, focal_gamma=2.0, label_smoothing=0.0
+- T~Uniform(10,60)
 
-1. **No GRU needed**: Markov property holds with full state representation
-2. **Stochastic z transition**: billiards is chaotic (positive Lyapunov exponent) — small encoder errors grow exponentially through collisions, creating genuine epistemic uncertainty even though the physics is deterministic. Stochastic z models this.
-3. **BYOL auxiliary loss**: reconstruction loss teaches "where the ball is"; BYOL forces z to encode "where it is going" by predicting future representations
-4. **Label smoothing**: implemented (`--label-smoothing` arg), apply in next run
+#### Results
+
+| epoch | err | coll recall | Note |
+|-------|-----|-------------|------|
+| **400 (final)** | **32.7cm** | **0.512** | best ckpt=32.6cm |
+
+Checkpoint: `world_model/results/ssm_v18_scratch/best.pt`
+
+#### v18 Pretraining Comparison
+
+| | v18-pretrained | v18-scratch |
+|--|----------------|-------------|
+| err (final) | **31.6cm** | 32.7cm |
+| coll recall | **0.549** | 0.512 |
+| ep. pocket recall | **0.312** | — |
+| pretrain benefit | +1.1cm / +0.037 recall | — |
+
+**Finding**: v17 pretraining yields only ~1cm improvement in state error and minimal recall gain. **The model trains well from scratch**, confirming that architectural choices (focal loss, pocket weighting) dominate over initialization. GNN rewrite can start from random init.
+
+#### Key Findings from v16–v18 Series
+
+1. **ar_state irrelevant**: removal gave +1.9cm error — focal loss + class weights drove v16→v17 improvement, not history tracking. Markov property holds with full [pos+vel+spin] state.
+2. **Pretraining marginal**: scratch vs. pretrained ≈ 1cm difference. Architecture is the bottleneck, not initialization.
+3. **Pocket recall plateau (~0.31)**: root cause is step-by-step chaos accumulation, not loss function or architecture of the 2-ball SSM. Accepted as-is; MDN mixture transition and BYOL addressed in GNN rewrite.
+4. **No GRU needed**: validated by v17→v18 experiment.
+
+#### Architectural Lessons for GNN Rewrite
+
+1. **No GRU**: Markov property confirmed; message passing handles inter-ball dependencies
+2. **MDN mixture transition** (not single Gaussian): single Gaussian mode-averages at bifurcation points → physically impossible mean predictions. Mixture + NLL loss, no KL.
+3. **BYOL (Transition-chained)**: chain actual `BallTransition` k times as online path; EMA encoder on GT states as target. Gradient flows into Transition directly.
+4. **Label smoothing**: apply from the start (`--label-smoothing 0.1`)
 
 ---
 

@@ -15,7 +15,8 @@ Experiment plans and next directions. For completed experiment results, see [exp
 [~] Exp-16   World Model Critic — Q(s,a) = q(M(s,a))
              └─ [x] SSM v16 no-curriculum: err=30.5cm, recall=0.549 (epoch 530)
              └─ [x] SSM v17 focal fine-tune: pocket recall 0.000→0.250 (episode-level)
-             └─ [~] SSM v18 pure latent (no ar-state): in progress (epoch 44/400, err=38.7cm)
+             └─ [x] SSM v18 pure latent (no ar-state): final (epoch 400, err=31.6cm, pocket recall=0.312)
+             └─ [x] SSM v18 scratch (random init): final (epoch 400, err=32.7cm, recall=0.512 — pretraining marginal)
              └─ [ ] WM-augmented Q-target integration
 [ ] Exp-17   Phase 1 HRL — System 2 (ball selection discrete 3) + System 1 (Phase 1 Exp-10 freeze)
 
@@ -46,11 +47,15 @@ s_0 →enc→ z_0 →f→ z_1 →f→ z_2 → ... →f→ z_T   (z space only)
 - pocket episode recall: 0.000 → 0.250 (TP=16, FP=34, FN=48)
 - Roadmap target (recall≥0.5, prec≥0.4) not met — step-by-step error accumulation is the fundamental bottleneck
 
-**v18 pure latent (in progress, epoch 252/400)**:
+**v18 pure latent final results** (epoch 400, err=31.6cm):
 - ar_state feedback fully removed → z encodes all physics information on its own
 - transition random init (v17 encoder/decoder retained)
-- err=32.6cm, collision recall=0.517 (epoch 252)
-- episode-level pocket recall=0.234 (evaluated at epoch 180)
+- err=31.6cm, collision recall=0.549, episode pocket recall=0.312
+
+**v18 scratch (random init) final results** (epoch 400, err=32.7cm):
+- Same hyperparams as v18, no pretrained weights
+- err=32.7cm, collision recall=0.512
+- Pretraining benefit: ~1cm err / ~0.037 recall — marginal; GNN can train from scratch
 
 ---
 
