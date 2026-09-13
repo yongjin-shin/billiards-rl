@@ -112,56 +112,54 @@ Message passing runs at every rollout step — necessary for multi-collision cha
 - Billiards is Markovian: current state [pos + vel + spin] fully determines future
 - Message passing handles inter-ball dependencies; no temporal memory needed
 
-**3. Mixture transition — NLL loss (replaces RSSM-lite single Gaussian)**
+**3. Mixture transition — NLL loss (replaces MSE + RSSM-lite)**
 
-Billiards physics is deterministic but chaotic (positive Lyapunov exponent). At bifurcation points (e.g., grazing collision — ball deflects left vs. right depending on sub-mm difference in contact point), a single Gaussian prior averages over both modes and predicts a physically impossible middle trajectory.
+Billiards physics is deterministic but chaotic (positive Lyapunov exponent). At bifurcation points (e.g., grazing collision — ball deflects left vs. right depending on sub-mm difference in contact point), a unimodal predictor (MSE or single Gaussian) averages over both modes and outputs a physically impossible middle trajectory.
 
-**Why not RSSM-lite single Gaussian**: `z_{t+1} ~ N(μ(z_t), σ(z_t))` cannot represent multimodal futures. Closed-form KL is clean, but the model collapses to mode-averaging — wrong for planning. Gaussian-Gaussian KL is correct math, wrong problem.
+**Why not single Gaussian RSSM**: `z_{t+1} ~ N(μ(z_t), σ(z_t))` has closed-form KL but collapses to mode-averaging. Gaussian-Gaussian KL is correct math, wrong problem.
 
-**Design (MDN-style, no KL)**:
-```
-# z stays deterministic. Uncertainty is expressed in the output distribution.
+**Design (MDN, no KL, no posterior)**:
 
-# Mixture head: z_t → K Gaussian components in s-space
-π, μ, σ = MixtureHead(z_t)          # π:(B,N,K)  μ:(B,N,K,7)  σ:(B,N,K,7)  K=5
-
-# NLL loss (replaces MSE state loss):
-p(s_{t+1} | z_t) = Σ_k π_k * N(s_{t+1} | μ_k, σ_k)
-L_mdn = -log p(s_{t+1} | z_t)       # summed over balls, mean over batch
-
-# No posterior, no KL. Just maximize likelihood of actual next states.
-L_total = L_mdn + L_type
-```
-
-Why simpler than RSSM: no posterior encoder needed, no chicken-and-egg between encoder and KL target, no β hyperparameter. The mixture head is purely generative.
-
-Why s-space (not z-space) NLL: GT state `s_{t+1}` is always stable; a z-space target (`encoder(s_{t+1})`) is unstable until the encoder converges — and in the GNN, the encoder is jointly trained.
-
-**4. BYOL auxiliary loss (Transition-chained)**
-
-Reconstruction loss teaches z to represent *where the ball is*. BYOL forces the **BallTransition** itself to produce z that encodes *where the ball is going* — no separate predictor branch.
+Notation: $z_t = \mathrm{Enc}_\phi(s_t)$, $\phi'$ = EMA copy of $\phi$ (no gradient), $H$ = rollout length.
 
 ```
-# Two components:
-BallTransition   f_θ : actual dynamics network        [trained by gradient]
-target_encoder   f_ξ : EMA copy of BallEncoder        [no gradient, EMA update]
+# MDN transition head — per ball, per step:
+(π, μ, σ) = MixtureHead_θ(z_h)     # π:(B,N,K)  μ:(B,N,K,7)  σ:(B,N,K,7)  K=5
+σ_k = softplus(σ_raw_k) + ε
 
-# Per rollout step t, lookahead k:
-z_hat_tk = z_t
-for _ in range(k):
-    z_hat_tk = BallTransition(z_hat_tk)              # chain actual Transition k times
+# NLL target: EMA-encoded GT next state (stable anchor in z-space)
+z̄_{h+1} = sg( Enc_φ'(s_{t+h+1}) )
 
-z_bar_tk = f_ξ(seq_s[:, t+k], is_cue).detach()     # EMA encoder on GT state
-L_byol   = 1 - cosine_sim(z_hat_tk, z_bar_tk).mean()
+L_NLL^h = -log Σ_k π_k · N(z̄_{h+1} ; μ_k, diag(σ_k²))
 
-# EMA update (after each optimizer step):
-f_ξ ← 0.99 * f_ξ + 0.01 * f_θ_encoder
+# Sampled next latent for rollout (stop-grad — cuts gradient through sampling):
+k ~ Cat(π),  ẑ_{h+1} = sg( μ_k + σ_k ⊙ ε ),  ε ~ N(0, I)
+
+L_NLL = Σ_{h=0}^{H-1} L_NLL^h
 ```
 
-**Why the original design was wrong**: a separate predictor MLP `q_θ(z_t)` only improves encoder representation but sends no gradient into `BallTransition` — the network that actually runs during planning is untouched. Chaining the real Transition k times ensures BYOL directly improves planning quality.
+**Reconstruction** (encoder/decoder grounding — prevents z-space collapse):
+```
+L_recon = Σ_{h=0}^{H} || Dec_ψ(ẑ_h) - s_{t+h} ||²
+```
 
-Why it helps: a ball heading toward a pocket has a distinct future trajectory. BYOL enforces that `BallTransition^k(z_t)` resembles `encoder(s_{t+k})` — the dynamics network is forced to produce z that stays geometrically aligned with the actual future.
-The EMA target prevents representational collapse without negative samples.
+**Total loss**:
+```
+L_total = L_NLL + λ · L_recon + L_type
+```
+
+Why z-space NLL target (not s-space directly): the EMA encoder $\phi'$ provides a stable target that does not shift with every gradient step of $\phi$. Using raw $s_{t+1}$ would require decoding each mixture component — more expensive and loses the latent structure.
+
+Why reconstruction prevents collapse: encoder and transition cannot "conspire" to lower NLL while abandoning physical meaning — $L_{\text{recon}}$ forces $\text{Dec}_\psi(\hat{z}_h) \approx s_{t+h}$ at every rollout step, keeping z grounded.
+
+**4. BYOL — deferred**
+
+BYOL was considered to force the transition to encode future dynamics. However:
+- $L_{\text{recon}}$ already prevents representational collapse
+- The natural BYOL summary $\tilde{z}_h = \sum_k \pi_k \mu_k$ (mixture mean) reintroduces mode-averaging — the exact problem MDN was designed to solve
+- The residual role ("prevent encoder-transition conspiracy") is already covered by the reconstruction constraint
+
+**Decision**: omit BYOL from the baseline. Add only if reconstruction + NLL proves insufficient after empirical validation.
 
 **5. Label smoothing**
 ```python
