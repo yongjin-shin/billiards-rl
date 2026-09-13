@@ -15,7 +15,8 @@ Experiment plans and next directions. For completed experiment results, see [exp
 [~] Exp-16   World Model Critic — Q(s,a) = q(M(s,a))
              └─ [x] SSM v16 no-curriculum: err=30.5cm, recall=0.549 (epoch 530)
              └─ [x] SSM v17 focal fine-tune: pocket recall 0.000→0.250 (episode-level)
-             └─ [~] SSM v18 pure latent (no ar-state): in progress (epoch 44/400, err=38.7cm)
+             └─ [x] SSM v18 pure latent (no ar-state): final (epoch 400, err=31.6cm, pocket recall=0.312)
+             └─ [x] SSM v18 scratch (random init): final (epoch 400, err=32.7cm, recall=0.512 — pretraining marginal)
              └─ [ ] WM-augmented Q-target integration
 [ ] Exp-17   Phase 1 HRL — System 2 (ball selection discrete 3) + System 1 (Phase 1 Exp-10 freeze)
 
@@ -46,11 +47,15 @@ s_0 →enc→ z_0 →f→ z_1 →f→ z_2 → ... →f→ z_T   (z space only)
 - pocket episode recall: 0.000 → 0.250 (TP=16, FP=34, FN=48)
 - Roadmap target (recall≥0.5, prec≥0.4) not met — step-by-step error accumulation is the fundamental bottleneck
 
-**v18 pure latent (in progress, epoch 252/400)**:
+**v18 pure latent final results** (epoch 400, err=31.6cm):
 - ar_state feedback fully removed → z encodes all physics information on its own
 - transition random init (v17 encoder/decoder retained)
-- err=32.6cm, collision recall=0.517 (epoch 252)
-- episode-level pocket recall=0.234 (evaluated at epoch 180)
+- err=31.6cm, collision recall=0.549, episode pocket recall=0.312
+
+**v18 scratch (random init) final results** (epoch 400, err=32.7cm):
+- Same hyperparams as v18, no pretrained weights
+- err=32.7cm, collision recall=0.512
+- Pretraining benefit: ~1cm err / ~0.037 recall — marginal; GNN can train from scratch
 
 ---
 
@@ -76,51 +81,116 @@ RL problem:  state = [cue(7) | ball1(7) | ball2(7)] = 21-dim  (3-ball, n_balls=3
 - Must accept full ball layout as input to use as Q-target
 - **Architecture change + data regeneration required**
 
-**Direction**: Extend to fixed n_balls=3 with Stochastic SSM architecture
+**Direction**: GNN-based multi-agent architecture (n_balls dynamic)
+
+#### Next Architecture: GNN World Model
+
+Key design decisions derived from v16–v18 experiments and architectural analysis:
+
+**1. Set-based / multi-agent (replaces fixed-dim concatenation)**
+
+Each ball is a node with shared-weight encoder/decoder. n_balls becomes a runtime parameter.
 
 ```
-state   : 21-dim [cue(7), ball1(7), ball2(7)]
+Current SSM:  state = [cue(7) | tgt(7)] = 14-dim  (hardcoded 2-ball)
+GNN:          state = N × ball(7),  N = any number of balls
+
+node:  z_i = BallEncoder(ball_i_state, pocket_dists, is_cue)  [shared weights]
+edge:  m_ji = BallBallMsg(z_i, z_j, Δpos, Δvel, dist)         [shared weights]
+       m_pi = BallPocketMsg(z_i, Δpos_to_pocket, dist)         [shared weights]
+update: z_i' = LN(z_i + MLP(cat(z_i, Σ_j m_ji, Σ_p m_pi)))
 ```
 
-#### Next Architecture: Stochastic SSM (no GRU)
+Message passing runs at every rollout step — necessary for multi-collision chains (ball1 → ball2 → ball3).
 
-Key design decisions derived from v16–v18 experiments:
+**Status**: `world_model/gnn/gnn_model.py` implemented and shape-verified (2-ball).
+- Same weights handle N=2 and N=3 (tested).
+- Parameters: 373,708 (vs v18: 253,331).
 
-**1. No GRU / history tracking**
-- Evidence: v17 (with ar_state RNN feedback) vs v18 (no feedback) show minimal performance difference
-- Billiards is Markovian: current state [pos + vel + spin] fully determines next state
-- GRU adds complexity without meaningful benefit for this problem
+**2. No GRU / history tracking**
+- Evidence: v17 (ar_state RNN) vs v18 (no ar_state) — minimal performance difference
+- Billiards is Markovian: current state [pos + vel + spin] fully determines future
+- Message passing handles inter-ball dependencies; no temporal memory needed
 
-**2. Stochastic z transition (replacing deterministic f)**
+**3. Multi-step latent self-prediction with MDN (SPR-MDN)**
+
+**One-line idea**: train the model to predict the next latent using its *own previous prediction* as input — the same condition it faces during planning, where GT states are never available beyond step 0.
+
+**The training-deployment gap**: at planning time, only $s_t$ (step 0) is real; steps 1, 2, 3, ... use the model's own sampled outputs as the next input. If training always feeds GT at every step (teacher forcing), the model never practices "self-chained" rollout and fails when compounding errors enter at deployment.
+
+**Why this is BYOL-family, not just NLL**: the defining mechanism of BYOL is EMA target encoder + stop-gradient for stable self-prediction without collapse. Both are present here:
+- $\phi' \leftarrow \tau\phi' + (1-\tau)\phi$ — EMA target
+- $\bar{z}_{h+1} = \mathrm{sg}(\mathrm{Enc}_{\phi'}(s_{t+h+1}))$ — stop-gradient
+
+This is exactly what SPR (Self-Predictive Representations, Schwarzer et al. 2021) does: BYOL + multi-step latent transition model. Our variant replaces SPR's deterministic predictor with an MDN, adding mixture density to capture bifurcations in chaotic billiards. The cosine similarity loss in vanilla BYOL becomes NLL here — stricter because it requires the correct distribution shape, not just direction.
+
+**State / action indexing**:
+- $s_t$ = pre-strike state (all balls at rest)
+- $a_t$ = strike parameters (angle, speed, spin)
+- $s_{t+1}, \ldots, s_{t+H}$ = post-strike states at fixed Δt intervals (autonomous physics)
+
+**Design (MDN transition, no KL, no posterior)**:
+
+Notation: $z_t = \mathrm{Enc}_\phi(s_t)$, $\phi'$ = EMA copy of $\phi$ (no gradient), $H$ = rollout length.
+
+Action enters only at $h=0$ (the impulse moment); all subsequent steps are autonomous:
+$$\tilde{a}_h = \begin{cases} a_t & h=0 \\ \mathbf{0} & h=1,\dots,H-1 \end{cases}$$
+
 ```
-# Current (v16–v18): deterministic
-z_{t+1} = LayerNorm(z_t + MLP(z_t))
+# Starting point: only step 0 uses GT
+ẑ_0 = Enc_φ(s_t)
 
-# Next: stochastic
-z_{t+1} ~ p(z | z_t) = N(μ_θ(z_t), σ_θ(z_t))
+# Per step h = 0 … H-1:
+
+# MDN transition — conditioned on action at h=0, zero otherwise
+(π, μ, σ) = MixtureHead_θ(ẑ_h, ã_h)   # π:(B,N,K)  μ:(B,N,K,7)  σ:(B,N,K,7)  K=5
+σ_k = softplus(σ_raw_k) + ε
+
+# Scoring target: EMA-encoded GT next state (stable anchor)
+z̄_{h+1} = sg( Enc_φ'(s_{t+h+1}) )
+
+# NLL loss at step h: how likely is the actual future under my predicted mixture?
+L_NLL^h = -log Σ_k π_k · N(z̄_{h+1} ; μ_k, diag(σ_k²))
+
+# Next input: sample from own prediction, NOT from GT (the key)
+k ~ Cat(π),  ẑ_{h+1} = sg( μ_k + σ_k ⊙ ε ),  ε ~ N(0, I)
+# sg: treat sampled value as a constant; gradient flows into MixtureHead only via L_NLL
+
+L_NLL = Σ_{h=0}^{H-1} L_NLL^h
 ```
-Motivation: billiards is deterministic at the physics level, but it is a chaotic system (positive Lyapunov exponent). Small encoder representation errors grow exponentially through collisions. From the model's perspective, this creates genuine **epistemic uncertainty** — not because the physics is random, but because our representation is imperfect. Stochastic z captures this uncertainty without requiring GRU history.
 
-This is a simplified RSSM: keep the stochastic latent, drop the deterministic recurrent path (h_t).
+**Where mixture density actually matters**: $h=0$ (the strike) is a deterministic physical impulse — given $a_t$, the outcome is fully determined. The chaotic bifurcations arise at $h \geq 1$, when balls collide with each other or cushions. A sub-mm difference in contact point at a grazing collision sends the ball to completely different regions. The $K$-component mixture is doing real work precisely on the $\tilde{a}_h = \mathbf{0}$ steps — the autonomous phase, not the action phase.
 
-**3. BYOL auxiliary loss**
-The current reconstruction loss (MSE on positions + CE on collision type) teaches z to represent *where the ball is*, but not *where it is going*. BYOL-style temporal prediction forces z to encode dynamics:
-
+**Reconstruction** (encoder/decoder grounding — closes the NLL conspiracy failure mode):
 ```
-online:  f_θ(s_t)  → q_θ  →  ẑ_{t+k}
-target:  f_ξ(s_{t+k})  →  z̄_{t+k}   (EMA of f_θ, stop-grad)
+L_recon = Σ_{h=0}^{H} || Dec_ψ(ẑ_h) - s_{t+h} ||²
+```
+Without this, encoder and transition could jointly find a degenerate z-space that minimizes NLL while losing physical meaning. $L_{\text{recon}}$ keeps z grounded to real ball states at every rollout step.
 
-L_byol = -cosine_sim(ẑ_{t+k}, z̄_{t+k})
+**Total loss**:
+```
+L_total = L_NLL + λ · L_recon + L_type
 ```
 
-A state heading toward a pocket must produce a different z_t than one that is not — the BYOL objective enforces this by requiring z_t to predict the future representation.
+**Lineage**:
+```
+BYOL (EMA + stop-grad self-prediction)
+  └─ SPR (BYOL + multi-step latent transition)
+       └─ SPR-MDN [ours] (SPR + mixture density for chaotic bifurcations)
+```
+The specific combination (EMA + stop-grad + MDN + multi-step chaining) has not been published as far as we know — each component is validated independently.
 
 **4. Label smoothing**
-Added to type classification loss to prevent overconfident predictions on the minority pocket class:
 ```python
 F.cross_entropy(logits, targets, label_smoothing=0.1)
 ```
-Already implemented in `ssm_model.py`; apply via `--label-smoothing 0.1` in training.
+Implemented in `ssm_model.py` and `gnn_model.py` via `--label-smoothing` arg.
+
+**5. Label smoothing**
+```python
+F.cross_entropy(logits, targets, label_smoothing=0.1)
+```
+Implemented in `ssm_model.py` and `gnn_model.py` via `--label-smoothing` arg.
 
 #### Blocker 2: pocket recall improvement (resolved — accept current level)
 
@@ -132,7 +202,7 @@ v18 (no ar_state, epoch 180): episode recall 0.234. No meaningful improvement ov
 Rationale:
 - The fundamental bottleneck is chaos-induced error accumulation in step-by-step prediction, not the ar_state or training objective
 - `pocket_prob = max(type_logit[..., 4])` still provides a useful (if noisy) signal for Q-target augmentation
-- Architectural improvements (stochastic z, BYOL auxiliary loss) are better addressed in the 3-ball rewrite than incrementally
+- Architectural improvements (MDN mixture transition, SPR-MDN self-prediction) are better addressed in the 3-ball rewrite than incrementally
 
 **Key finding from v17 vs v18 comparison**:
 - ar_state removal had minimal impact on performance (err: 30.7 → 32.6cm; recall: 0.549 → 0.517)
@@ -146,11 +216,13 @@ Rationale:
 | Step | Content | Status |
 |------|---------|--------|
 | **① pocket prediction fix** | v17 focal+weight=20 → recall 0.250; v18 no-ar → 0.234 | [x] Done (accepted as-is) |
-| **① v18 pure latent** | Remove ar_state → self-contained z representation | [~] In progress (ep.252/400) |
-| **② WM multi-ball extension** | 3-ball Stochastic SSM + BYOL + label smoothing | [ ] Pending |
-| **③ Q-target augmentation** | WM(s_1, T=60) → pocket probability → Q-target label | [ ] Pending |
-| ④ Auxiliary loss | critic loss + WM pocket prediction parallel training | [ ] Pending |
-| ⑤ Reward shaping | WM dense reward → SAC | [ ] Pending |
+| **① v18 pure latent** | Remove ar_state → self-contained z representation | [x] Done (ep.400, err=31.6cm, recall=0.312) |
+| **① v18 scratch** | Verify pretraining is not essential | [x] Done (ep.400, err=32.7cm — marginal diff) |
+| **② GNN 2-ball baseline** | GNN architecture (set-based, n_balls runtime) — shape verified | [x] Shape verified, training pending |
+| **③ GNN + SPR-MDN** | MDN transition + NLL self-prediction + L_recon; replace BallTransition | [ ] Pending |
+| **④ 3-ball data + extension** | Generate 3-ball data; extend GNN to N=3 | [ ] Pending |
+| **⑤ Q-target augmentation** | WM(s_1, T=60) → pocket probability → Q-target label | [ ] Pending |
+| ⑥ Reward shaping | WM dense reward → SAC | [ ] Pending |
 
 ### ③ Q-target Augmentation (WM-augmented critic)
 
