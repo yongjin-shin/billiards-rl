@@ -76,51 +76,87 @@ RL problem:  state = [cue(7) | ball1(7) | ball2(7)] = 21-dim  (3-ball, n_balls=3
 - Must accept full ball layout as input to use as Q-target
 - **Architecture change + data regeneration required**
 
-**Direction**: Extend to fixed n_balls=3 with Stochastic SSM architecture
+**Direction**: GNN-based multi-agent architecture (n_balls dynamic)
+
+#### Next Architecture: GNN World Model
+
+Key design decisions derived from v16–v18 experiments and architectural analysis:
+
+**1. Set-based / multi-agent (replaces fixed-dim concatenation)**
+
+Each ball is a node with shared-weight encoder/decoder. n_balls becomes a runtime parameter.
 
 ```
-state   : 21-dim [cue(7), ball1(7), ball2(7)]
+Current SSM:  state = [cue(7) | tgt(7)] = 14-dim  (hardcoded 2-ball)
+GNN:          state = N × ball(7),  N = any number of balls
+
+node:  z_i = BallEncoder(ball_i_state, pocket_dists, is_cue)  [shared weights]
+edge:  m_ji = BallBallMsg(z_i, z_j, Δpos, Δvel, dist)         [shared weights]
+       m_pi = BallPocketMsg(z_i, Δpos_to_pocket, dist)         [shared weights]
+update: z_i' = LN(z_i + MLP(cat(z_i, Σ_j m_ji, Σ_p m_pi)))
 ```
 
-#### Next Architecture: Stochastic SSM (no GRU)
+Message passing runs at every rollout step — necessary for multi-collision chains (ball1 → ball2 → ball3).
 
-Key design decisions derived from v16–v18 experiments:
+**Status**: `world_model/gnn/gnn_model.py` implemented and shape-verified (2-ball).
+- Same weights handle N=2 and N=3 (tested).
+- Parameters: 373,708 (vs v18: 253,331).
 
-**1. No GRU / history tracking**
-- Evidence: v17 (with ar_state RNN feedback) vs v18 (no feedback) show minimal performance difference
-- Billiards is Markovian: current state [pos + vel + spin] fully determines next state
-- GRU adds complexity without meaningful benefit for this problem
+**2. No GRU / history tracking**
+- Evidence: v17 (ar_state RNN) vs v18 (no ar_state) — minimal performance difference
+- Billiards is Markovian: current state [pos + vel + spin] fully determines future
+- Message passing handles inter-ball dependencies; no temporal memory needed
 
-**2. Stochastic z transition (replacing deterministic f)**
-```
-# Current (v16–v18): deterministic
-z_{t+1} = LayerNorm(z_t + MLP(z_t))
+**3. Stochastic z transition (RSSM-lite)**
 
-# Next: stochastic
-z_{t+1} ~ p(z | z_t) = N(μ_θ(z_t), σ_θ(z_t))
-```
-Motivation: billiards is deterministic at the physics level, but it is a chaotic system (positive Lyapunov exponent). Small encoder representation errors grow exponentially through collisions. From the model's perspective, this creates genuine **epistemic uncertainty** — not because the physics is random, but because our representation is imperfect. Stochastic z captures this uncertainty without requiring GRU history.
-
-This is a simplified RSSM: keep the stochastic latent, drop the deterministic recurrent path (h_t).
-
-**3. BYOL auxiliary loss**
-The current reconstruction loss (MSE on positions + CE on collision type) teaches z to represent *where the ball is*, but not *where it is going*. BYOL-style temporal prediction forces z to encode dynamics:
+Billiards physics is deterministic, but chaotic (positive Lyapunov exponent). Small encoder errors grow exponentially through collisions — genuine **epistemic uncertainty** from the model's perspective.
 
 ```
-online:  f_θ(s_t)  → q_θ  →  ẑ_{t+k}
-target:  f_ξ(s_{t+k})  →  z̄_{t+k}   (EMA of f_θ, stop-grad)
+# Current (deterministic):
+z_{t+1} = LN(z_t + MLP(z_t))
 
-L_byol = -cosine_sim(ẑ_{t+k}, z̄_{t+k})
+# RSSM-lite (stochastic, no GRU):
+# Training — posterior uses GT next state:
+z_next_enc      = encoder(s_{t+1})
+μ_q, logσ_q    = MLP_posterior(cat(z_t, z_next_enc)).chunk(2)
+z_{t+1}         ~ N(μ_q, exp(logσ_q))
+
+# Rollout — prior only:
+μ_p, logσ_p    = MLP_prior(z_t).chunk(2)
+z_{t+1}         ~ N(μ_p, exp(logσ_p))
+
+L_kl = KL( N(μ_q, σ_q) || N(μ_p, σ_p) )
+L_total = L_state + L_type + β * L_kl
 ```
 
-A state heading toward a pocket must produce a different z_t than one that is not — the BYOL objective enforces this by requiring z_t to predict the future representation.
+This keeps the stochastic latent from RSSM while discarding the GRU (no history needed).
 
-**4. Label smoothing**
-Added to type classification loss to prevent overconfident predictions on the minority pocket class:
+**4. BYOL auxiliary loss**
+
+Reconstruction loss teaches z to represent *where the ball is*. BYOL forces z to encode *where it is going*:
+
+```
+# Attach to BallEncoder only. Two components:
+predictor     q_θ : MLP(128 → 256 → 128)           [trained by gradient]
+target_encoder f_ξ : EMA copy of BallEncoder        [no gradient, EMA update]
+
+# Per rollout step t:
+ẑ_{t+k}  = q_θ(z_t)                               # predict future z
+z̄_{t+k}  = f_ξ(seq_s[:, t+k]).detach()            # target from GT trajectory
+L_byol   = 1 - cosine_sim(ẑ_{t+k}, z̄_{t+k}).mean()
+
+# EMA update (after each optimizer step):
+f_ξ ← 0.99 * f_ξ + 0.01 * f_θ
+```
+
+Why it helps: a ball heading toward a pocket must have a *different* z than one that is not — BYOL enforces this by requiring z_t to predict the future representation z_{t+k}.
+The EMA target prevents representational collapse without needing negative samples.
+
+**5. Label smoothing**
 ```python
 F.cross_entropy(logits, targets, label_smoothing=0.1)
 ```
-Already implemented in `ssm_model.py`; apply via `--label-smoothing 0.1` in training.
+Implemented in `ssm_model.py` and `gnn_model.py` via `--label-smoothing` arg.
 
 #### Blocker 2: pocket recall improvement (resolved — accept current level)
 
