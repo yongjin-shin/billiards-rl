@@ -124,9 +124,17 @@ Message passing runs at every rollout step — necessary for multi-collision cha
 
 This is exactly what SPR (Self-Predictive Representations, Schwarzer et al. 2021) does: BYOL + multi-step latent transition model. Our variant replaces SPR's deterministic predictor with an MDN, adding mixture density to capture bifurcations in chaotic billiards. The cosine similarity loss in vanilla BYOL becomes NLL here — stricter because it requires the correct distribution shape, not just direction.
 
+**State / action indexing**:
+- $s_t$ = pre-strike state (all balls at rest)
+- $a_t$ = strike parameters (angle, speed, spin)
+- $s_{t+1}, \ldots, s_{t+H}$ = post-strike states at fixed Δt intervals (autonomous physics)
+
 **Design (MDN transition, no KL, no posterior)**:
 
 Notation: $z_t = \mathrm{Enc}_\phi(s_t)$, $\phi'$ = EMA copy of $\phi$ (no gradient), $H$ = rollout length.
+
+Action enters only at $h=0$ (the impulse moment); all subsequent steps are autonomous:
+$$\tilde{a}_h = \begin{cases} a_t & h=0 \\ \mathbf{0} & h=1,\dots,H-1 \end{cases}$$
 
 ```
 # Starting point: only step 0 uses GT
@@ -134,8 +142,8 @@ Notation: $z_t = \mathrm{Enc}_\phi(s_t)$, $\phi'$ = EMA copy of $\phi$ (no gradi
 
 # Per step h = 0 … H-1:
 
-# MDN transition — predict next latent distribution
-(π, μ, σ) = MixtureHead_θ(ẑ_h)     # π:(B,N,K)  μ:(B,N,K,7)  σ:(B,N,K,7)  K=5
+# MDN transition — conditioned on action at h=0, zero otherwise
+(π, μ, σ) = MixtureHead_θ(ẑ_h, ã_h)   # π:(B,N,K)  μ:(B,N,K,7)  σ:(B,N,K,7)  K=5
 σ_k = softplus(σ_raw_k) + ε
 
 # Scoring target: EMA-encoded GT next state (stable anchor)
@@ -150,6 +158,8 @@ k ~ Cat(π),  ẑ_{h+1} = sg( μ_k + σ_k ⊙ ε ),  ε ~ N(0, I)
 
 L_NLL = Σ_{h=0}^{H-1} L_NLL^h
 ```
+
+**Where mixture density actually matters**: $h=0$ (the strike) is a deterministic physical impulse — given $a_t$, the outcome is fully determined. The chaotic bifurcations arise at $h \geq 1$, when balls collide with each other or cushions. A sub-mm difference in contact point at a grazing collision sends the ball to completely different regions. The $K$-component mixture is doing real work precisely on the $\tilde{a}_h = \mathbf{0}$ steps — the autonomous phase, not the action phase.
 
 **Reconstruction** (encoder/decoder grounding — closes the NLL conspiracy failure mode):
 ```
