@@ -46,10 +46,11 @@ s_0 →enc→ z_0 →f→ z_1 →f→ z_2 → ... →f→ z_T   (z space only)
 - pocket episode recall: 0.000 → 0.250 (TP=16, FP=34, FN=48)
 - Roadmap target (recall≥0.5, prec≥0.4) not met — step-by-step error accumulation is the fundamental bottleneck
 
-**v18 pure latent (in progress, epoch 44/400)**:
+**v18 pure latent (in progress, epoch 252/400)**:
 - ar_state feedback fully removed → z encodes all physics information on its own
 - transition random init (v17 encoder/decoder retained)
-- err=38.7cm, recall=0.440 (epoch 44)
+- err=32.6cm, collision recall=0.517 (epoch 252)
+- episode-level pocket recall=0.234 (evaluated at epoch 180)
 
 ---
 
@@ -75,23 +76,68 @@ RL problem:  state = [cue(7) | ball1(7) | ball2(7)] = 21-dim  (3-ball, n_balls=3
 - Must accept full ball layout as input to use as Q-target
 - **Architecture change + data regeneration required**
 
-**Direction**: Extend to fixed n_balls=3
+**Direction**: Extend to fixed n_balls=3 with Stochastic SSM architecture
+
 ```
 state   : 21-dim [cue(7), ball1(7), ball2(7)]
-AR_DIM  : 26-dim [cue(7), ball1(7), ball2(7), type_logit(5)]
-collision head: cue-ball1, cue-ball2, ball1-ball2 per-pair → 5-class each or unified
 ```
 
-#### Blocker 2: pocket recall improvement (in progress)
+#### Next Architecture: Stochastic SSM (no GRU)
 
-v17 (focal+w=20): recall 0.000→0.250, prec=0.320. Target not met.
-**Root cause**: step-by-step error accumulation — pockets occur after multiple collisions, and chaos accumulation makes accurate step prediction difficult.
+Key design decisions derived from v16–v18 experiments:
 
-**v18 direction (current experiment)**:
-Remove ar_state feedback → z encodes all physics representations without a "lazy shortcut."
-If z becomes a richer physics representation, pocket discrimination ability is expected to improve.
+**1. No GRU / history tracking**
+- Evidence: v17 (with ar_state RNN feedback) vs v18 (no feedback) show minimal performance difference
+- Billiards is Markovian: current state [pos + vel + spin] fully determines next state
+- GRU adds complexity without meaningful benefit for this problem
 
-**Target**: episode-level pocket recall ≥ 0.5, prec ≥ 0.4
+**2. Stochastic z transition (replacing deterministic f)**
+```
+# Current (v16–v18): deterministic
+z_{t+1} = LayerNorm(z_t + MLP(z_t))
+
+# Next: stochastic
+z_{t+1} ~ p(z | z_t) = N(μ_θ(z_t), σ_θ(z_t))
+```
+Motivation: billiards is deterministic at the physics level, but it is a chaotic system (positive Lyapunov exponent). Small encoder representation errors grow exponentially through collisions. From the model's perspective, this creates genuine **epistemic uncertainty** — not because the physics is random, but because our representation is imperfect. Stochastic z captures this uncertainty without requiring GRU history.
+
+This is a simplified RSSM: keep the stochastic latent, drop the deterministic recurrent path (h_t).
+
+**3. BYOL auxiliary loss**
+The current reconstruction loss (MSE on positions + CE on collision type) teaches z to represent *where the ball is*, but not *where it is going*. BYOL-style temporal prediction forces z to encode dynamics:
+
+```
+online:  f_θ(s_t)  → q_θ  →  ẑ_{t+k}
+target:  f_ξ(s_{t+k})  →  z̄_{t+k}   (EMA of f_θ, stop-grad)
+
+L_byol = -cosine_sim(ẑ_{t+k}, z̄_{t+k})
+```
+
+A state heading toward a pocket must produce a different z_t than one that is not — the BYOL objective enforces this by requiring z_t to predict the future representation.
+
+**4. Label smoothing**
+Added to type classification loss to prevent overconfident predictions on the minority pocket class:
+```python
+F.cross_entropy(logits, targets, label_smoothing=0.1)
+```
+Already implemented in `ssm_model.py`; apply via `--label-smoothing 0.1` in training.
+
+#### Blocker 2: pocket recall improvement (resolved — accept current level)
+
+v17 (focal+w=20): episode recall 0.250, prec=0.320. Target (≥0.5) not met.
+v18 (no ar_state, epoch 180): episode recall 0.234. No meaningful improvement over v17.
+
+**Decision: move forward with current recall (~0.25) rather than continuing to chase the target.**
+
+Rationale:
+- The fundamental bottleneck is chaos-induced error accumulation in step-by-step prediction, not the ar_state or training objective
+- `pocket_prob = max(type_logit[..., 4])` still provides a useful (if noisy) signal for Q-target augmentation
+- Architectural improvements (stochastic z, BYOL auxiliary loss) are better addressed in the 3-ball rewrite than incrementally
+
+**Key finding from v17 vs v18 comparison**:
+- ar_state removal had minimal impact on performance (err: 30.7 → 32.6cm; recall: 0.549 → 0.517)
+- The v16→v17 improvement came from focal loss + class weights, not from ar_state
+- History tracking (GRU/ar_state) is not necessary for this Markovian physics problem
 
 ---
 
@@ -99,9 +145,9 @@ If z becomes a richer physics representation, pocket discrimination ability is e
 
 | Step | Content | Status |
 |------|---------|--------|
-| **① pocket prediction fix** | v17 focal+weight=20 → achieved recall 0.250 | [x] Done (target not met) |
-| **① v18 pure latent** | Remove ar_state → self-contained z representation | [~] In progress |
-| **② WM multi-ball extension** | 3-ball architecture + data regeneration + retraining | [ ] Pending |
+| **① pocket prediction fix** | v17 focal+weight=20 → recall 0.250; v18 no-ar → 0.234 | [x] Done (accepted as-is) |
+| **① v18 pure latent** | Remove ar_state → self-contained z representation | [~] In progress (ep.252/400) |
+| **② WM multi-ball extension** | 3-ball Stochastic SSM + BYOL + label smoothing | [ ] Pending |
 | **③ Q-target augmentation** | WM(s_1, T=60) → pocket probability → Q-target label | [ ] Pending |
 | ④ Auxiliary loss | critic loss + WM pocket prediction parallel training | [ ] Pending |
 | ⑤ Reward shaping | WM dense reward → SAC | [ ] Pending |

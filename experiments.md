@@ -1256,17 +1256,36 @@ encoder + decoder heads (26 total): loaded directly from v17 best.pt.
 - lr=1e-4, 400 epochs, pocket_weight=20, focal_gamma=2.0
 - T~Uniform(10,60), no curriculum
 
-#### Training Status (in progress)
+#### Training Progress
 
-| epoch | err | recall | Note |
-|-------|-----|--------|------|
-| 1 | 50.8cm | 0.284 | transition random init, encoder/decoder preserved |
-| 10 | 47.0cm | 0.398 | First rollout evaluation |
-| 30 | 39.8cm | 0.392 | Decreasing |
-| 40 | 38.7cm | 0.440 | |
-| 44 (current) | 38.7cm | 0.440 | Training in progress |
+| epoch | err | coll recall | pocket ep. recall | Note |
+|-------|-----|-------------|-------------------|------|
+| 1 | 50.8cm | 0.284 | — | transition random init |
+| 10 | 47.0cm | 0.398 | — | |
+| 44 | 38.7cm | 0.440 | — | |
+| 180 | 33.6cm | 0.509 | **0.234** | mid-run pocket eval |
+| 252 (current) | 32.6cm | 0.517 | — | training in progress |
 
-Expected to converge to v17 (30.7cm). Transition reduces error by more than 10cm in about 30 epochs.
+#### Key Finding: ar_state Is Not the Critical Factor
+
+Comparing v17 (ar_state present) and v18 (ar_state removed):
+
+| | v17 final | v18 ep.252 |
+|--|-----------|------------|
+| err | 30.7cm | 32.6cm |
+| collision recall | 0.549 | 0.517 |
+| episode pocket recall | 0.250 | 0.234 |
+
+The difference is marginal. The v16→v17 improvement came from **focal loss + class weights**, not from ar_state. History tracking (ar_state as implicit RNN) provides no meaningful benefit for this Markovian physics problem.
+
+**Decision**: accept current pocket recall (~0.25) and move to 3-ball architecture. Chasing the recall≥0.5 target with further 2-ball tuning has diminishing returns.
+
+#### Architectural Lessons for Next WM
+
+1. **No GRU needed**: Markov property holds with full state representation
+2. **Stochastic z transition**: billiards is chaotic (positive Lyapunov exponent) — small encoder errors grow exponentially through collisions, creating genuine epistemic uncertainty even though the physics is deterministic. Stochastic z models this.
+3. **BYOL auxiliary loss**: reconstruction loss teaches "where the ball is"; BYOL forces z to encode "where it is going" by predicting future representations
+4. **Label smoothing**: implemented (`--label-smoothing` arg), apply in next run
 
 ---
 

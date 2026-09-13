@@ -113,7 +113,8 @@ def train(args):
     logger = Logger(out_dir)
     logger.log(f"Device: {device}")
     logger.log(f"Mode: v18 no-ar-state  T~Uniform({T_MIN},{T_MAX})"
-               f"  pocket_w={args.pocket_weight}  focal_gamma={args.focal_gamma}")
+               f"  pocket_w={args.pocket_weight}  focal_gamma={args.focal_gamma}"
+               f"  label_smoothing={args.label_smoothing}")
 
     # ── 데이터 ──────────────────────────────────────────────────────────────
     dataset = SSMDataset(args.data_dir, logger=logger)
@@ -193,6 +194,7 @@ def train(args):
                 log_sigma=log_sigma,
                 w_type=1.0,
                 focal_gamma=args.focal_gamma,
+                label_smoothing=args.label_smoothing,
             )
             opt.zero_grad()
             loss.backward()
@@ -291,6 +293,7 @@ def train(args):
         "t_max":            T_MAX,
         "pocket_weight":    args.pocket_weight,
         "focal_gamma":      args.focal_gamma,
+        "label_smoothing":  args.label_smoothing,
         "best_mean_err_cm": best_mean_err,
     }
     json.dump(cfg, open(out_dir / "config.json", "w"), indent=2)
@@ -308,7 +311,9 @@ def main():
     p.add_argument("--ckpt",          default="world_model/results/ssm_v17_pocket/best.pt")
     p.add_argument("--lr",            type=float, default=1e-4)
     p.add_argument("--pocket-weight", type=float, default=20.0)
-    p.add_argument("--focal-gamma",   type=float, default=2.0)
+    p.add_argument("--focal-gamma",     type=float, default=2.0)
+    p.add_argument("--label-smoothing", type=float, default=0.0,
+                   help="label smoothing epsilon (0=hard labels)")
     args = p.parse_args()
     train(args)
 

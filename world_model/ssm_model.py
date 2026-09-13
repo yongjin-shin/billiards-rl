@@ -217,16 +217,24 @@ def _focal_cross_entropy(
     targets: torch.Tensor,          # (N,) long
     weight:  torch.Tensor | None,   # (C,) or None
     gamma:   float,
+    label_smoothing: float = 0.0,
 ) -> torch.Tensor:
-    """Focal loss: -(1-p_t)^gamma * log(p_t), with optional per-class weight."""
+    """Focal loss with optional label smoothing: blends hard target and uniform distribution."""
     log_p  = F.log_softmax(logits, dim=-1)               # (N, C)
     log_pt = log_p.gather(1, targets.unsqueeze(1)).squeeze(1)   # (N,)
     pt     = log_pt.exp()
-    focal  = (1.0 - pt) ** gamma * (-log_pt)             # (N,)
+    focal_factor = (1.0 - pt) ** gamma
+    if label_smoothing > 0.0:
+        smooth_loss = -log_p.mean(dim=-1)                # (N,) uniform target
+        hard_loss   = -log_pt
+        per_sample  = focal_factor * ((1 - label_smoothing) * hard_loss
+                                      + label_smoothing * smooth_loss)
+    else:
+        per_sample = focal_factor * (-log_pt)
     if weight is not None:
         w = weight[targets]
-        return (focal * w).sum() / (w.sum() + 1e-8)
-    return focal.mean()
+        return (per_sample * w).sum() / (w.sum() + 1e-8)
+    return per_sample.mean()
 
 
 def ssm_rollout_loss(
@@ -239,6 +247,7 @@ def ssm_rollout_loss(
     w_state: float = 1.0,
     w_type:  float = 1.0,
     focal_gamma: float = 0.0,            # 0 = standard CE, >0 = focal loss
+    label_smoothing: float = 0.0,        # 0 = hard labels, >0 = soft labels
 ) -> Tuple[torch.Tensor, dict]:
     """
     Multi-step rollout loss with 5-class unified collision head.
@@ -258,9 +267,11 @@ def ssm_rollout_loss(
     flat_logit = type_logit.reshape(B * T, N_COLL_TYPES)
     flat_types = seq_types.reshape(B * T).long()
     if focal_gamma > 0.0:
-        loss_type = _focal_cross_entropy(flat_logit, flat_types, class_weights, focal_gamma)
+        loss_type = _focal_cross_entropy(flat_logit, flat_types, class_weights,
+                                         focal_gamma, label_smoothing)
     else:
-        loss_type = F.cross_entropy(flat_logit, flat_types, weight=class_weights)
+        loss_type = F.cross_entropy(flat_logit, flat_types, weight=class_weights,
+                                    label_smoothing=label_smoothing)
     loss_type_n = loss_type / math.log(N_COLL_TYPES)  # ÷ log(5)
 
     if log_sigma is not None:
