@@ -206,11 +206,13 @@ Rationale:
 | Step | Content | Status |
 |------|---------|--------|
 | **① pocket prediction fix** | v17 focal+weight=20 → recall 0.250; v18 no-ar → 0.234 | [x] Done (accepted as-is) |
-| **① v18 pure latent** | Remove ar_state → self-contained z representation | [~] In progress (ep.252/400) |
-| **② WM multi-ball extension** | 3-ball Stochastic SSM + BYOL + label smoothing | [ ] Pending |
-| **③ Q-target augmentation** | WM(s_1, T=60) → pocket probability → Q-target label | [ ] Pending |
-| ④ Auxiliary loss | critic loss + WM pocket prediction parallel training | [ ] Pending |
-| ⑤ Reward shaping | WM dense reward → SAC | [ ] Pending |
+| **① v18 pure latent** | Remove ar_state → self-contained z representation | [x] Done (ep.400, err=31.6cm, recall=0.312) |
+| **① v18 scratch** | Verify pretraining is not essential | [x] Done (ep.400, err=32.7cm — marginal diff) |
+| **② GNN 2-ball baseline** | GNN architecture (set-based, n_balls runtime) — shape verified | [x] Shape verified, training pending |
+| **③ GNN + SPR-MDN** | MDN transition + NLL self-prediction + L_recon; replace BallTransition | [ ] Pending |
+| **④ 3-ball data + extension** | Generate 3-ball data; extend GNN to N=3 | [ ] Pending |
+| **⑤ Q-target augmentation** | WM(s_1, T=60) → pocket probability → Q-target label | [ ] Pending |
+| ⑥ Reward shaping | WM dense reward → SAC | [ ] Pending |
 
 ### ③ Q-target Augmentation (WM-augmented critic)
 
