@@ -107,50 +107,56 @@ Message passing runs at every rollout step — necessary for multi-collision cha
 - Billiards is Markovian: current state [pos + vel + spin] fully determines future
 - Message passing handles inter-ball dependencies; no temporal memory needed
 
-**3. Stochastic z transition (RSSM-lite)**
+**3. Mixture transition — NLL loss (replaces RSSM-lite single Gaussian)**
 
-Billiards physics is deterministic, but chaotic (positive Lyapunov exponent). Small encoder errors grow exponentially through collisions — genuine **epistemic uncertainty** from the model's perspective.
+Billiards physics is deterministic but chaotic (positive Lyapunov exponent). At bifurcation points (e.g., grazing collision — ball deflects left vs. right depending on sub-mm difference in contact point), a single Gaussian prior averages over both modes and predicts a physically impossible middle trajectory.
+
+**Why not RSSM-lite single Gaussian**: `z_{t+1} ~ N(μ(z_t), σ(z_t))` cannot represent multimodal futures. Closed-form KL is clean, but the model collapses to mode-averaging — wrong for planning. Gaussian-Gaussian KL is correct math, wrong problem.
+
+**Design (MDN-style, no KL)**:
+```
+# z stays deterministic. Uncertainty is expressed in the output distribution.
+
+# Mixture head: z_t → K Gaussian components in s-space
+π, μ, σ = MixtureHead(z_t)          # π:(B,N,K)  μ:(B,N,K,7)  σ:(B,N,K,7)  K=5
+
+# NLL loss (replaces MSE state loss):
+p(s_{t+1} | z_t) = Σ_k π_k * N(s_{t+1} | μ_k, σ_k)
+L_mdn = -log p(s_{t+1} | z_t)       # summed over balls, mean over batch
+
+# No posterior, no KL. Just maximize likelihood of actual next states.
+L_total = L_mdn + L_type
+```
+
+Why simpler than RSSM: no posterior encoder needed, no chicken-and-egg between encoder and KL target, no β hyperparameter. The mixture head is purely generative.
+
+Why s-space (not z-space) NLL: GT state `s_{t+1}` is always stable; a z-space target (`encoder(s_{t+1})`) is unstable until the encoder converges — and in the GNN, the encoder is jointly trained.
+
+**4. BYOL auxiliary loss (Transition-chained)**
+
+Reconstruction loss teaches z to represent *where the ball is*. BYOL forces the **BallTransition** itself to produce z that encodes *where the ball is going* — no separate predictor branch.
 
 ```
-# Current (deterministic):
-z_{t+1} = LN(z_t + MLP(z_t))
+# Two components:
+BallTransition   f_θ : actual dynamics network        [trained by gradient]
+target_encoder   f_ξ : EMA copy of BallEncoder        [no gradient, EMA update]
 
-# RSSM-lite (stochastic, no GRU):
-# Training — posterior uses GT next state:
-z_next_enc      = encoder(s_{t+1})
-μ_q, logσ_q    = MLP_posterior(cat(z_t, z_next_enc)).chunk(2)
-z_{t+1}         ~ N(μ_q, exp(logσ_q))
+# Per rollout step t, lookahead k:
+z_hat_tk = z_t
+for _ in range(k):
+    z_hat_tk = BallTransition(z_hat_tk)              # chain actual Transition k times
 
-# Rollout — prior only:
-μ_p, logσ_p    = MLP_prior(z_t).chunk(2)
-z_{t+1}         ~ N(μ_p, exp(logσ_p))
-
-L_kl = KL( N(μ_q, σ_q) || N(μ_p, σ_p) )
-L_total = L_state + L_type + β * L_kl
-```
-
-This keeps the stochastic latent from RSSM while discarding the GRU (no history needed).
-
-**4. BYOL auxiliary loss**
-
-Reconstruction loss teaches z to represent *where the ball is*. BYOL forces z to encode *where it is going*:
-
-```
-# Attach to BallEncoder only. Two components:
-predictor     q_θ : MLP(128 → 256 → 128)           [trained by gradient]
-target_encoder f_ξ : EMA copy of BallEncoder        [no gradient, EMA update]
-
-# Per rollout step t:
-ẑ_{t+k}  = q_θ(z_t)                               # predict future z
-z̄_{t+k}  = f_ξ(seq_s[:, t+k]).detach()            # target from GT trajectory
-L_byol   = 1 - cosine_sim(ẑ_{t+k}, z̄_{t+k}).mean()
+z_bar_tk = f_ξ(seq_s[:, t+k], is_cue).detach()     # EMA encoder on GT state
+L_byol   = 1 - cosine_sim(z_hat_tk, z_bar_tk).mean()
 
 # EMA update (after each optimizer step):
-f_ξ ← 0.99 * f_ξ + 0.01 * f_θ
+f_ξ ← 0.99 * f_ξ + 0.01 * f_θ_encoder
 ```
 
-Why it helps: a ball heading toward a pocket must have a *different* z than one that is not — BYOL enforces this by requiring z_t to predict the future representation z_{t+k}.
-The EMA target prevents representational collapse without needing negative samples.
+**Why the original design was wrong**: a separate predictor MLP `q_θ(z_t)` only improves encoder representation but sends no gradient into `BallTransition` — the network that actually runs during planning is untouched. Chaining the real Transition k times ensures BYOL directly improves planning quality.
+
+Why it helps: a ball heading toward a pocket has a distinct future trajectory. BYOL enforces that `BallTransition^k(z_t)` resembles `encoder(s_{t+k})` — the dynamics network is forced to produce z that stays geometrically aligned with the actual future.
+The EMA target prevents representational collapse without negative samples.
 
 **5. Label smoothing**
 ```python
