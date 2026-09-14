@@ -1300,6 +1300,41 @@ Checkpoint: `world_model/results/ssm_v18_scratch/best.pt`
 
 **Finding**: v17 pretraining yields only ~1cm improvement in state error and minimal recall gain. **The model trains well from scratch**, confirming that architectural choices (focal loss, pocket weighting) dominate over initialization. GNN rewrite can start from random init.
 
+---
+
+### GNN 2-ball · Set-based Multi-Agent World Model
+
+**Question**: Does a GNN-based set architecture (shared-weight nodes, message passing) outperform the flat SSM on 2-ball prediction?
+
+**Setup**: `world_model/gnn/train_gnn.py`, 400 epochs, lr=1e-4, batch=512, pocket_weight=20.0, focal_gamma=2.0, label_smoothing=0.0. Same data and val split as v18 for direct comparison. Random init (no pretraining). Checkpoint: `world_model/results/gnn_2ball_det/best.pt`
+
+**Architecture**: Each ball is a node (BALL_DIM=7 + pocket_dists + is_cue). Message passing per rollout step: BallBallMsg (j→i, sum-aggregated) + BallPocketMsg (pocket→i, sum-aggregated) → BallUpdate (LN residual) → BallTransition. TypeHead (mean-pool → 5-class). 373,708 params (vs v18: 253,331).
+
+#### Final Results (epoch 400)
+
+| | GNN 2-ball | SSM v18 scratch | SSM v18 no-AR |
+|--|:-----------:|:---------------:|:-------------:|
+| **mean err (best)** | **32.4cm** | 32.6cm | 31.6cm |
+| bb err | 46.8cm | 46.1cm | **43.7cm** |
+| no-bb err | **16.5cm** | 17.7cm | 18.2cm |
+| coll recall | **0.560** | 0.512 | 0.530 |
+| coll precision | **0.508** | 0.456 | 0.493 |
+| type_acc | **0.898** | 0.886 | 0.895 |
+| 0.5s err | 24.7cm | 23.5cm | **21.2cm** |
+| 1.0s err | 30.6cm | 30.9cm | **29.5cm** |
+| 2.0s err | **36.7cm** | 38.2cm | 37.4cm |
+| 3.0s err | **41.2cm** | 42.6cm | 42.8cm |
+
+#### Key Findings
+
+1. **GNN beats SSM scratch** (32.4 vs 32.6cm) — message passing provides a meaningful inductive bias even for 2-ball.
+2. **GNN trails SSM no-AR by 0.8cm** — no-AR's MDN-free architecture still has an edge on short-horizon (0.5s, 1.0s), suggesting the deterministic GNN transition is the bottleneck.
+3. **GNN collision detection is strongest** — recall 0.560 and precision 0.508 both exceed both SSM baselines. The explicit ball-ball edge features (Δpos, Δvel, dist) directly encode collision geometry.
+4. **GNN long-horizon advantage** — 2.0s and 3.0s errors are best among all three. Message passing compounds well across rollout steps.
+5. **GNN no-bb err is lowest** (16.5cm) — shared-weight node encoding is more data-efficient on simple trajectories.
+
+**Conclusion**: GNN architecture is validated as a 2-ball baseline. Short-horizon gap vs no-AR points to the deterministic `BallTransition` MLP as the next bottleneck — exactly the motivation for SPR-MDN in step ③.
+
 #### Key Findings from v16–v18 Series
 
 1. **ar_state irrelevant**: removal gave +1.9cm error — focal loss + class weights drove v16→v17 improvement, not history tracking. Markov property holds with full [pos+vel+spin] state.

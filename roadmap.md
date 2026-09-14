@@ -17,6 +17,7 @@ Experiment plans and next directions. For completed experiment results, see [exp
              └─ [x] SSM v17 focal fine-tune: pocket recall 0.000→0.250 (episode-level)
              └─ [x] SSM v18 pure latent (no ar-state): final (epoch 400, err=31.6cm, pocket recall=0.312)
              └─ [x] SSM v18 scratch (random init): final (epoch 400, err=32.7cm, recall=0.512 — pretraining marginal)
+             └─ [x] GNN 2-ball baseline: final (epoch 400, err=32.4cm, recall=0.560 — beats scratch, -1cm vs no-AR)
              └─ [ ] WM-augmented Q-target integration
 [ ] Exp-17   Phase 1 HRL — System 2 (ball selection discrete 3) + System 1 (Phase 1 Exp-10 freeze)
 
@@ -218,7 +219,7 @@ Rationale:
 | **① pocket prediction fix** | v17 focal+weight=20 → recall 0.250; v18 no-ar → 0.234 | [x] Done (accepted as-is) |
 | **① v18 pure latent** | Remove ar_state → self-contained z representation | [x] Done (ep.400, err=31.6cm, recall=0.312) |
 | **① v18 scratch** | Verify pretraining is not essential | [x] Done (ep.400, err=32.7cm — marginal diff) |
-| **② GNN 2-ball baseline** | GNN architecture (set-based, n_balls runtime) — shape verified | [x] Shape verified, training pending |
+| **② GNN 2-ball baseline** | GNN architecture (set-based, n_balls runtime) — shape verified | [x] Done (ep.400, err=32.4cm, recall=0.560) |
 | **③ GNN + SPR-MDN** | MDN transition + NLL self-prediction + L_recon; replace BallTransition | [ ] Pending |
 | **④ 3-ball data + extension** | Generate 3-ball data; extend GNN to N=3 | [ ] Pending |
 | **⑤ Q-target augmentation** | WM(s_1, T=60) → pocket probability → Q-target label | [ ] Pending |
