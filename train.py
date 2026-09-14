@@ -29,13 +29,14 @@ from contextlib import contextmanager
 from datetime import datetime
 
 import numpy as np
+import wandb
 from stable_baselines3 import SAC, PPO
 from stable_baselines3.common.env_util import make_vec_env
 from stable_baselines3.common.monitor import Monitor
-from stable_baselines3.common.callbacks import BaseCallback, EvalCallback, CallbackList
+from stable_baselines3.common.callbacks import BaseCallback, CallbackList
 from stable_baselines3.common.vec_env import SubprocVecEnv
 
-from logger import ExperimentLogger, AimEvalCallback, TrainMetricsCallback
+from logger import ExperimentLogger, BilliardsEvalCallback, TrainMetricsCallback
 
 try:
     from sb3_contrib import TQC
@@ -168,6 +169,14 @@ class ETACallback(BaseCallback):
                 f"fps {fps:.0f}",
                 flush=True,
             )
+            if wandb.run is not None:
+                wd = {"train/fps": fps}
+                for k, v in self.model.logger.name_to_value.items():
+                    try:
+                        wd[k] = float(v)
+                    except (TypeError, ValueError):
+                        pass
+                wandb.log(wd, step=t)
             self._last_log = t
         return True
 
@@ -195,7 +204,8 @@ def make_exp_dir(algo: str, steps: int, seed: int, n_balls: int = 1,
                  learning_rate: float = 3e-4,
                  gradient_steps: int = 1,
                  abs_angle: bool = False,
-                 legacy_placement: bool = False) -> str:
+                 legacy_placement: bool = False,
+                 proximity_reward_alpha: float = 0.0) -> str:
     """Create and return a unique experiment directory path."""
     ts      = datetime.now().strftime("%Y%m%d_%H%M%S")
     env_tag = f"_multi{n_balls}_ms{max_steps}" if n_balls > 1 else ""
@@ -214,6 +224,8 @@ def make_exp_dir(algo: str, steps: int, seed: int, n_balls: int = 1,
         rew_tag += "_aa"
     if legacy_placement:
         rew_tag += "_legacyplace"
+    if proximity_reward_alpha > 0.0:
+        rew_tag += f"_pr{proximity_reward_alpha}"
     name    = f"{algo}_{steps // 1000}k_s{seed}{env_tag}{rew_tag}_{ts}"
     path    = os.path.join("logs", "experiments", name)
     os.makedirs(os.path.join(path, "best_model"), exist_ok=True)
@@ -240,7 +252,10 @@ def train(algo: str = "SAC", steps: int = 1_000_000, seed: int = 42,
           learning_rate: float = 3e-4,
           gradient_steps: int = 1,
           abs_angle: bool = False,
-          legacy_placement: bool = False) -> str:
+          legacy_placement: bool = False,
+          proximity_reward_alpha: float = 0.0,
+          wandb_project: str = "billiards-rl",
+          no_wandb: bool = False) -> str:
     """
     Train one algorithm for `steps` timesteps with a fixed seed.
     Returns the experiment directory path.
@@ -257,6 +272,9 @@ def train(algo: str = "SAC", steps: int = 1_000_000, seed: int = 42,
     gradient_steps       → gradient updates per env step (default 1; set to N_ENVS=10 for 1:1 ratio)
     legacy_placement     → if True (n_balls=1 only): use original Exp-01 placement ranges
                            cue y∈[0.2,0.4], target y∈[0.6,0.9] — always upper/lower separated
+    proximity_reward_alpha → shaping coefficient (n_balls=1 only, Exp-13+)
+                           r += alpha * (-min_dist(ball→pocket) / d_max) on miss
+                           0.0 = disabled (default, backward-compatible)
     """
     algo     = algo.upper()
     algo_map = _build_algo_map()
@@ -267,13 +285,14 @@ def train(algo: str = "SAC", steps: int = 1_000_000, seed: int = 42,
 
     set_global_seed(seed)
 
-    exp_dir   = make_exp_dir(algo, steps, seed, n_balls, max_steps, step_penalty, trunc_penalty, progressive_penalty, clear_bonus, shots_taken, learning_rate, gradient_steps, abs_angle, legacy_placement)
+    exp_dir   = make_exp_dir(algo, steps, seed, n_balls, max_steps, step_penalty, trunc_penalty, progressive_penalty, clear_bonus, shots_taken, learning_rate, gradient_steps, abs_angle, legacy_placement, proximity_reward_alpha)
 
     with _tee_output(os.path.join(exp_dir, "train.log")):
         _train_inner(algo, steps, seed, n_balls, max_steps, step_penalty,
                      trunc_penalty, progressive_penalty, clear_bonus,
                      shots_taken, learning_rate, gradient_steps, abs_angle,
-                     legacy_placement, exp_dir)
+                     legacy_placement, proximity_reward_alpha, exp_dir,
+                     wandb_project=wandb_project, no_wandb=no_wandb)
 
     return exp_dir
 
@@ -281,7 +300,8 @@ def train(algo: str = "SAC", steps: int = 1_000_000, seed: int = 42,
 def _train_inner(algo, steps, seed, n_balls, max_steps, step_penalty,
                  trunc_penalty, progressive_penalty, clear_bonus,
                  shots_taken, learning_rate, gradient_steps, abs_angle,
-                 legacy_placement, exp_dir):
+                 legacy_placement, proximity_reward_alpha, exp_dir,
+                 wandb_project: str = "billiards-rl", no_wandb: bool = False):
     AlgoClass = _build_algo_map()[algo]
     algo_cfg  = ALGO_CONFIGS[algo]
 
@@ -308,18 +328,28 @@ def _train_inner(algo, steps, seed, n_balls, max_steps, step_penalty,
         "progressive_penalty" : progressive_penalty,
         "clear_bonus"         : clear_bonus,
         "shots_taken"         : shots_taken,
-        "abs_angle"           : abs_angle,
-        "legacy_placement"    : legacy_placement,
-        "learning_rate"       : learning_rate,
+        "abs_angle"              : abs_angle,
+        "legacy_placement"       : legacy_placement,
+        "proximity_reward_alpha" : proximity_reward_alpha,
+        "learning_rate"          : learning_rate,
         "gradient_steps"      : gradient_steps,
         "env"                 : f"BilliardsEnv-n{n_balls}-ms{max_steps}",
         "exp_dir"    : exp_dir,
     }
     save_json(os.path.join(exp_dir, "config.json"), config)
 
+    # ── wandb ─────────────────────────────────────────────────────────────────
+    if not no_wandb:
+        wandb.init(
+            project = wandb_project,
+            name    = os.path.basename(exp_dir),
+            config  = config,
+            tags    = [f"algo:{algo}", f"seed:{seed}"],
+        )
+
     # ── Random baseline ───────────────────────────────────────────────────────
     print("[1/3] Random agent baseline (500 episodes)...")
-    baseline_env = BilliardsEnv(n_balls=n_balls, max_steps=max_steps, step_penalty=step_penalty, trunc_penalty=trunc_penalty, progressive_penalty=progressive_penalty, clear_bonus=clear_bonus, shots_taken=shots_taken, abs_angle=abs_angle, legacy_placement=legacy_placement)
+    baseline_env = BilliardsEnv(n_balls=n_balls, max_steps=max_steps, step_penalty=step_penalty, trunc_penalty=trunc_penalty, progressive_penalty=progressive_penalty, clear_bonus=clear_bonus, shots_taken=shots_taken, abs_angle=abs_angle, legacy_placement=legacy_placement, proximity_reward_alpha=proximity_reward_alpha)
     baseline_env.reset(seed=seed)
     total_pocketed_baseline = 0
     for _ in range(500):
@@ -346,68 +376,51 @@ def _train_inner(algo, steps, seed, n_balls, max_steps, step_penalty,
                        "step_penalty": step_penalty, "trunc_penalty": trunc_penalty,
                        "progressive_penalty": progressive_penalty,
                        "clear_bonus": clear_bonus, "shots_taken": shots_taken,
-                       "abs_angle": abs_angle, "legacy_placement": legacy_placement},
+                       "abs_angle": abs_angle, "legacy_placement": legacy_placement,
+                       "proximity_reward_alpha": proximity_reward_alpha},
         vec_env_cls = SubprocVecEnv,
         monitor_dir = os.path.join(exp_dir, "train"),
         seed        = seed,
     )
 
-    _eval_env = Monitor(BilliardsEnv(n_balls=n_balls, max_steps=max_steps, step_penalty=step_penalty, trunc_penalty=trunc_penalty, progressive_penalty=progressive_penalty, clear_bonus=clear_bonus, shots_taken=shots_taken, abs_angle=abs_angle, legacy_placement=legacy_placement),
+    _eval_env = Monitor(BilliardsEnv(n_balls=n_balls, max_steps=max_steps, step_penalty=step_penalty, trunc_penalty=trunc_penalty, progressive_penalty=progressive_penalty, clear_bonus=clear_bonus, shots_taken=shots_taken, abs_angle=abs_angle, legacy_placement=legacy_placement, proximity_reward_alpha=proximity_reward_alpha),
                         filename=os.path.join(exp_dir, "eval", "monitor"))
     _eval_env.reset(seed=seed)
 
     exp_logger = ExperimentLogger(
-        exp_dir        = exp_dir,
-        run_name       = os.path.basename(exp_dir),
-        config         = config,
-        aim_experiment = f"{algo}_ms{max_steps}_sp{step_penalty}{'_aa' if abs_angle else ''}",
+        exp_dir  = exp_dir,
+        run_name = os.path.basename(exp_dir),
+        config   = config,
     )
 
-    eval_callback = AimEvalCallback(
+    eval_callback = BilliardsEvalCallback(
         exp_logger,
         _eval_env,
+        n_balls              = n_balls,
         best_model_save_path = os.path.join(exp_dir, "best_model"),
         log_path             = os.path.join(exp_dir, "eval"),
         eval_freq            = 10_000 // N_ENVS,   # every 10k total steps
         n_eval_episodes      = 50,
         deterministic        = True,
-        verbose              = 0,   # silent: ETACallback handles progress printing
     )
     eta_callback        = ETACallback(total_timesteps=steps, log_freq=10_000)
     train_log_callback  = TrainMetricsCallback(exp_logger, log_freq=10_000)
 
     model_kwargs = dict(
-        device          = DEVICE,
-        verbose         = 0,        # silent: ETACallback handles progress printing
-        tensorboard_log = "logs/tensorboard",
-        learning_rate   = learning_rate,
+        device        = DEVICE,
+        verbose       = 0,
+        learning_rate = learning_rate,
     )
     if algo != "PPO":   # gradient_steps is off-policy only (SAC, TQC)
         model_kwargs["gradient_steps"] = gradient_steps
 
     model = AlgoClass("MlpPolicy", vec_env, **model_kwargs, **algo_cfg)
 
-    # ── Descriptive TensorBoard run name (hierarchy: config/algo/seed/run) ──────
-    # Tree: ms3_sp0.1_tp1.0 → SAC → s0 → 2026-03-03@0752
-    # ※ macOS APFS에서 ':' 는 경로 구분자로 처리되므로 시·분 사이 구분자 생략
-    cfg_parts = [f"ms{max_steps}", f"sp{step_penalty}"]
-    if trunc_penalty > 0.0:     cfg_parts.append(f"tp{trunc_penalty}")
-    if progressive_penalty:     cfg_parts.append("pp")
-    if clear_bonus > 0.0:       cfg_parts.append(f"cb{clear_bonus}")
-    if shots_taken:             cfg_parts.append("st")
-    if learning_rate != 3e-4:   cfg_parts.append(f"lr{learning_rate}")
-    if gradient_steps != 1:     cfg_parts.append(f"gs{gradient_steps}")
-    if abs_angle:               cfg_parts.append("aa")
-    if legacy_placement:        cfg_parts.append("lp")
-    _ts_str = time.strftime("%Y-%m-%d@%H%M")   # e.g. 2026-03-03@0752
-    tb_log_name = f"{'_'.join(cfg_parts)}/{algo}/s{seed}/{_ts_str}"
-
     t0 = time.time()
     try:
         model.learn(
             total_timesteps = steps,
             callback        = CallbackList([eval_callback, eta_callback, train_log_callback]),
-            tb_log_name     = tb_log_name,
         )
     except Exception:
         exp_logger.log_exception("model.learn")
@@ -424,7 +437,7 @@ def _train_inner(algo, steps, seed, n_balls, max_steps, step_penalty,
     best_model = AlgoClass.load(best_model_path)
     print(f"\n[3/3] Evaluating best {algo} checkpoint (500 episodes)...")
 
-    final_eval_env = BilliardsEnv(n_balls=n_balls, max_steps=max_steps, step_penalty=step_penalty, trunc_penalty=trunc_penalty, progressive_penalty=progressive_penalty, clear_bonus=clear_bonus, shots_taken=shots_taken, abs_angle=abs_angle, legacy_placement=legacy_placement)
+    final_eval_env = BilliardsEnv(n_balls=n_balls, max_steps=max_steps, step_penalty=step_penalty, trunc_penalty=trunc_penalty, progressive_penalty=progressive_penalty, clear_bonus=clear_bonus, shots_taken=shots_taken, abs_angle=abs_angle, legacy_placement=legacy_placement, proximity_reward_alpha=proximity_reward_alpha)
     final_eval_env.reset(seed=seed)
     n_eval = 500
     total_pocketed_eval, clears = 0, 0
@@ -469,6 +482,16 @@ def _train_inner(algo, steps, seed, n_balls, max_steps, step_penalty,
         "exp_dir"            : exp_dir,
     }
     save_json(os.path.join(exp_dir, "results.json"), results)
+
+    if wandb.run is not None:
+        wandb.log({
+            "final/trained_pocket_rate": trained_rate,
+            "final/clear_rate":          clear_rate,
+            "final/random_pocket_rate":  random_rate,
+            "final/improvement_pp":      trained_rate - random_rate,
+        })
+        wandb.finish()
+
     exp_logger.finish(summary=results)
 
     print(f"\n  {'─'*45}")
@@ -479,7 +502,6 @@ def _train_inner(algo, steps, seed, n_balls, max_steps, step_penalty,
     print(f"  Improvement       : {trained_rate - random_rate:+.1f}pp")
     print(f"  Training time     : {elapsed/60:.1f} min  ({avg_fps:.0f} fps)")
     print(f"  Saved → {exp_dir}")
-    print(f"  TensorBoard → tensorboard --logdir logs/tensorboard")
 
 
 # =============================================================================
@@ -515,11 +537,19 @@ def main():
                         help="Gradient updates per env step (default: 1; set to N_ENVS=10 for 1:1 ratio)")
     parser.add_argument("--abs-angle", action="store_true",
                         help="Use absolute cue angle [0, 2π] instead of delta from nearest ball (Exp-12)")
+    parser.add_argument("--proximity-reward-alpha", type=float, default=0.0,
+                        help="Proximity reward shaping coefficient (n_balls=1 only, Exp-13+). "
+                             "Adds alpha*(-min_dist(ball→pocket)/d_max) on miss. 0.0 = disabled (default)")
+    parser.add_argument("--wandb-project", type=str, default="billiards-rl",
+                        help="W&B project name (default: billiards-rl)")
+    parser.add_argument("--no-wandb", action="store_true",
+                        help="Disable W&B logging")
     args = parser.parse_args()
     train(args.algo, args.steps, args.seed, args.n_balls, args.max_steps,
           args.step_penalty, args.trunc_penalty, args.progressive_penalty,
           args.clear_bonus, args.shots_taken, args.learning_rate, args.gradient_steps,
-          args.abs_angle)
+          args.abs_angle, proximity_reward_alpha=args.proximity_reward_alpha,
+          wandb_project=args.wandb_project, no_wandb=args.no_wandb)
 
 
 if __name__ == "__main__":

@@ -156,7 +156,9 @@ def draw_episode(ax, env, policy_fn, seed=None):
             first_action = action.copy()
             # Aim direction for single-ball aim arrow
             cue_pos = env.system.balls["cue"].state.rvw[0, :2]
-            ref_pos = env.system.balls[env._ball_ids[0]].state.rvw[0, :2]
+            ref_pos = env._nearest_unpocketed_pos(cue_pos)
+            if ref_pos is None:
+                ref_pos = cue_pos + np.array([1.0, 0.0])
             phi_direct = np.arctan2(ref_pos[1] - cue_pos[1], ref_pos[0] - cue_pos[0])
             phi_shot   = phi_direct + float(action[0])
 
@@ -305,12 +307,12 @@ def _clip_end_time(traj_dict):
     return min(max(ends) + 0.25, 8.0)
 
 
-def run_episode_shots(env, policy_fn):
+def run_episode_shots(env, policy_fn, seed=None):
     """
     Run one full episode and collect physics data for each shot.
     Returns list of shot dicts ready for animation.
     """
-    obs, _ = env.reset()
+    obs, _ = env.reset(seed=seed)
     shots  = []
     done   = False
 
@@ -318,12 +320,9 @@ def run_episode_shots(env, policy_fn):
         action = policy_fn(obs)
 
         cue_pos = env.system.balls["cue"].state.rvw[0, :2].copy()
-        ref_id  = env._ball_ids[0]
-        for bid in env._ball_ids:
-            if not env._pocketed.get(bid, False) and bid in env.system.balls:
-                ref_id = bid
-                break
-        ref_pos     = env.system.balls[ref_id].state.rvw[0, :2]
+        ref_pos = env._nearest_unpocketed_pos(cue_pos)
+        if ref_pos is None:
+            ref_pos = cue_pos + np.array([1.0, 0.0])
         phi_direct  = np.arctan2(ref_pos[1] - cue_pos[1], ref_pos[0] - cue_pos[0])
         phi_shot    = phi_direct + float(action[0])
 
@@ -532,7 +531,7 @@ def render_video(env, policy_fn, args):
 
     renderer = TableRenderer(env, dpi=130)
     writer   = imageio.get_writer(args.out, fps=FPS, codec="libx264",
-                                  output_params=["-crf", "18", "-pix_fmt", "yuv420p"])
+                                  output_params=["-crf", "18"], pixelformat="yuv420p", macro_block_size=1)
 
     total_pocketed, total_clears = 0, 0
     global_shot = 0
@@ -598,6 +597,64 @@ def render_video(env, policy_fn, args):
 
 
 # =============================================================================
+# Per-episode video mode
+# =============================================================================
+
+def render_video_per_episode(env, policy_fn, args):
+    """에피소드별 별도 MP4 저장. 파일명: ep01-clear.mp4 / ep01-miss.mp4"""
+    import imageio.v2 as imageio
+
+    out_dir = args.out if args.out else "outputs/per_episode"
+    os.makedirs(out_dir, exist_ok=True)
+
+    renderer  = TableRenderer(env, dpi=130)
+    n_episodes = args.count
+    rng       = np.random.default_rng(args.seed)
+
+    total_pocketed, total_clears = 0, 0
+
+    for ep in range(n_episodes):
+        ep_seed = int(rng.integers(0, 2**31))
+        shots = run_episode_shots(env, policy_fn, seed=ep_seed)
+        final_pocketed = shots[-1]["pocketed_now"] if shots else {}
+        ep_pocketed = sum(final_pocketed.values())
+        total_pocketed += ep_pocketed
+        cleared = ep_pocketed == env.n_balls
+        total_clears += int(cleared)
+
+        tag   = "clear" if cleared else "miss"
+        fname = os.path.join(out_dir, f"ep{ep+1:02d}-{tag}.mp4")
+        writer = imageio.get_writer(fname, fps=FPS, codec="libx264",
+                                    output_params=["-crf", "18"], pixelformat="yuv420p", macro_block_size=1)
+
+        global_shot = 0
+        for s_idx, shot in enumerate(shots):
+            global_shot += 1
+            prev_pocketed = {bid: bid not in shot["init_pos"] for bid in env._ball_ids}
+
+            if env.n_balls == 1:
+                newly_p     = shot["pocketed_now"].get(env._ball_ids[0], False)
+                title       = "✓ POCKETED" if newly_p else "✗ MISSED"
+                title_color = HIT_CLR if newly_p else MISS_CLR
+                info_stat   = f"ep {ep+1}"
+            else:
+                cur_p       = sum(shot["pocketed_now"].values())
+                title       = f"Episode {ep+1}  ·  shot {s_idx+1}"
+                title_color = "white"
+                info_stat   = f"{cur_p}/{env.n_balls} pocketed"
+
+            running_info = {"title": title, "title_color": title_color, "stat": info_stat}
+            _animate_shot(writer, renderer, shot, global_shot,
+                          prev_pocketed, running_info, args.slow, args.pause)
+
+        writer.close()
+        print(f"  ep{ep+1:02d} [{tag}] → {fname}")
+
+    renderer.close()
+    print(f"\nDone. {total_clears}/{n_episodes} clears  ({total_clears/n_episodes*100:.0f}%)")
+
+
+# =============================================================================
 # Compare mode — concatenate two MP4s with title cards
 # =============================================================================
 
@@ -657,7 +714,7 @@ def render_compare(args):
 
     os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
     writer = imageio.get_writer(args.out, fps=fps, codec="libx264",
-                                output_params=["-crf", "18", "-pix_fmt", "yuv420p"])
+                                output_params=["-crf", "18"], pixelformat="yuv420p", macro_block_size=1)
 
     # Title card → before section (stream frames one by one)
     print("Writing before section ...")
@@ -733,6 +790,10 @@ def main():
                         help="Title text for after section")
     parser.add_argument("--card-sec",      type=float, default=2.5,
                         help="Title card duration in seconds (default: 2.5)")
+    parser.add_argument("--per-episode",   action="store_true",
+                        help="Save each episode as a separate MP4 (ep01-clear.mp4, ep02-miss.mp4, ...)")
+    parser.add_argument("--legacy-placement", action="store_true",
+                        help="Use legacy ball placement (target y=[0.6,0.9], n_balls=1 only)")
     args = parser.parse_args()
 
     # compare mode — just concatenate, no env needed
@@ -754,7 +815,7 @@ def main():
         args.out = f"outputs/{args.n_balls}ball_{agent}.{ext}"
 
     # Environment
-    env = BilliardsEnv(n_balls=args.n_balls)
+    env = BilliardsEnv(n_balls=args.n_balls, legacy_placement=getattr(args, "legacy_placement", False))
 
     # Policy
     if args.model:
@@ -770,6 +831,8 @@ def main():
 
     if args.mode == "image":
         render_image(env, policy_fn, args)
+    elif getattr(args, "per_episode", False):
+        render_video_per_episode(env, policy_fn, args)
     else:
         render_video(env, policy_fn, args)
 
