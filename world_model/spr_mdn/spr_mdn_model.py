@@ -69,7 +69,7 @@ class MixtureHead(nn.Module):
         log_sig = h[:, K + K * D :].view(B, K, D)            # (B, K, D)
 
         pi    = F.softmax(log_pi, dim=-1)                     # (B, K)
-        sigma = F.softplus(log_sig) + 1e-4                   # (B, K, D)
+        sigma = F.softplus(log_sig) + 0.1                    # (B, K, D) — min 0.1 prevents sigma collapse
 
         return pi, mu, sigma
 
@@ -240,6 +240,7 @@ def spr_rollout_loss(
     log_sigma:  torch.Tensor | None = None,   # (2,) Kendall [nll, recon]
     focal_gamma:     float = 2.0,
     label_smoothing: float = 0.0,
+    w_nll:           float = 1.0,     # NLL annealing weight (0→1 during warmup)
 ) -> Tuple[torch.Tensor, dict]:
     """
     L_NLL   = mean_t mdn_nll(π_t, μ_t, σ_t, z̄_{t+1})
@@ -276,7 +277,7 @@ def spr_rollout_loss(
     if log_sigma is not None:
         s = log_sigma.clamp(-6, 6)
         total = (
-            torch.exp(-s[0]) * loss_nll   + s[0] +
+            w_nll * (torch.exp(-s[0]) * loss_nll + s[0]) +
             torch.exp(-s[1]) * loss_recon + s[1] +
             loss_type
         )

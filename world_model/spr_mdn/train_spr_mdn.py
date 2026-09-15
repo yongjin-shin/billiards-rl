@@ -111,6 +111,7 @@ def train(args):
         f"  T~Uniform({T_MIN},{T_MAX})"
         f"  pocket_w={args.pocket_weight}  focal_gamma={args.focal_gamma}"
         f"  label_smoothing={args.label_smoothing}"
+        f"  nll_warmup={args.nll_warmup}"
     )
 
     # ── Data ─────────────────────────────────────────────────────────────
@@ -174,6 +175,8 @@ def train(args):
 
     for epoch in range(1, args.epochs + 1):
         cur_T = int(rng_T.integers(T_MIN, T_MAX + 1))
+        # NLL annealing: linear warmup from 0 to 1 over nll_warmup epochs
+        w_nll = min(epoch / args.nll_warmup, 1.0) if args.nll_warmup > 0 else 1.0
 
         # ── Train ──────────────────────────────────────────────────────────
         model.train()
@@ -192,6 +195,7 @@ def train(args):
                 log_sigma=log_sigma,
                 focal_gamma=args.focal_gamma,
                 label_smoothing=args.label_smoothing,
+                w_nll=w_nll,
             )
             opt.zero_grad()
             loss.backward()
@@ -223,6 +227,7 @@ def train(args):
                     log_sigma=log_sigma,
                     focal_gamma=args.focal_gamma,
                     label_smoothing=args.label_smoothing,
+                    w_nll=w_nll,
                 )
                 val_losses.append(loss.item())
                 val_details.append(detail)
@@ -245,7 +250,7 @@ def train(args):
 
         s  = log_sigma.clamp(-6, 6).detach()
         kw = torch.exp(-s)
-        kw_str = f"  kw=[{kw[0].item():.2f},{kw[1].item():.2f}]"
+        kw_str = f"  kw=[{kw[0].item():.2f},{kw[1].item():.2f}]  w_nll={w_nll:.2f}"
 
         cp_keys = [k for k in ["0.5s", "1.0s", "2.0s", "3.0s"]
                    if not np.isnan(rerr.get(k, float("nan")))]
@@ -315,6 +320,8 @@ def main():
     p.add_argument("--pocket-weight",   type=float, default=20.0)
     p.add_argument("--focal-gamma",     type=float, default=2.0)
     p.add_argument("--label-smoothing", type=float, default=0.0)
+    p.add_argument("--nll-warmup",      type=int,   default=50,
+                   help="linear NLL annealing warmup epochs (0=no annealing)")
     args = p.parse_args()
     train(args)
 
