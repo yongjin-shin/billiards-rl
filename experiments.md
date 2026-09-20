@@ -1352,6 +1352,53 @@ Checkpoint: `world_model/results/ssm_v18_scratch/best.pt`
 
 ---
 
+### SPR-MDN · Self-Predictive MDN on v18 no-AR (idea validation)
+
+**Hypothesis**: SPR-style self-chaining + MDN transition closes the short-horizon gap of the deterministic SSM (v18 no-AR: 0.5s=21.2cm / 1.0s=29.5cm) by removing teacher-forcing bias and modeling chaotic bifurcations with a mixture distribution.
+
+**Why v18 no-AR as base (not GNN)**: Idea validation first — v18 no-AR is lighter (253K params vs 373K GNN) and the simplest architecture that eliminates the known irrelevant factors (GRU, pretraining). If SPR-MDN helps here, it will help GNN too. Avoids confounding architecture changes with training objective changes.
+
+**Training from scratch** (random init).
+
+#### Architecture changes vs v18 no-AR
+
+| Component | v18 no-AR | SPR-MDN |
+|-----------|-----------|---------|
+| Transition | `z' = LN(z + MLP(z))` deterministic | `MixtureHead(z, ã) → (π, μ, σ)` K=5 MDN |
+| Loss (pos) | MSE(ŝ, s_GT) | NLL against EMA-encoded target `z̄` |
+| Training input | GT s_{t+h} at every step (teacher forcing) | own sampled ẑ_{h} for h≥1 (self-chaining) |
+| EMA encoder | — | φ' ← τφ' + (1−τ)φ, stop-gradient on target |
+| L_recon | — | `\|\|Dec(ẑ_h) − s_{t+h}\|\|²` at every step |
+| λ weighting | fixed log_sigma (cue/tgt) | temperature taming (learnable log_σ_NLL, log_σ_recon) |
+| Action | — | a_t at h=0, zero-padded for h≥1 |
+
+#### Loss
+
+```
+L_NLL   = Σ_h  -log Σ_k π_k · N(z̄_{h+1} ; μ_k, diag(σ_k²))
+L_recon = Σ_h  ||Dec_ψ(ẑ_h) - s_{t+h}||²
+L_type  = CrossEntropy(type_logit, collision_label)  [focal, pocket_w=20]
+
+L_total = exp(-σ_NLL)·L_NLL + σ_NLL + exp(-σ_recon)·L_recon + σ_recon + L_type
+```
+
+(σ_NLL, σ_recon: learnable scalars, initialized to 0)
+
+#### Baseline for comparison
+
+| Model | mean err | 0.5s | 1.0s | recall |
+|-------|--------:|-----:|-----:|-------:|
+| SSM v18 no-AR | 31.6cm | 21.2cm | 29.5cm | 0.530 |
+| GNN 2-ball | 32.4cm | 24.7cm | 30.6cm | 0.560 |
+
+**Success criterion**: SPR-MDN mean err ≤ 30cm OR short-horizon (0.5s ≤ 20cm, 1.0s ≤ 28cm).
+
+#### Result
+
+TBD
+
+---
+
 ## Experiment Log
 
 Detailed observation records.
