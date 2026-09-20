@@ -30,6 +30,17 @@ outputs/*
 *.pkl
 *.zip
 
+# World model — generated data, results, and visualization artifacts
+world_model/data*/
+world_model/results/
+world_model/checkpoints/
+world_model/videos*/
+world_model/val_eps_cache.npz
+world_model/grid_results.csv
+world_model/*.png
+wandb/
+data_distribution.png
+
 # macOS
 .DS_Store
 .DS_Store?
