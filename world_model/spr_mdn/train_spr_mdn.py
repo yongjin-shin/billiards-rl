@@ -109,7 +109,7 @@ def train(args):
 
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    logger = Logger(out_dir)
+    logger = Logger(out_dir, timestamps=True)
     logger.log(f"Device: {device}")
     K = args.n_components
     ewta_on = args.ewta_decay > 0
@@ -347,17 +347,15 @@ def train(args):
         d        = {k: np.mean([x[k] for x in val_details]) for k in val_details[0]}
         type_acc = type_correct / type_total if type_total > 0 else 0.0
 
-        # ── z_0 norm tracking (k1 + every 10 epochs) ─────────────────────
-        # Monitors whether the encoder output drifts during training.
-        # Only meaningful; no grad, uses the last train batch's z_hat_list.
+        # ── z_0 norm tracking (k1 + every eval_every epochs) ────────────────
         z0_norm_str = ""
-        if k1_mode and (epoch % 10 == 0 or epoch == 1 or epoch == args.epochs):
+        if k1_mode and (epoch % args.eval_every == 0 or epoch == 1 or epoch == args.epochs):
             with torch.no_grad():
                 n0 = z_hat_list[0].norm(dim=-1).mean().item()   # type: ignore[possibly-undefined]
             z0_norm_str = f"  z0_norm={n0:.2f}"
 
-        # ── Rollout eval (every 10 epochs) ─────────────────────────────────
-        if epoch % 10 == 0 or epoch == 1 or epoch == args.epochs:
+        # ── Rollout eval (every eval_every epochs) ───────────────────────────
+        if epoch % args.eval_every == 0 or epoch == 1 or epoch == args.epochs:
             rerr = _eval_batched(model, balanced_val_eps, device, rollout_steps=60)
 
         mean_err    = rerr["mean_err"]
@@ -491,6 +489,8 @@ def main():
                    help="v17: remove stop-gradient between rollout steps (full BPTT, matches v18)")
     p.add_argument("--lam-l2",         type=float, default=1.0,
                    help="weight on latent L2 prediction loss (k1 mode only; sweep 1.0→0.1→0.01)")
+    p.add_argument("--eval-every",     type=int,   default=10,
+                   help="run rollout eval every N epochs (default 10; increase to speed up CPU training)")
     args = p.parse_args()
     train(args)
 
