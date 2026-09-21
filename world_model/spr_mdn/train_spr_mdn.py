@@ -275,6 +275,16 @@ def train(args):
         else:
             cur_tau = 1.0
 
+        # v24 KL annealing: lam_kl linearly ramps 0 → lam_kl over lam_kl_warmup epochs
+        if use_cat:
+            lam_kl_warmup = getattr(args, "lam_kl_warmup", 0)
+            if lam_kl_warmup > 0:
+                cur_lam_kl = args.lam_kl * min(1.0, (epoch - 1) / lam_kl_warmup)
+            else:
+                cur_lam_kl = args.lam_kl
+        else:
+            cur_lam_kl = getattr(args, "lam_kl", 1.0)
+
         # EWTA schedule
         # v7 mode (lam_pi=0): Phase 1 (κ decays K→1) then Phase 2 (π-only NLL)
         # v8 mode (lam_pi>0): single phase — κ decays K→1, π trains simultaneously
@@ -336,7 +346,7 @@ def train(args):
                 loss, detail_cat = spr_rollout_loss_cat(
                     z_pred_list, z_bar_list, prior_probs_list, post_probs_list,
                     s_hat, seq_s_t, type_logit, seq_t_t,
-                    lam_kl=getattr(args, "lam_kl", 1.0),
+                    lam_kl=cur_lam_kl,
                     lam_recon=args.lam_recon,
                     class_weights=CLASS_WEIGHTS,
                     focal_gamma=args.focal_gamma,
@@ -417,7 +427,7 @@ def train(args):
                     loss, detail = spr_rollout_loss_cat(
                         z_pred_list, z_bar_list_val, prior_probs_list, post_probs_list,
                         s_hat, seq_s, type_logit, seq_t,
-                        lam_kl=getattr(args, "lam_kl", 1.0),
+                        lam_kl=cur_lam_kl,
                         lam_recon=args.lam_recon,
                         class_weights=CLASS_WEIGHTS,
                         focal_gamma=args.focal_gamma,
@@ -499,6 +509,7 @@ def train(args):
         elif use_cat:
             latent_str = (f"  L_l2={d['loss_l2']:.4f}"
                           f"  L_kl={d['loss_kl']:.4f}"
+                          f"  λ_kl={cur_lam_kl:.3f}"
                           f"  prior_perp={d['prior_perp']:.2f}"
                           f"  post_perp={d['post_perp']:.2f}")
         elif use_ewta:
@@ -649,6 +660,8 @@ def main():
                    help="v24: number of discrete latent categories (default 5)")
     p.add_argument("--lam-kl",           type=float, default=1.0,
                    help="v24: weight on KL(posterior‖prior) loss (default 1.0)")
+    p.add_argument("--lam-kl-warmup",    type=int,   default=0,
+                   help="v24: epochs to linearly anneal lam_kl from 0 → lam_kl (0=no warmup)")
     args = p.parse_args()
     train(args)
 
