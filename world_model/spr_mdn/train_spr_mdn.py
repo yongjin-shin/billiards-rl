@@ -348,6 +348,7 @@ def train(args):
                     s_hat, seq_s_t, type_logit, seq_t_t,
                     lam_kl=cur_lam_kl,
                     lam_recon=args.lam_recon,
+                    lam_ent=getattr(args, "lam_ent", 0.0),
                     class_weights=CLASS_WEIGHTS,
                     focal_gamma=args.focal_gamma,
                 )
@@ -429,6 +430,7 @@ def train(args):
                         s_hat, seq_s, type_logit, seq_t,
                         lam_kl=cur_lam_kl,
                         lam_recon=args.lam_recon,
+                        lam_ent=getattr(args, "lam_ent", 0.0),
                         class_weights=CLASS_WEIGHTS,
                         focal_gamma=args.focal_gamma,
                     )
@@ -510,6 +512,7 @@ def train(args):
             latent_str = (f"  L_l2={d['loss_l2']:.4f}"
                           f"  L_kl={d['loss_kl']:.4f}"
                           f"  λ_kl={cur_lam_kl:.3f}"
+                          f"  H_prior={d['H_prior']:.3f}"
                           f"  prior_perp={d['prior_perp']:.2f}"
                           f"  post_perp={d['post_perp']:.2f}")
         elif use_ewta:
@@ -662,6 +665,8 @@ def main():
                    help="v24: weight on KL(posterior‖prior) loss (default 1.0)")
     p.add_argument("--lam-kl-warmup",    type=int,   default=0,
                    help="v24: epochs to linearly anneal lam_kl from 0 → lam_kl (0=no warmup)")
+    p.add_argument("--lam-ent",          type=float, default=0.0,
+                   help="v24: prior entropy bonus weight (>0 prevents mode collapse; try 0.1)")
     args = p.parse_args()
     train(args)
 

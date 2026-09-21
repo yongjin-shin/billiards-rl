@@ -923,29 +923,35 @@ def spr_rollout_loss_cat(
     seq_types:        torch.Tensor,         # (B, T) int
     lam_kl:           float = 1.0,
     lam_recon:        float = 1.0,
+    lam_ent:          float = 0.0,   # >0: prior entropy bonus — penalises mode collapse
     class_weights:    torch.Tensor | None = None,
     focal_gamma:      float = 2.0,
     label_smoothing:  float = 0.0,
 ) -> Tuple[torch.Tensor, dict]:
     """
-    v24 loss: L2(z_pred, z_tgt) + lam_kl·KL(post‖prior) + lam_recon·recon + type.
+    v24 loss: L2 + lam_kl·KL(post‖prior) + lam_recon·recon + type − lam_ent·H(prior).
 
-    Unimix ensures probs > 0 on both sides → log always finite.
+    lam_ent > 0 adds an entropy bonus on the prior: maximises H(prior) to prevent
+    mode collapse (all probability mass on 1-2 categories).
+    Unimix ensures probs > 0 → log always finite.
     """
     T    = len(z_pred_list)
     zero = z_pred_list[0].new_zeros(())
 
-    total_l2 = zero
-    total_kl = zero
+    total_l2  = zero
+    total_kl  = zero
+    total_ent = zero   # mean prior entropy (positive scalar)
 
     for h in range(T):
         total_l2 = total_l2 + F.mse_loss(z_pred_list[h], z_bar_list[h])
         qp = post_probs_list[h]
         pp = prior_probs_list[h]
-        total_kl = total_kl + (qp * (torch.log(qp) - torch.log(pp))).sum(-1).mean()
+        total_kl  = total_kl  + (qp * (torch.log(qp) - torch.log(pp))).sum(-1).mean()
+        total_ent = total_ent + (-(pp * torch.log(pp.clamp(1e-8))).sum(-1).mean())
 
-    total_l2 = total_l2 / T
-    total_kl = total_kl / T
+    total_l2  = total_l2  / T
+    total_kl  = total_kl  / T
+    total_ent = total_ent / T   # H(prior), positive; max = log(K)
 
     total_recon = sum(
         F.mse_loss(s_hat[:, h + 1, :7], seq_s[:, h + 1, :7]) +
@@ -960,7 +966,9 @@ def spr_rollout_loss_cat(
         logits_flat, types_flat, class_weights, focal_gamma, label_smoothing
     ) / math.log(N_COLL_TYPES)
 
-    total = total_l2 + lam_kl * total_kl + lam_recon * total_recon + loss_type
+    # Subtract entropy bonus: minimising total → maximising H(prior)
+    total = total_l2 + lam_kl * total_kl + lam_recon * total_recon + loss_type \
+            - lam_ent * total_ent
 
     with torch.no_grad():
         last_prior = prior_probs_list[-1]
@@ -977,6 +985,7 @@ def spr_rollout_loss_cat(
         "loss_kl":    total_kl.item(),
         "loss_recon": total_recon.item(),
         "loss_type":  loss_type.item(),
+        "H_prior":    total_ent.item(),
         "prior_perp": prior_perp,
         "post_perp":  post_perp,
     }
