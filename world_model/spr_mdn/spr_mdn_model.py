@@ -880,12 +880,15 @@ class SPRCatModel(nn.Module):
         use_sample: bool = False,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
-        c ~ Prior argmax (use_sample=False) or categorical sample (use_sample=True).
+        Default (use_sample=False): expected correction Σ_k p_k * branch_k(trunk, e_k).
+        use_sample=True: single categorical sample instead.
         Returns: s_hat (B, T+1, 14), type_logit (B, T, 5)
         """
         B       = s_0.shape[0]
         device  = s_0.device
         a_zeros = torch.zeros(B, self.action_dim, device=device)
+        K       = self.n_categories
+        eye     = torch.eye(K, device=device, dtype=s_0.dtype)  # (K, K)
 
         z_chain         = self.encoder(s_0)
         s_hat_list      = [self._decode(z_chain)]
@@ -895,15 +898,20 @@ class SPRCatModel(nn.Module):
             a_tilde   = action if (h == 0 and action is not None) else a_zeros
             trunk_out = self.trunk(torch.cat([z_chain, a_tilde], dim=-1))
 
-            prior_probs = _unimix(self.prior_head(trunk_out), self.alpha)
+            prior_probs = _unimix(self.prior_head(trunk_out), self.alpha)  # (B, K)
+
             if use_sample:
-                c_idx = torch.multinomial(prior_probs, 1).squeeze(-1)
+                c_idx    = torch.multinomial(prior_probs, 1).squeeze(-1)
+                c_onehot = F.one_hot(c_idx, K).to(z_chain)
+                correction = self.branch_head(trunk_out, c_onehot)
             else:
-                c_idx = prior_probs.argmax(dim=-1)
-            c_onehot = F.one_hot(c_idx, self.n_categories).to(z_chain)
+                # Expected correction: Σ_k p_k * branch_k(trunk_out, e_k)
+                trunk_exp = trunk_out.unsqueeze(1).expand(-1, K, -1).reshape(B * K, -1)
+                eye_exp   = eye.unsqueeze(0).expand(B, -1, -1).reshape(B * K, K)
+                corr_all  = self.branch_head(trunk_exp, eye_exp).view(B, K, -1)  # (B, K, D)
+                correction = (prior_probs.unsqueeze(-1) * corr_all).sum(1)       # (B, D)
 
             type_logit_list.append(self.type_head(z_chain))
-            correction = self.branch_head(trunk_out, c_onehot)
             z_chain    = self.chain_ln(z_chain + correction)
             s_hat_list.append(self._decode(z_chain))
 

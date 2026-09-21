@@ -282,8 +282,17 @@ def train(args):
                 cur_lam_kl = args.lam_kl * min(1.0, (epoch - 1) / lam_kl_warmup)
             else:
                 cur_lam_kl = args.lam_kl
+
+            # v24 entropy anneal: lam_ent linearly decays lam_ent → 0 over lam_ent_anneal epochs
+            lam_ent_base   = getattr(args, "lam_ent", 0.0)
+            lam_ent_anneal = getattr(args, "lam_ent_anneal", 0)
+            if lam_ent_anneal > 0:
+                cur_lam_ent = lam_ent_base * max(0.0, 1.0 - (epoch - 1) / lam_ent_anneal)
+            else:
+                cur_lam_ent = lam_ent_base
         else:
-            cur_lam_kl = getattr(args, "lam_kl", 1.0)
+            cur_lam_kl  = getattr(args, "lam_kl", 1.0)
+            cur_lam_ent = getattr(args, "lam_ent", 0.0)
 
         # EWTA schedule
         # v7 mode (lam_pi=0): Phase 1 (κ decays K→1) then Phase 2 (π-only NLL)
@@ -348,7 +357,7 @@ def train(args):
                     s_hat, seq_s_t, type_logit, seq_t_t,
                     lam_kl=cur_lam_kl,
                     lam_recon=args.lam_recon,
-                    lam_ent=getattr(args, "lam_ent", 0.0),
+                    lam_ent=cur_lam_ent,
                     class_weights=CLASS_WEIGHTS,
                     focal_gamma=args.focal_gamma,
                 )
@@ -430,7 +439,7 @@ def train(args):
                         s_hat, seq_s, type_logit, seq_t,
                         lam_kl=cur_lam_kl,
                         lam_recon=args.lam_recon,
-                        lam_ent=getattr(args, "lam_ent", 0.0),
+                        lam_ent=cur_lam_ent,
                         class_weights=CLASS_WEIGHTS,
                         focal_gamma=args.focal_gamma,
                     )
@@ -512,6 +521,7 @@ def train(args):
             latent_str = (f"  L_l2={d['loss_l2']:.4f}"
                           f"  L_kl={d['loss_kl']:.4f}"
                           f"  λ_kl={cur_lam_kl:.3f}"
+                          f"  λ_ent={cur_lam_ent:.3f}"
                           f"  H_prior={d['H_prior']:.3f}"
                           f"  prior_perp={d['prior_perp']:.2f}"
                           f"  post_perp={d['post_perp']:.2f}")
@@ -667,6 +677,8 @@ def main():
                    help="v24: epochs to linearly anneal lam_kl from 0 → lam_kl (0=no warmup)")
     p.add_argument("--lam-ent",          type=float, default=0.0,
                    help="v24: prior entropy bonus weight (>0 prevents mode collapse; try 0.1)")
+    p.add_argument("--lam-ent-anneal",   type=int,   default=0,
+                   help="v24: epochs to linearly decay lam_ent → 0 (0=no decay; try 50)")
     args = p.parse_args()
     train(args)
 
