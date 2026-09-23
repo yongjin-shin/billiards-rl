@@ -1,20 +1,19 @@
 """
-world_model/spr_mdn/train_gradnorm.py — NLL + GradNorm training (v25)
+world_model/spr_mdn/train_gradnorm.py — L2 warm-up → NLL + GradNorm (v25)
 
-SPRMDNModel with GradNorm loss balancing between L_nll and L_recon.
-Fair comparison with v18a (K=1, L2): same encoder structure, same TF schedule.
+Two-phase curriculum:
+  Phase 1 (epoch ≤ phase1_epochs): L2 on mixture mean — encoder/decoder/transition warm-up
+  Phase 2 (epoch  > phase1_epochs): NLL + GradNorm    — distribution head fine-tune
 
-v25 config (matches v18a structure with NLL+GradNorm):
+v25 config (v18a-equivalent structure + NLL+GradNorm):
     python world_model/spr_mdn/train_gradnorm.py \\
       --data-dir world_model/data_fixeddt \\
       --out-dir  world_model/results/spr_gradnorm_v25 \\
-      --epochs 500 \\
-      --K 5 \\
-      --no-ema --no-encoder-ln --full-bptt \\
-      --gn-alpha 1.5 \\
-      --tf-decay 200 --tf-pmin 0.1
+      --epochs 500 --phase1-epochs 200 \\
+      --K 5 --no-ema --no-encoder-ln --full-bptt \\
+      --gn-alpha 1.5 --tf-decay 200 --tf-pmin 0.1
 
-v18a reference (K=1, L2, no GradNorm):
+v18a reference (L2 only, no GradNorm):
     python world_model/spr_mdn/train_spr_mdn.py \\
       --k1 --no-ema --no-encoder-ln --full-bptt --lam-l2 0.01 \\
       --tf-decay 200 --tf-pmin 0.1 --epochs 500
@@ -127,11 +126,13 @@ def train(args: argparse.Namespace) -> None:
     logger = Logger(out_dir)
     logger.log(f"Device: {device}")
     logger.log(
-        f"GradNorm NLL  K={args.K}  no_ema={args.no_ema}"
-        f"  no_encoder_ln={args.no_encoder_ln}  full_bptt={args.full_bptt}"
-        f"  gn_alpha={args.gn_alpha}  gn_lr={args.gn_lr}"
-        f"  tf_decay={args.tf_decay}  tf_pmin={args.tf_pmin}"
-        f"  lam_recon={args.lam_recon}  pocket_w={args.pocket_weight}"
+        f"Phase1 (L2 warm-up): {args.phase1_epochs} epochs"
+        f"  Phase2 (NLL+GradNorm): {args.epochs - args.phase1_epochs} epochs"
+    )
+    logger.log(
+        f"K={args.K}  no_ema={args.no_ema}  no_encoder_ln={args.no_encoder_ln}"
+        f"  full_bptt={args.full_bptt}  gn_alpha={args.gn_alpha}  gn_lr={args.gn_lr}"
+        f"  tf_decay={args.tf_decay}  tf_pmin={args.tf_pmin}  lam_recon={args.lam_recon}"
     )
 
     # ── Data ─────────────────────────────────────────────────────────────
@@ -174,12 +175,11 @@ def train(args: argparse.Namespace) -> None:
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     logger.log(f"Model params (trainable): {n_params:,}")
 
-    # ── GradNorm controller ───────────────────────────────────────────────
+    # ── GradNorm controller (only active in Phase 2) ──────────────────────
     gn = GradNormController(task_names=["nll", "recon"], alpha=args.gn_alpha).to(device)
     gn_opt = torch.optim.Adam(gn.parameters(), lr=args.gn_lr)
-    logger.log(f"GradNormController: tasks={gn.task_names}  alpha={gn.alpha}")
 
-    # ── Optimizers ────────────────────────────────────────────────────────
+    # ── Optimizer ─────────────────────────────────────────────────────────
     w_cls = CLASS_WEIGHTS_DEFAULT.clone()
     w_cls[4] = args.pocket_weight
     CLASS_WEIGHTS = w_cls.to(device)
@@ -201,13 +201,19 @@ def train(args: argparse.Namespace) -> None:
     }
 
     for epoch in range(1, args.epochs + 1):
-        cur_T = int(rng_T.integers(T_MIN, T_MAX + 1))
-        p_tf  = max(args.tf_pmin, 1.0 - (epoch - 1) / args.tf_decay)
+        cur_T  = int(rng_T.integers(T_MIN, T_MAX + 1))
+        p_tf   = max(args.tf_pmin, 1.0 - (epoch - 1) / args.tf_decay)
+        phase1 = (epoch <= args.phase1_epochs)
+
+        if epoch == args.phase1_epochs + 1 and args.phase1_epochs > 0:
+            # Phase transition: reset GradNorm L0 with current loss scale
+            gn.L0_set[0] = False
+            logger.log(f"[Phase 2 START] NLL+GradNorm from epoch {epoch}")
 
         # ── Train ──────────────────────────────────────────────────────────
         model.train()
         tr_losses   = []
-        gn_diag_acc = {}   # accumulate GradNorm diagnostics over epoch
+        gn_diag_acc = {}
 
         for seq_s, seq_f, seq_t, seq_a in train_loader:
             seq_s_t = seq_s[:, :cur_T + 1].to(device)
@@ -217,40 +223,49 @@ def train(args: argparse.Namespace) -> None:
             s_hat, type_logit, _, pi_list, mu_list, b_list, z_bar_list = \
                 model(seq_s_t[:, 0], seq_s_t, seq_a_t, cur_T, p_tf=p_tf)
 
-            # Compute per-task losses as separate tensors for GradNorm
             T = cur_T
-            L_nll = sum(
-                laplace_nll_mixture(pi_list[h], mu_list[h], b_list[h], z_bar_list[h])
-                for h in range(T)
-            ) / T
+            B_T = type_logit.shape[0] * type_logit.shape[1]
+            L_type = _focal_cross_entropy(
+                type_logit.reshape(B_T, N_COLL_TYPES),
+                seq_t_t.reshape(B_T),
+                CLASS_WEIGHTS, args.focal_gamma, 0.0,
+            ) / math.log(N_COLL_TYPES)
 
             L_recon = (
                 F.mse_loss(s_hat[:, :, :7], seq_s_t[:, :, :7]) +
                 F.mse_loss(s_hat[:, :, 7:], seq_s_t[:, :, 7:])
             )
 
-            B_T   = type_logit.shape[0] * type_logit.shape[1]
-            L_type = _focal_cross_entropy(
-                type_logit.reshape(B_T, N_COLL_TYPES),
-                seq_t_t.reshape(B_T),
-                CLASS_WEIGHTS,
-                args.focal_gamma,
-                0.0,
-            ) / math.log(N_COLL_TYPES)
+            if phase1:
+                # ── Phase 1: L2 on mixture mean ───────────────────────────
+                L_pred = sum(
+                    F.mse_loss(
+                        (pi_list[h].unsqueeze(-1) * mu_list[h]).sum(1),
+                        z_bar_list[h],
+                    )
+                    for h in range(T)
+                ) / T
+                loss = L_pred + args.lam_recon * L_recon + L_type
+                gn_diag_acc["L_pred"] = gn_diag_acc.get("L_pred", 0.0) + L_pred.item()
 
-            # ── GradNorm update (encoder grad norms) ─────────────────────
-            enc_params = list(model.encoder.parameters())
-            gn_diag = gn.step(
-                {"nll": L_nll, "recon": L_recon},
-                enc_params,
-                gn_opt,
-            )
-            for k, v in gn_diag.items():
-                gn_diag_acc[k] = gn_diag_acc.get(k, 0.0) + v
+            else:
+                # ── Phase 2: NLL + GradNorm ───────────────────────────────
+                L_nll = sum(
+                    laplace_nll_mixture(pi_list[h], mu_list[h], b_list[h], z_bar_list[h])
+                    for h in range(T)
+                ) / T
 
-            # ── Main model backward ───────────────────────────────────────
-            w = gn.weights.detach()
-            loss = w[0] * L_nll + w[1] * args.lam_recon * L_recon + L_type
+                enc_params = list(model.encoder.parameters())
+                gn_diag = gn.step(
+                    {"nll": L_nll, "recon": L_recon},
+                    enc_params,
+                    gn_opt,
+                )
+                for k, v in gn_diag.items():
+                    gn_diag_acc[k] = gn_diag_acc.get(k, 0.0) + v
+
+                w    = gn.weights.detach()
+                loss = w[0] * L_nll + w[1] * args.lam_recon * L_recon + L_type
 
             opt.zero_grad()
             loss.backward()
@@ -295,8 +310,9 @@ def train(args: argparse.Namespace) -> None:
         d        = {k: np.mean([x[k] for x in val_details]) for k in val_details[0]}
         type_acc = type_correct / type_total if type_total > 0 else 0.0
 
-        # ── Rollout eval (every eval_every epochs) ─────────────────────────
-        do_eval = (epoch % args.eval_every == 0 or epoch == 1 or epoch == args.epochs)
+        # ── Rollout eval ───────────────────────────────────────────────────
+        do_eval = (epoch % args.eval_every == 0 or epoch == 1 or epoch == args.epochs
+                   or epoch == args.phase1_epochs)
         if do_eval:
             rerr = _eval_batched(model, balanced_val_eps, device, rollout_steps=60)
 
@@ -306,29 +322,30 @@ def train(args: argparse.Namespace) -> None:
 
         cp_keys = [k for k in ["0.5s", "1.0s", "2.0s", "3.0s"]
                    if not np.isnan(rerr.get(k, float("nan")))]
-        cp_str  = " | ".join(f"{k}={rerr[k]:.1f}cm" for k in cp_keys) \
-                  if do_eval else ""
+        cp_str = " | ".join(f"{k}={rerr[k]:.1f}cm" for k in cp_keys) if do_eval else ""
 
-        # GradNorm diagnostics (epoch average)
-        gn_avg = {k: v / n_batches for k, v in gn_diag_acc.items()}
-        gn_str = (
-            f"  w_nll={gn_avg.get('w_nll', float('nan')):.3f}"
-            f"  w_recon={gn_avg.get('w_recon', float('nan')):.3f}"
-            f"  G_nll={gn_avg.get('G_nll', float('nan')):.1f}"
-            f"  G_recon={gn_avg.get('G_recon', float('nan')):.3f}"
-            f"  ratio={gn_avg.get('G_nll', 1.0) / max(gn_avg.get('G_recon', 1e-8), 1e-8):.1f}x"
-        )
+        if phase1:
+            phase_str = f"[P1:L2]"
+            extra_str = f"  L_pred={gn_diag_acc.get('L_pred', 0.0) / n_batches:.4f}"
+        else:
+            phase_str = f"[P2:NLL+GN]"
+            gn_avg    = {k: v / n_batches for k, v in gn_diag_acc.items()}
+            extra_str = (
+                f"  L_nll={d['loss_nll']:.4f}"
+                f"  w_nll={gn_avg.get('w_nll', float('nan')):.3f}"
+                f"  w_recon={gn_avg.get('w_recon', float('nan')):.3f}"
+                f"  G_ratio={gn_avg.get('G_nll', 1.0) / max(gn_avg.get('G_recon', 1e-8), 1e-8):.1f}x"
+            )
 
         log_line = (
-            f"Epoch {epoch:3d}/{args.epochs}"
+            f"Epoch {epoch:3d}/{args.epochs}  {phase_str}"
             f"  [T={cur_T:2d}  ptf={p_tf:.2f}]"
             f"  tr={np.mean(tr_losses):.4f}  val={val_loss:.4f}"
-            f"  L_nll={d['loss_nll']:.4f}  L_recon={d['loss_recon']:.4f}"
-            f"  L_type={d['loss_type']:.4f}  type_acc={type_acc:.3f}"
-            f"  recall={coll_recall:.3f}  prec={coll_prec:.3f}"
-            f"  err={mean_err:.1f}cm"
+            f"{extra_str}"
+            f"  L_recon={d['loss_recon']:.4f}  L_type={d['loss_type']:.4f}"
+            f"  type_acc={type_acc:.3f}"
+            f"  recall={coll_recall:.3f}  err={mean_err:.1f}cm"
             f"  (bb={rerr['mean_err_has_bb']:.1f}/nbb={rerr['mean_err_no_bb']:.1f})"
-            f"{gn_str}"
         )
         if cp_str:
             log_line += f"  [{cp_str}]"
@@ -348,7 +365,7 @@ def train(args: argparse.Namespace) -> None:
                 "use_ema":        not args.no_ema,
                 "use_encoder_ln": not args.no_encoder_ln,
                 "full_bptt":      args.full_bptt,
-                "gn_weights":     gn.weights.detach().cpu().tolist(),
+                "phase":          "phase1" if phase1 else "phase2",
             }
             torch.save(ckpt, out_dir / "best.pt")
 
@@ -361,18 +378,14 @@ def train(args: argparse.Namespace) -> None:
     cfg = {
         "latent_dim":       LATENT_DIM,
         "n_components":     args.K,
-        "action_dim":       ACTION_DIM,
-        "ema_tau":          args.ema_tau,
         "no_ema":           args.no_ema,
         "no_encoder_ln":    args.no_encoder_ln,
         "full_bptt":        args.full_bptt,
+        "phase1_epochs":    args.phase1_epochs,
         "gn_alpha":         args.gn_alpha,
         "gn_lr":            args.gn_lr,
         "epochs":           args.epochs,
         "lr":               args.lr,
-        "batch_size":       args.batch_size,
-        "pocket_weight":    args.pocket_weight,
-        "focal_gamma":      args.focal_gamma,
         "lam_recon":        args.lam_recon,
         "tf_decay":         args.tf_decay,
         "tf_pmin":          args.tf_pmin,
@@ -385,30 +398,26 @@ def train(args: argparse.Namespace) -> None:
 
 def main() -> None:
     p = argparse.ArgumentParser()
-    p.add_argument("--data-dir",      default="world_model/data_fixeddt")
-    p.add_argument("--out-dir",       default="world_model/results/spr_gradnorm_v25")
-    p.add_argument("--epochs",        type=int,   default=500)
-    p.add_argument("--batch-size",    type=int,   default=512)
-    p.add_argument("--lr",            type=float, default=1e-4)
-    p.add_argument("--K",             type=int,   default=5,    help="MDN components")
-    p.add_argument("--ema-tau",       type=float, default=0.99)
-    p.add_argument("--no-ema",        action="store_true",
-                   help="Use sg(encoder(s_gt)) as NLL target instead of EMA encoder")
-    p.add_argument("--no-encoder-ln", action="store_true",
-                   help="StateEncoder + transition_ln (v18a structure, no EncoderLN)")
-    p.add_argument("--full-bptt",     action="store_true",
-                   help="Full BPTT: chain via mixture mean, no stop-grad")
-    p.add_argument("--gn-alpha",      type=float, default=1.5,
-                   help="GradNorm restoring force (1.5 = paper default)")
-    p.add_argument("--gn-lr",         type=float, default=1e-3,
-                   help="Learning rate for GradNorm weight optimizer")
-    p.add_argument("--lam-recon",     type=float, default=1.0,
-                   help="Static scale on L_recon after GradNorm weighting")
-    p.add_argument("--pocket-weight", type=float, default=20.0)
-    p.add_argument("--focal-gamma",   type=float, default=2.0)
-    p.add_argument("--tf-decay",      type=int,   default=200)
-    p.add_argument("--tf-pmin",       type=float, default=0.1)
-    p.add_argument("--eval-every",    type=int,   default=10)
+    p.add_argument("--data-dir",       default="world_model/data_fixeddt")
+    p.add_argument("--out-dir",        default="world_model/results/spr_gradnorm_v25")
+    p.add_argument("--epochs",         type=int,   default=500)
+    p.add_argument("--phase1-epochs",  type=int,   default=200,
+                   help="L2 warm-up epochs before switching to NLL+GradNorm")
+    p.add_argument("--batch-size",     type=int,   default=512)
+    p.add_argument("--lr",             type=float, default=1e-4)
+    p.add_argument("--K",              type=int,   default=5,   help="MDN components")
+    p.add_argument("--ema-tau",        type=float, default=0.99)
+    p.add_argument("--no-ema",         action="store_true")
+    p.add_argument("--no-encoder-ln",  action="store_true")
+    p.add_argument("--full-bptt",      action="store_true")
+    p.add_argument("--gn-alpha",       type=float, default=1.5)
+    p.add_argument("--gn-lr",          type=float, default=1e-3)
+    p.add_argument("--lam-recon",      type=float, default=1.0)
+    p.add_argument("--pocket-weight",  type=float, default=20.0)
+    p.add_argument("--focal-gamma",    type=float, default=2.0)
+    p.add_argument("--tf-decay",       type=int,   default=200)
+    p.add_argument("--tf-pmin",        type=float, default=0.1)
+    p.add_argument("--eval-every",     type=int,   default=10)
     args = p.parse_args()
     train(args)
 

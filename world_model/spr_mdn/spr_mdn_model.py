@@ -99,7 +99,7 @@ class MixtureHead(nn.Module):
         b_raw  = h[:, K + K * D :].view(B, K, D)    # (B, K, D)
 
         pi = F.softmax(log_pi, dim=-1)               # (B, K) — sums to 1
-        b  = F.softplus(b_raw) + 0.01               # (B, K, D) — strictly positive
+        b  = F.softplus(b_raw) + 0.1                # (B, K, D) — b_min=0.1 prevents gradient explosion
 
         return pi, mu, b
 
