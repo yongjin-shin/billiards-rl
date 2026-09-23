@@ -195,36 +195,54 @@ class SPRMDNModel(nn.Module):
 
     def __init__(
         self,
-        latent_dim:   int   = LATENT_DIM,
-        n_components: int   = N_COMPONENTS,
-        action_dim:   int   = ACTION_DIM,
-        ema_tau:      float = EMA_TAU,
-        asym_init:    bool  = False,
+        latent_dim:     int   = LATENT_DIM,
+        n_components:   int   = N_COMPONENTS,
+        action_dim:     int   = ACTION_DIM,
+        ema_tau:        float = EMA_TAU,
+        asym_init:      bool  = False,
+        use_ema:        bool  = True,
+        use_encoder_ln: bool  = True,
+        full_bptt:      bool  = False,
     ):
         super().__init__()
-        self.latent_dim   = latent_dim
-        self.n_components = n_components
-        self.action_dim   = action_dim
-        self.ema_tau      = ema_tau
+        self.latent_dim     = latent_dim
+        self.n_components   = n_components
+        self.action_dim     = action_dim
+        self.ema_tau        = ema_tau
+        self.use_ema        = use_ema
+        self.use_encoder_ln = use_encoder_ln
+        self.full_bptt      = full_bptt
 
-        # Trainable modules
-        self.encoder      = EncoderLN(latent_dim)
+        # Encoder: with or without built-in LayerNorm
+        self.encoder = EncoderLN(latent_dim) if use_encoder_ln else StateEncoder(latent_dim)
+        if not use_encoder_ln:
+            # Dedicated transition LN — same role as SPRK1Model.transition_ln
+            self.transition_ln = nn.LayerNorm(latent_dim)
+
         self.mixture_head = MixtureHead(latent_dim, n_components, action_dim, asym_init=asym_init)
         self.cue_head     = CueBallHead(latent_dim)
         self.tgt_head     = TgtBallHead(latent_dim)
         self.type_head    = TypeHead(latent_dim)
 
-        # EMA target encoder — same arch, excluded from optimizer
-        self.ema_encoder  = copy.deepcopy(self.encoder)
-        for p in self.ema_encoder.parameters():
-            p.requires_grad_(False)
+        if use_ema:
+            self.ema_encoder = copy.deepcopy(self.encoder)
+            for p in self.ema_encoder.parameters():
+                p.requires_grad_(False)
 
     @torch.no_grad()
     def update_ema(self) -> None:
+        if not self.use_ema:
+            return
         tau = self.ema_tau
         for p, p_ema in zip(self.encoder.parameters(),
                             self.ema_encoder.parameters()):
             p_ema.data.mul_(tau).add_(p.data, alpha=1.0 - tau)
+
+    def _apply_ln(self, z: torch.Tensor) -> torch.Tensor:
+        """Apply the appropriate LayerNorm (encoder.ln or transition_ln)."""
+        if self.use_encoder_ln:
+            return self.encoder.ln(z)  # type: ignore[union-attr]
+        return self.transition_ln(z)
 
     def _decode(self, z: torch.Tensor) -> torch.Tensor:
         """z: (B, D) → s_hat: (B, 14)"""
@@ -241,24 +259,23 @@ class SPRMDNModel(nn.Module):
         """
         Scheduled-sampling training rollout.
 
-        p_tf=1.0: 완전 teacher forcing (exposure bias 없음, 초반 안정)
-        p_tf=0.0: 완전 self-chaining (배포 환경과 동일, 후반 목표)
+        full_bptt=False (default): self-chain via Laplace sample (sg), LN in grad graph.
+        full_bptt=True: self-chain via mixture mean (differentiable), full gradient flow.
 
-        매 스텝 h≥1마다 Bernoulli(p_tf)로 결정:
-          c=1 → z_hat = sg(Enc_phi(s_{t+h}))  (real encoding)
-          c=0 → z_hat = encoder.ln(sg(sample)) (self-chain)
+        use_ema=False: z_bar target = sg(encoder(s_gt)) instead of EMA encoder.
+        use_encoder_ln=False: StateEncoder + transition_ln instead of EncoderLN.
 
         Returns: z_hat_list[T+1], pi_list[T], mu_list[T], b_list[T], z_bar_list[T]
         """
-        B      = s_0.shape[0]
-        device = s_0.device
+        B       = s_0.shape[0]
+        device  = s_0.device
         a_zeros = torch.zeros(B, self.action_dim, device=device)
 
         z_hat = self.encoder(s_0)    # (B, D) — h=0, real encoding
         z_hat_list = [z_hat]
         pi_list, mu_list, b_list, z_bar_list = [], [], [], []
 
-        # 시퀀스 단위로 한 번만 결정 — h마다 재굴리면 GT리셋 효과 생김
+        # Decide once per batch (per-step Bernoulli would reset GT every step)
         use_tf = (p_tf > 0.0 and torch.rand(1).item() < p_tf)
 
         for h in range(T):
@@ -266,28 +283,38 @@ class SPRMDNModel(nn.Module):
 
             pi, mu, b = self.mixture_head(z_hat, a_tilde)
 
+            # Target z_bar: EMA encoder or stop-grad of online encoder
             with torch.no_grad():
-                z_bar = self.ema_encoder(seq_s[:, h + 1])
+                if self.use_ema:
+                    z_bar = self.ema_encoder(seq_s[:, h + 1])
+                else:
+                    z_bar = self.encoder(seq_s[:, h + 1])
             z_bar_list.append(z_bar)
 
             pi_list.append(pi)
             mu_list.append(mu)
             b_list.append(b)
 
-            with torch.no_grad():
-                if use_tf:
-                    # Teacher forcing: real encoding, fully detached
-                    z_hat = self.encoder(seq_s[:, h + 1])
-                else:
-                    # Self-chaining: Laplace sample (detached)
-                    k      = torch.multinomial(pi.detach(), 1).squeeze(1)
-                    mu_k   = mu[torch.arange(B), k]
-                    b_k    = b[torch.arange(B), k]
-                    u      = (torch.rand_like(b_k) - 0.5).clamp(-0.4999, 0.4999)
-                    z_samp = mu_k - b_k * u.sign() * torch.log1p(-2.0 * u.abs())
-            if not use_tf:
-                # encoder.ln 밖에서 호출 — γ,β는 self-chain 경로에서도 gradient 받음
-                z_hat = self.encoder.ln(z_samp)
+            if self.full_bptt and not use_tf:
+                # Differentiable chain: mixture mean, no stop-grad
+                z_mean = (pi.unsqueeze(-1) * mu).sum(dim=1)   # (B, D)
+                z_hat  = self._apply_ln(z_mean)
+            else:
+                with torch.no_grad():
+                    if use_tf:
+                        z_hat = self.encoder(seq_s[:, h + 1])
+                        if not self.use_encoder_ln:
+                            z_hat = self.transition_ln(z_hat)
+                    else:
+                        # Laplace sample, stop-grad
+                        k      = torch.multinomial(pi.detach(), 1).squeeze(1)
+                        mu_k   = mu[torch.arange(B), k]
+                        b_k    = b[torch.arange(B), k]
+                        u      = (torch.rand_like(b_k) - 0.5).clamp(-0.4999, 0.4999)
+                        z_hat  = mu_k - b_k * u.sign() * torch.log1p(-2.0 * u.abs())
+                if not use_tf:
+                    # LN outside no_grad so γ,β receive gradient from chain
+                    z_hat = self._apply_ln(z_hat)
 
             z_hat_list.append(z_hat)
 
@@ -316,8 +343,7 @@ class SPRMDNModel(nn.Module):
             a_tilde = action if (h == 0 and action is not None) else a_zeros
             pi, mu, b = self.mixture_head(z_hat, a_tilde)
             type_logit_list.append(self.type_head(z_hat))
-            # Mixture mean, reuse encoder's LN for scale consistency
-            z_hat = self.encoder.ln((pi.unsqueeze(-1) * mu).sum(dim=1))   # (B, D)
+            z_hat = self._apply_ln((pi.unsqueeze(-1) * mu).sum(dim=1))   # (B, D)
             s_hat_list.append(self._decode(z_hat))
 
         s_hat      = torch.stack(s_hat_list, dim=1)       # (B, T+1, 14)
