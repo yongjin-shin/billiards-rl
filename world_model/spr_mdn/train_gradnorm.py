@@ -206,9 +206,15 @@ def train(args: argparse.Namespace) -> None:
         phase1 = (epoch <= args.phase1_epochs)
 
         if epoch == args.phase1_epochs + 1 and args.phase1_epochs > 0:
-            # Phase transition: reset GradNorm L0 with current loss scale
+            # Phase transition: activate EMA encoder (BYOL-style stable target for NLL)
+            import copy
+            model.ema_encoder = copy.deepcopy(model.encoder)
+            for p in model.ema_encoder.parameters():
+                p.requires_grad_(False)
+            model.use_ema = True
+            # Reset GradNorm L0 with current loss scale
             gn.L0_set[0] = False
-            logger.log(f"[Phase 2 START] NLL+GradNorm from epoch {epoch}")
+            logger.log(f"[Phase 2 START] EMA encoder activated + NLL+GradNorm from epoch {epoch}")
 
         # ── Train ──────────────────────────────────────────────────────────
         model.train()
