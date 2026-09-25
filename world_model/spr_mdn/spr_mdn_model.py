@@ -203,15 +203,17 @@ class SPRMDNModel(nn.Module):
         use_ema:        bool  = True,
         use_encoder_ln: bool  = True,
         full_bptt:      bool  = False,
+        use_action:     bool  = True,
     ):
         super().__init__()
         self.latent_dim     = latent_dim
         self.n_components   = n_components
-        self.action_dim     = action_dim
+        self.action_dim     = action_dim if use_action else 0
         self.ema_tau        = ema_tau
         self.use_ema        = use_ema
         self.use_encoder_ln = use_encoder_ln
         self.full_bptt      = full_bptt
+        self.use_action     = use_action
 
         # Encoder: with or without built-in LayerNorm
         self.encoder = EncoderLN(latent_dim) if use_encoder_ln else StateEncoder(latent_dim)
@@ -219,7 +221,7 @@ class SPRMDNModel(nn.Module):
             # Dedicated transition LN — same role as SPRK1Model.transition_ln
             self.transition_ln = nn.LayerNorm(latent_dim)
 
-        self.mixture_head = MixtureHead(latent_dim, n_components, action_dim, asym_init=asym_init)
+        self.mixture_head = MixtureHead(latent_dim, n_components, self.action_dim, asym_init=asym_init)
         self.cue_head     = CueBallHead(latent_dim)
         self.tgt_head     = TgtBallHead(latent_dim)
         self.type_head    = TypeHead(latent_dim)
@@ -279,7 +281,7 @@ class SPRMDNModel(nn.Module):
         use_tf = (p_tf > 0.0 and torch.rand(1).item() < p_tf)
 
         for h in range(T):
-            a_tilde = action if h == 0 else a_zeros
+            a_tilde = (action if h == 0 else a_zeros) if self.use_action else a_zeros
 
             pi, mu, b = self.mixture_head(z_hat, a_tilde)
 
@@ -340,7 +342,7 @@ class SPRMDNModel(nn.Module):
         type_logit_list = []
 
         for h in range(T):
-            a_tilde = action if (h == 0 and action is not None) else a_zeros
+            a_tilde = (action if (h == 0 and action is not None) else a_zeros) if self.use_action else a_zeros
             pi, mu, b = self.mixture_head(z_hat, a_tilde)
             type_logit_list.append(self.type_head(z_hat))
             z_hat = self._apply_ln((pi.unsqueeze(-1) * mu).sum(dim=1))   # (B, D)
@@ -395,6 +397,7 @@ def spr_rollout_loss(
     lam_pi:          float = 0.0,   # >0 → v8: simultaneous π training via EWTA winner
     ewta_kappa:      int   = 0,      # >0 → EWTA active; 0 → standard NLL
     ewta_phase2:     bool  = False,  # True → Phase 2 (v7): π-only NLL, sg(μ,b)
+    log_sigma:       "torch.Tensor | None" = None,  # (2,) Kendall [recon, type] — overrides lam_recon
 ) -> Tuple[torch.Tensor, dict]:
     """
     Four modes via (ewta_kappa, lam_pi, ewta_phase2):
@@ -461,7 +464,13 @@ def spr_rollout_loss(
         logits_flat, types_flat, class_weights, focal_gamma, label_smoothing
     ) / math.log(N_COLL_TYPES)
 
-    total = loss_nll + lam_recon * loss_recon + loss_type
+    if log_sigma is not None:
+        # Kendall uncertainty weighting (SSM-style): adaptive balance of recon vs type
+        total = (loss_nll +
+                 torch.exp(-log_sigma[0]) * loss_recon + log_sigma[0] +
+                 torch.exp(-log_sigma[1]) * loss_type  + log_sigma[1])
+    else:
+        total = loss_nll + lam_recon * loss_recon + loss_type
     if lam_pi > 0:
         total = total + lam_pi * loss_pi
 
