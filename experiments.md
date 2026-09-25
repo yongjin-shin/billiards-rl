@@ -1393,9 +1393,101 @@ L_total = exp(-σ_NLL)·L_NLL + σ_NLL + exp(-σ_recon)·L_recon + σ_recon + L_
 
 **Success criterion**: SPR-MDN mean err ≤ 30cm OR short-horizon (0.5s ≤ 20cm, 1.0s ≤ 28cm).
 
-#### Result
+---
 
-TBD
+## SPR-MDN Full Results
+
+### SSM v18_longrun (24.8cm)
+
+**문제**: SPRDataset 사용하더라도 400ep은 부족  
+**해결**: 2000ep + patience=10 early stop  
+**결과**: 24.8cm (0.5s=14.4/1.0s=22.6/2.0s=30.6/3.0s=37.2)
+
+---
+
+### SPR-MDN z-space 실험 (v17~v26)
+
+#### 문제 1: truncated-BPTT 버그 (v9~v16 전부 무효)
+predictor chain에 stop-grad → encoder gradient 완전 차단. v9~v16 실험 결과 신뢰 불가.  
+**해결**: full-BPTT 적용 (v17) → 기준선 33.9cm 확립
+
+#### 문제 2: SPR bootstrap 없음 (v17, 33.9cm)
+latent prediction loss 없이 reconstruction만 → z-space 구조화 미흡  
+**해결**: SPR L2 loss lam=0.01 추가 + SPRDataset 43k ep (v18a) → 28.3cm  
+**검증**: lam=0 ablation(v18b) = 35.4cm → bootstrap 기여 7.1cm 확인
+
+#### 문제 3: NLL이 L2보다 8cm 나쁨 (v19~v25)
+K=5 NLL=39.9cm, K=1 NLL=41.4cm vs K=1 L2=28.3cm  
+**원인**: `|∂L_nll/∂enc|` vs `|∂L_recon/∂enc|` = 3,363x 불균형 → NLL이 encoder 압도
+
+- **시도 1 — EncoderLN** (v20a): gradient 안정화 → 1.8cm 비용만, 해결 안 됨
+- **시도 2 — Kendall warmstart** (v21b/v22b): σ 사전 측정 후 warm-start → K=5 32.6cm, 여전히 L2에 못 미침
+- **시도 3 — GradNorm** (v25): w_nll → 0.002 (NLL 신호 소멸), 최선 43.2cm. 실패
+- **결론**: z-space NLL로 L2 기준선 돌파 불가. gradient 불균형이 구조적
+
+#### 문제 4: direct state-space 예측 열위 (mdn_state_ewta)
+가설: z 대신 직접 state 예측하면 encoder 오염 없지 않을까?  
+결과: K=1 L2=39.7cm, K=5 EWTA=49.0cm → z-space(28.3cm) 대비 8~18cm 나쁨  
+**결론**: encoder disentanglement + SPR bootstrap이 핵심. 방향 기각.
+
+| 버전 | 변경 | err (3s) |
+|------|------|----------|
+| v17 | full-BPTT fix | 33.9cm |
+| v18a | SPR lam=0.01 + SPRDataset | 28.3cm |
+| v18b | lam=0 ablation | 35.4cm |
+| v19 | K=5 NLL + EncoderLN | 39.9cm |
+| v20a | K=1 L2 + EncoderLN | 32.9cm |
+| v21b | K=1 NLL Kendall warmstart | 38.7cm |
+| v22b | K=5 NLL Kendall warmstart | 32.6cm |
+| v25 | GradNorm | 43.2cm |
+| **v26_p1** | SPRDataset scratch 1190ep | **25.1cm** |
+
+---
+
+### SMDN + Segment 실험 (v27~v33)
+
+#### 문제 5: per-step MDN collapse (v28_smdn, v28_anneal)
+K=5 MDN 전 컴포넌트가 동일 평균 수렴 (mu_spread=0.001, pi=0.201 완전 균등)  
+**원인**: EWTA + entropy_reg 조합이 분리 인센티브 소멸. 0.05s step이 너무 결정론적  
+**시도**: entropy annealing β=0.05→0.0 (v28_anneal) → collapse 여전  
+**결론**: per-step MDN 근본 부적합. 이벤트 경계에서만 MDN 필요
+
+#### 문제 6: segment chaining covariate shift (v33_segment)
+단일 세그먼트 예측 4.3cm이지만 연속 rollout 시 발산  
+**원인**: 학습 시 항상 GT 초기 상태로 encoder 초기화. 실제 rollout에서는 이전 예측 끝점이 다음 시작점 → 분포 불일치 누적  
+**시도 1**: SS noise injection (v33_ss, ep16 중단) — 미해결  
+**시도 2**: Bengio-style SS on transition input (v34_ss, 진행 중)  
+  - `ss_prob=1.0` (teacher forcing) → `0.0` (free running) over `ss_warmup` epochs  
+  - v33은 처음부터 free running (ss=0.0). v34는 teacher forcing에서 시작해 점진적으로 낮춤  
+  - ss_prob > 0이면 GT `seg_s[:, t+1]`을 transition 입력으로 사용, 0이면 `s_hat`  
+  - gradient: use_gt=True → GT(상수), use_gt=False → s_hat (BPTT 통과) → ss 감소할수록 BPTT chain 자연히 길어짐
+
+| 버전 | 변경 | err |
+|------|------|-----|
+| v27_p2 | 2-phase MDN | 24.9cm |
+| v28_smdn | SMDN K=5 DT=0.05 (구 metric†) | 22.7cm |
+| v30_obs_b | obs-space | 23.8cm |
+| v31_bounce | bounce event 기반 | 34.2cm ↑ (악화) |
+| **v33_segment** | segment 단위 (충돌~충돌 구간) | **4.3cm** (단일 세그먼트, chaining 미검증) |
+| v34_ss | Bengio SS (ss=1.0→0.0) on transition input | TBD |
+
+† 구 metric: len≥T_MAX+1 에피소드만 포함, 고정 T_MAX 스텝 평균. 아래 공정 비교와 수치 직접 비교 불가.
+
+#### v28 DT 공정 비교 (2026-09-26)
+
+**metric 수정**: `_eval_err`를 전수 에피소드 포함 + 에피소드별 실제 길이 정규화로 변경.
+- 변경 전: `len >= T_MAX+1` 필터, 고정 T_MAX 스텝 평균
+- 변경 후: `len >= 2` (사실상 전수), `T = min(len-1, T_MAX)` per-episode 평균
+- 두 DT 모두 동일 metric 적용 → 공정 비교 가능
+
+| 버전 | DT | epoch | mean_err | bb | nbb |
+|------|-----|-------|----------|----|-----|
+| v28_dt05_3s | 0.05s | ~1750 | **16.3cm** | ~28cm | ~5.6cm |
+| v28_dt01_3s | 0.01s | ~1350 | **15.4cm** | ~32cm | ~5.4cm |
+
+- DT=0.01이 0.9cm 앞섬. 물리 해상도 우위 (충돌 이벤트 5배 세밀) + per-step 예측 변화량 작음
+- 두 모델 모두 학습 종료 시 spread=0.000 (MDN collapse) — K=5 컴포넌트가 동일 평균으로 수렴
+- bb 오차가 nbb 대비 5~6배 — 공 충돌 케이스가 여전히 어려움
 
 ---
 

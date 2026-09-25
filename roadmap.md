@@ -9,17 +9,20 @@ Experiment plans and next directions. For completed experiment results, see [exp
 ```
 [x] Exp-13   Phase 0: proximity reward failed + steps scaling confirmed (1M:50% / 2M:56% / 5M:65.8%)
 [x] Exp-14   gradient_steps=4, 5M → 68.6% (+2.8pp, 2x time) — flat policy ceiling confirmed
-[x] Exp-15   Trajectory VAE exploration — physics latent structure identified, M decoder architecture finalized
-             (VAE itself discarded in final architecture; purpose was decoder architecture and hyperparameter search)
+[x] Exp-15   Trajectory VAE exploration — physics latent structure identified, decoder architecture finalized
 
 [~] Exp-16   World Model Critic — Q(s,a) = q(M(s,a))
-             └─ [x] SSM v16 no-curriculum: err=30.5cm, recall=0.549 (epoch 530)
-             └─ [x] SSM v17 focal fine-tune: pocket recall 0.000→0.250 (episode-level)
-             └─ [x] SSM v18 pure latent (no ar-state): final (epoch 400, err=31.6cm, pocket recall=0.312)
-             └─ [x] SSM v18 scratch (random init): final (epoch 400, err=32.7cm, recall=0.512 — pretraining marginal)
-             └─ [x] GNN 2-ball baseline: final (epoch 400, err=32.4cm, recall=0.560 — beats scratch, -1cm vs no-AR)
-             └─ [~] SPR-MDN (v18 base): MDN K=5 + self-chaining + EMA encoder — idea validation in progress
-             └─ [ ] WM-augmented Q-target integration
+             └─ [x] SSM v10~v18: full-BPTT 버그 수정, collision aux, ar_state 제거 → 31.6cm
+             └─ [x] SSM v18_longrun: SPRDataset 43k + 2000ep → 24.8cm
+             └─ [x] GNN 2-ball: set-based, message passing → 32.4cm
+             └─ [x] SPR-MDN z-space (v17~v26): NLL gradient 불균형 3363x 확인 → L2(28.3cm) 돌파 불가
+             └─ [x] SPR-MDN v26_p1: SPRDataset scratch 1190ep → 25.1cm (현재 최고)
+             └─ [x] SMDN per-step (v28): MDN collapse 확인 → per-step MDN 근본 부적합
+             └─ [x] v28 DT 공정 비교: DT=0.05→16.3cm / DT=0.01→15.4cm (공정 metric, 전수 ep 정규화)
+             └─ [x] v33_segment: segment 단위 4.3cm — chaining covariate shift 미해결
+             └─ [ ] v33 chaining 성능 검증
+             └─ [ ] v34 event-boundary MDN
+             └─ [ ] WM → RL 통합
 [ ] Exp-17   Phase 1 HRL — System 2 (ball selection discrete 3) + System 1 (Phase 1 Exp-10 freeze)
 
 [ ] cushion / bank shots
@@ -213,18 +216,31 @@ Rationale:
 
 ---
 
+### 현재 상태 (2026-09-26)
+
+**최고 성능**: v28_dt01_3s 15.4cm (SMDN K=5, DT=0.01, 공정 metric — 전수 에피소드 길이 정규화)  
+**모든 training 프로세스 종료됨**
+
+### 확정된 결론 요약
+
+| 결론 | 내용 |
+|------|------|
+| full-BPTT 필수 | stop-grad on predictor chain이 encoder gradient 차단 (v9~v16 전부 무효) |
+| SPR bootstrap 기여 7.1cm | lam=0.01 vs lam=0 ablation 확인 |
+| NLL z-space 한계 확정 | gradient 불균형 3363x, GradNorm/Kendall 모두 실패 |
+| direct state 열위 | z-space 대비 8~18cm 나쁨 |
+| per-step MDN collapse | 이벤트 경계가 아닌 per-step은 결정론적 → MDN 분기 인센티브 없음 |
+| DT=0.01 > DT=0.05 | 15.4cm vs 16.3cm — 물리 해상도 우위 확인 |
+| v33 segment 4.3cm | 단일 세그먼트만, chaining covariate shift 미해결 |
+
 ### Plan (in priority order)
 
 | Step | Content | Status |
 |------|---------|--------|
-| **① pocket prediction fix** | v17 focal+weight=20 → recall 0.250; v18 no-ar → 0.234 | [x] Done (accepted as-is) |
-| **① v18 pure latent** | Remove ar_state → self-contained z representation | [x] Done (ep.400, err=31.6cm, recall=0.312) |
-| **① v18 scratch** | Verify pretraining is not essential | [x] Done (ep.400, err=32.7cm — marginal diff) |
-| **② GNN 2-ball baseline** | GNN architecture (set-based, n_balls runtime) — shape verified | [x] Done (ep.400, err=32.4cm, recall=0.560) |
-| **③ SPR-MDN (v18 base)** | MDN K=5 + self-chaining + EMA encoder + L_recon on v18 no-AR; idea validation before GNN | [ ] In progress |
-| **④ 3-ball data + extension** | Generate 3-ball data; extend GNN to N=3 | [ ] Pending |
-| **⑤ Q-target augmentation** | WM(s_1, T=60) → pocket probability → Q-target label | [ ] Pending |
-| ⑥ Reward shaping | WM dense reward → SAC | [ ] Pending |
+| **① v33 chaining 검증** | 연속 세그먼트 rollout 성능 측정 (4.3cm → rollout 몇 cm?) | [ ] Next |
+| **② v34 event-boundary MDN** | 충돌 순간에만 K=5 MDN, 구간 내는 결정론적 → collapse 자연 해결 | [ ] Planned |
+| **③ WM → RL 통합** | v28_dt01_3s best.pt(15.4cm) 기반 SAC critic 보강 | [ ] Pending |
+| **④ 3-ball data + GNN extension** | Generate 3-ball data; extend GNN to N=3 | [ ] Pending |
 
 ### ③ Q-target Augmentation (WM-augmented critic)
 
