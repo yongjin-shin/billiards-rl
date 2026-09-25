@@ -36,7 +36,8 @@ from log_utils import Logger
 
 T_MAX = 60
 T_MIN = 10
-CLASS_WEIGHTS_DEFAULT = torch.tensor([1.0, 4.1, 4.1, 4.1, 4.1])
+# 0=no_coll, 1=bb, 2=lin, 3=circ, 4=pocket, 5=slide_roll, 6=roll_stop
+CLASS_WEIGHTS_DEFAULT = torch.tensor([1.0, 4.1, 2.0, 4.1, 20.0, 2.0, 4.1])
 
 
 def _eval_batched(model: SSMWorldModel, episodes: list, device: str,
@@ -139,18 +140,22 @@ def train(args):
                            MAX_EPOCH_ITEMS)
     val_ds   = EpisodeSubset(val_eps, rollout_steps=T_MAX, augment=False)
     logger.log(f"  Train cap: {MAX_EPOCH_ITEMS:,} items/epoch → {MAX_EPOCH_ITEMS // args.batch_size} batches")
+    nw = min(args.num_workers, 4)
     train_loader = DataLoader(train_ds, batch_size=args.batch_size,
-                              shuffle=True,  num_workers=0)
+                              shuffle=True,  num_workers=nw,
+                              persistent_workers=(nw > 0))
     val_loader   = DataLoader(val_ds,   batch_size=args.batch_size,
-                              shuffle=False, num_workers=0)
+                              shuffle=False, num_workers=nw,
+                              persistent_workers=(nw > 0))
 
     # ── 모델 — use_ar_state=False ────────────────────────────────────────────
     model = SSMWorldModel(args.latent_dim, use_ar_state=False).to(device)
     if args.ckpt:
         raw   = torch.load(args.ckpt, map_location=device, weights_only=False)
         saved = raw.get("state", raw)
+        # strip torch.compile prefix if present
+        saved = {k.removeprefix("_orig_mod."): v for k, v in saved.items()}
         cur   = model.state_dict()
-        # transition 가중치는 shape 불일치로 자동 skip
         filtered = {k: v for k, v in saved.items()
                     if k in cur and v.shape == cur[k].shape}
         skipped  = [k for k in saved if k not in filtered]
@@ -158,6 +163,15 @@ def train(args):
         model.load_state_dict(cur)
         logger.log(f"Fine-tuning from: {args.ckpt}")
         logger.log(f"  loaded={len(filtered)} skipped={len(skipped)} ({skipped})")
+    if args.compile:
+        if device == "mps":
+            logger.log("torch.compile: skipped (MPS backend not supported)")
+        else:
+            try:
+                model = torch.compile(model)
+                logger.log("torch.compile: enabled")
+            except Exception as e:
+                logger.log(f"torch.compile: skipped ({e})")
     logger.log(f"Parameters: {sum(p.numel() for p in model.parameters()):,}")
 
     w = CLASS_WEIGHTS_DEFAULT.clone()
@@ -172,6 +186,7 @@ def train(args):
 
     rng_T         = np.random.default_rng(42)
     best_mean_err = float("inf")
+    stall_count   = 0
     rerr          = {"mean_err": float("nan"), "mean_err_has_bb": float("nan"),
                      "mean_err_no_bb": float("nan"), "coll_recall": 0.0,
                      "coll_precision": 0.0, "0.5s": float("nan"),
@@ -266,18 +281,29 @@ def train(args):
             log_line += f"  [{cp_str}]"
         logger.log(log_line)
 
-        if (epoch % 10 == 0 or epoch == 1 or epoch == args.epochs) and mean_err < best_mean_err:
-            best_mean_err = mean_err
-            torch.save({
-                "state":         model.state_dict(),
-                "log_sigma":     log_sigma.detach().cpu(),
-                "epoch":         epoch,
-                "mean_err":      mean_err,
-                "val_loss":      val_loss,
-                "latent_dim":    args.latent_dim,
-                "use_ar_state":  False,
-                "rollout_steps": T_MAX,
-            }, out_dir / "best.pt")
+        if epoch % 10 == 0 or epoch == 1:
+            if mean_err < best_mean_err - 1e-4:
+                best_mean_err = mean_err
+                stall_count   = 0
+                torch.save({
+                    "state":         model.state_dict(),
+                    "log_sigma":     log_sigma.detach().cpu(),
+                    "epoch":         epoch,
+                    "mean_err":      mean_err,
+                    "val_loss":      val_loss,
+                    "latent_dim":    args.latent_dim,
+                    "use_ar_state":  False,
+                    "rollout_steps": T_MAX,
+                }, out_dir / "best.pt")
+            else:
+                stall_count += 1
+                logger.log(f"  [stall {stall_count}/{args.patience}]")
+            if stall_count >= args.patience:
+                logger.log(
+                    f"\nEarly stop: {args.patience} consecutive evals without improvement."
+                    f"  best_err={best_mean_err:.1f}cm"
+                )
+                break
 
     torch.save({"state": model.state_dict(), "epoch": args.epochs,
                 "latent_dim": args.latent_dim, "use_ar_state": False},
@@ -303,17 +329,22 @@ def train(args):
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--data-dir",      default="world_model/data_fixeddt")
+    p.add_argument("--data-dir",      default="world_model/data_dt01")
     p.add_argument("--out-dir",       default="world_model/results/ssm_v18_no_ar")
     p.add_argument("--latent-dim",    type=int,   default=LATENT_DIM)
-    p.add_argument("--epochs",        type=int,   default=400)
+    p.add_argument("--epochs",        type=int,   default=2000)
+    p.add_argument("--patience",      type=int,   default=10)
     p.add_argument("--batch-size",    type=int,   default=512)
-    p.add_argument("--ckpt",          default="world_model/results/ssm_v17_pocket/best.pt")
+    p.add_argument("--ckpt",          default=None)
     p.add_argument("--lr",            type=float, default=1e-4)
     p.add_argument("--pocket-weight", type=float, default=20.0)
     p.add_argument("--focal-gamma",     type=float, default=2.0)
     p.add_argument("--label-smoothing", type=float, default=0.0,
                    help="label smoothing epsilon (0=hard labels)")
+    p.add_argument("--num-workers",   type=int,   default=4,
+                   help="DataLoader num_workers (0=single process)")
+    p.add_argument("--compile",       action="store_true",
+                   help="torch.compile the model for faster training")
     args = p.parse_args()
     train(args)
 

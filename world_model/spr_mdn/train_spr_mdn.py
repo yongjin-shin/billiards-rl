@@ -206,6 +206,7 @@ def train(args):
 
     rng_T         = np.random.default_rng(42)
     best_mean_err = float("inf")
+    stall_count   = 0
     rerr = {
         "mean_err": float("nan"), "mean_err_has_bb": float("nan"),
         "mean_err_no_bb": float("nan"), "coll_recall": 0.0,
@@ -400,22 +401,32 @@ def train(args):
         log_line += z0_norm_str
         logger.log(log_line)
 
-        if (epoch % 10 == 0 or epoch == 1 or epoch == args.epochs) \
-                and mean_err < best_mean_err:
-            best_mean_err = mean_err
-            ckpt = {
-                "state":      model.state_dict(),
-                "epoch":      epoch,
-                "mean_err":   mean_err,
-                "val_loss":   val_loss,
-                "latent_dim": LATENT_DIM,
-                "action_dim": ACTION_DIM,
-                "ema_tau":    args.ema_tau,
-                "k1_mode":    k1_mode,
-            }
-            if not k1_mode:
-                ckpt["n_components"] = args.n_components
-            torch.save(ckpt, out_dir / "best.pt")
+        if epoch % 10 == 0 or epoch == 1:
+            if mean_err < best_mean_err - 1e-4:
+                best_mean_err = mean_err
+                stall_count   = 0
+                ckpt = {
+                    "state":      model.state_dict(),
+                    "epoch":      epoch,
+                    "mean_err":   mean_err,
+                    "val_loss":   val_loss,
+                    "latent_dim": LATENT_DIM,
+                    "action_dim": ACTION_DIM,
+                    "ema_tau":    args.ema_tau,
+                    "k1_mode":    k1_mode,
+                }
+                if not k1_mode:
+                    ckpt["n_components"] = args.n_components
+                torch.save(ckpt, out_dir / "best.pt")
+            else:
+                stall_count += 1
+                logger.log(f"  [stall {stall_count}/{args.patience}]")
+            if stall_count >= args.patience:
+                logger.log(
+                    f"\nEarly stop: {args.patience} consecutive evals without improvement."
+                    f"  best_err={best_mean_err:.1f}cm"
+                )
+                break
 
     torch.save({"state": model.state_dict(), "epoch": args.epochs,
                 "latent_dim": LATENT_DIM, "n_components": args.n_components,
@@ -454,7 +465,8 @@ def main():
     p = argparse.ArgumentParser()
     p.add_argument("--data-dir",        default="world_model/data_fixeddt")
     p.add_argument("--out-dir",         default="world_model/results/spr_mdn_v4")
-    p.add_argument("--epochs",          type=int,   default=400)
+    p.add_argument("--epochs",          type=int,   default=2000)
+    p.add_argument("--patience",        type=int,   default=10)
     p.add_argument("--batch-size",      type=int,   default=512)
     p.add_argument("--lr",              type=float, default=1e-4)
     p.add_argument("--n-components",    type=int,   default=N_COMPONENTS)
