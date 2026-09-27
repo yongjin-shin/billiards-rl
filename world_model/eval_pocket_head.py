@@ -175,11 +175,15 @@ def collect_pocket_preds_all_touches(
                         h, ev.ball_i, node_i, ev.normal.to(device),
                     )
 
-                touches = [(ev.ball_i, ev.event_type == EVENT_POCKET)]
+                gt_i = shot.gt_deltas_i[k]
+                touches = [(ev.ball_i, ev.event_type == EVENT_POCKET,
+                            node_i[0:2].numpy(), (node_i[2:4] + gt_i[0:2]).numpy())]
                 if ev.ball_j is not None:
-                    touches.append((ev.ball_j, False))
+                    gt_j = shot.gt_deltas_j[k]
+                    touches.append((ev.ball_j, False,
+                                     node_j[0:2].numpy(), (node_j[2:4] + gt_j[0:2]).numpy()))
 
-                for b, is_pocket_ev in touches:
+                for b, is_pocket_ev, pos, post_vel in touches:
                     touch_n[b] = touch_n.get(b, 0) + 1
                     if is_pocket_ev:
                         continue  # tautological — the pocket event IS the label, skip
@@ -199,6 +203,7 @@ def collect_pocket_preds_all_touches(
                         "is_last_real_touch": is_last_real,
                         "label": int(will_pocket),
                         "prob": p,
+                        "baseline": geometric_baseline_score(pos, post_vel),
                     })
 
     return records
@@ -226,6 +231,67 @@ def report_by_touch_index(records: list[dict]) -> None:
     print()
     print(f"Last real touch before shot ends (excl. pocket event itself, N={len(last_real)}):")
     print(f"  pos_rate={labels.mean():.3f}  AUC={auc_score(probs, labels):.3f}")
+
+
+def report_physics_vs_shortcut(records: list[dict]) -> None:
+    """
+    Does the model's edge over geometry come from real physics reasoning,
+    or would "moderate training" alone get you this?
+
+    Split first-touch samples by `is_last_real_touch`: "easy" = touch 1 IS
+    the last real touch (the ball's fate — pocket or not — is decided with
+    no intervening bounce), "hard" = at least one more real touch (cushion
+    or ball collision) happens before the fate is settled. A straight-line
+    ray from touch 1 is structurally blind to any bounce still to come, so
+    it can only "accidentally" work on the hard group. If the model's edge
+    over the baseline concentrates in the hard group, that's evidence of
+    real physics learning, not a shortcut available to geometry too.
+
+    (Naively splitting by `total_touches == 1` doesn't work here: any ball
+    that gets pocketed necessarily has the pocket event itself as one more
+    "touch", so that split ends up ~100% negative-label by construction —
+    `is_last_real_touch` already accounts for that by excluding the pocket
+    event from the touch count.)
+    """
+    first_touch = [r for r in records if r["touch_idx"] == 1]
+    easy = [r for r in first_touch if r["is_last_real_touch"]]      # no bounce before fate
+    hard = [r for r in first_touch if not r["is_last_real_touch"]] # bounce(s) before fate
+
+    print(f"{'group':>28} {'n':>6} {'pos_rate':>9} {'model AUC':>10} {'baseline AUC':>13} {'gap':>7}")
+    for name, rs in [("easy (no bounce before fate)", easy), ("hard (bounce before fate)", hard)]:
+        labels = np.array([r["label"]    for r in rs])
+        probs  = np.array([r["prob"]     for r in rs])
+        base   = np.array([r["baseline"] for r in rs])
+        m_auc = auc_score(probs, labels)
+        b_auc = auc_score(base,  labels)
+        print(f"{name:>28} {len(rs):>6} {labels.mean():>9.3f} {m_auc:>10.3f} {b_auc:>13.3f} {m_auc - b_auc:>+7.3f}")
+
+
+def pairwise_rescue(records: list[dict]) -> None:
+    """
+    Of the (pos, neg) pairs the geometric baseline ranks WRONG, how many
+    does the model rank RIGHT? If ~50% (chance), the model's overall AUC
+    edge isn't coming from resolving genuinely hard (physics-requiring)
+    cases — it's riding on the same easy cases the baseline already gets,
+    plus roughly-random noise elsewhere. Meaningfully above 50% means the
+    model adds real information specifically where pure geometry fails.
+    """
+    first_touch = [r for r in records if r["touch_idx"] == 1]
+    labels = np.array([r["label"]    for r in first_touch])
+    probs  = np.array([r["prob"]     for r in first_touch])
+    base   = np.array([r["baseline"] for r in first_touch])
+
+    pos_probs, neg_probs = probs[labels == 1], probs[labels == 0]
+    pos_base,  neg_base  = base[labels == 1],  base[labels == 0]
+
+    baseline_wrong = neg_base[None, :] > pos_base[:, None]     # (P, N) bool
+    model_right    = pos_probs[:, None] > neg_probs[None, :]   # (P, N) bool
+
+    n_wrong = int(baseline_wrong.sum())
+    n_rescued = int((baseline_wrong & model_right).sum())
+    print(f"Pairs baseline ranks WRONG: {n_wrong} / {baseline_wrong.size} ({n_wrong / baseline_wrong.size * 100:.1f}%)")
+    print(f"Of those, model ranks RIGHT (rescued): {n_rescued} ({n_rescued / n_wrong * 100:.1f}%)  "
+          f"[50% = model adds nothing on hard pairs, >50% = model adds real info]")
 
 
 def auc_score(scores: np.ndarray, labels: np.ndarray) -> float:
@@ -323,6 +389,17 @@ def main() -> None:
     print(" this checks whether accuracy holds up across the whole sequence, or was cherry-picked)")
     records = collect_pocket_preds_all_touches(model, val_shots, device)
     report_by_touch_index(records)
+
+    print()
+    print("=== Physics vs. shortcut: does the model's edge concentrate where geometry fails? ===")
+    print("(easy = this ball's fate is sealed with no further events after this touch;")
+    print(" hard = more bounces/collisions happen before its fate is sealed — a straight-line")
+    print(" ray literally cannot see those, so any edge here can't be a geometry shortcut)")
+    report_physics_vs_shortcut(records)
+
+    print()
+    print("=== Pairwise rescue: of the pairs geometry gets WRONG, does the model fix them? ===")
+    pairwise_rescue(records)
 
 
 if __name__ == "__main__":
