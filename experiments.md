@@ -1640,3 +1640,82 @@ Ball final position after cushion reflection ≠ action outcome → post-shot di
 | 5M | 65.8% | 3.2pp/1M |
 
 steps ∝ performance. Diminishing returns beginning. Due to the wide coverage space of current placement (ball y range 3×), it is a sample complexity problem that simply requires more steps.
+
+---
+
+## R-SSM World Model (Event-driven GNN+SSM)
+
+**아키텍처**: 충돌 이벤트 단위로 동작하는 Relational SSM. 이벤트마다 GNN으로 공 간 상호작용 모델링, persistent latent h per ball.
+**입력**: pre-collision rvw(pos, vel, avel) → **출력**: Δvel+Δavel (5D delta)
+**파일**: `world_model/rssm_model.py`, `world_model/train_rssm.py`, `world_model/rssm_dataset.py`
+
+### v1 (rssm_v1)
+
+| 항목 | 값 |
+|------|-----|
+| 데이터 | on-the-fly random 시뮬, 2000 train / 400 val |
+| 데이터 분포 | random 정책 → pocket ~0% |
+| weight_decay | 1e-4 |
+| Loss | raw MSE(vel) + 0.3 × CE(type), Kendall on |
+| val RMSE | **12.29** |
+| type_acc | 0.72 |
+| 문제점 | 데이터 부족, pocket 전무, train/val gap 1.86× |
+
+### v2 (rssm_v2)
+
+| 항목 | 값 |
+|------|-----|
+| 데이터 | on-the-fly random 시뮬, 2000 train / 400 val |
+| 데이터 분포 | random 정책 → pocket ~0% |
+| weight_decay | 3e-4 |
+| Loss | raw MSE(vel) + Kendall(vel+type) |
+| val RMSE | **4.82** |
+| type_acc | 0.76 |
+| 문제점 | Kendall kw[type] → 5.07 폭발 (type loss 사실상 0), pocket 학습 없음 |
+
+### v3 (rssm_v3) — epoch 10에서 중단 ❌
+
+| 항목 | 값 |
+|------|-----|
+| 데이터 | SAC policy pkl, 40K train / 5K val (`world_model/data_rssm/`) |
+| 데이터 분포 | pocket **13.1%**, ball_ball **11.8%** (SAC 정책, pocketed 65.7%) |
+| Loss 개선 | **scale-weighted MSE**: 1/std² per component (Δvel vs Δω 9.2× 스케일 차이 보정) |
+| | **type-freq-weighted MSE**: inv_freq 가중치로 rare type(tgt_circ 1.7%) 보정 |
+| | **Focal CE** (γ=2.0): type 분류 rare class 강조 |
+| | **Kendall + log_var clamp(-3,2)**: type weight 소멸 방지 |
+| SS fix | pred 위치 GT snap 버그 수정 (위치 누적 방식) |
+| 데이터 정밀도 | pooltool 이벤트 타임스탬프 기반 dt_to_next (float64, ~1e-15s) |
+| val RMSE | 13.05 (epoch 10, 중단 시점) |
+| type_acc | 0.822 |
+| **버그 발견** | `compute_vel_type_weights`/`compute_type_class_weights`: count=0인 타입(stick_ball)을 `clamp(min=1)`로 처리 → 이 값이 `.mean()`/`.sum()`을 지배해서 실사용 타입 가중치가 전부 0에 가깝게 붕괴 (vel_mean 0.017, 정상값의 1/57). `kw_vel`이 clamp 상한(exp(2)=7.4) 근처인 20.14까지 치솟음 → epoch 10에서 중단. |
+
+### v4 (rssm_v4) — 진행 중
+
+| 항목 | 값 |
+|------|-----|
+| 데이터 | v3와 동일 (SAC policy pkl, 40K/5K) |
+| 버그 수정 | weight 함수 2개: count=0 타입 제외하고 mean/sum 계산, `clamp(max=5.0)` 상한 추가 |
+| | 수정 후 vel_mean 0.017→**0.35**, type_mean 0.97, pocket_mean 0.69 — Kendall 정상 스케일 |
+| event_detector 수정 | `COLL_TYPE["stick_ball"]`: 4→**-1** (transition 취급, rollout 중 잘못된 type=4 유입 방지) |
+| 신규 기능 | **per-ball pocket prediction head** (`pocket_mlp`, `predict_pocket(h)`): 이벤트마다 h[i]→P(공 i가 이번 샷에서 포켓될지) sigmoid, BCE loss, `lam_pocket=0.5` |
+| | `will_pocket` 라벨 추가 (ShotData, pickle 호환 `__setstate__`) |
+| | eval에 `pock_acc` 리포트 추가 |
+| val RMSE | TBD |
+
+### 물리 엔진 버그: ball_motion.py 마찰계수 (commit 4bbf568)
+
+**배경**: long shot일수록 RSSM 예측 오차가 커지는 원인을 추적하던 중 발견.
+
+| 항목 | 내용 |
+|------|-----|
+| 버그 | `world_model/ball_motion.py`의 `u_r`(rolling), `u_sp`(spin) 마찰계수가 pooltool 실제 기본값보다 과도하게 큼 |
+| 영향 | free-flight 구간이 길어질수록(=long shot) 오차가 누적 — RSSM data 생성/rollout 전반에 영향 |
+| 수정 | pooltool `BallParams.default()` 실측값으로 정정 |
+| 검증 1 | `compare_pure_physics.py` — data_rssm 실 샷 전체에 대해 pooltool vs pure_physics 수치 비교 |
+| 검증 2 (신규) | `viz_pure_physics.py` — 동일 GT 충돌-후 상태에서 pooltool·pure_physics 양쪽으로 자유주행시켜 궤적을 겹쳐 그린 worst/best 5개 mp4 |
+| 결과 | 300샷 전체 min=max=mean=median **0.0000cm** — long shot 포함 전 구간에서 두 엔진 완전 일치 |
+
+**`pure_physics.py` drop-in 대체 가능성**: `evolve_ball_motion(state, rvw, R, m, u_s, u_sp, u_r, g, t) -> (rvw, state)` signature 동일, state 상수(`STATIONARY=0, SPINNING=1, SLIDING=2, ROLLING=3, POCKETED=4`) 동일 → free-motion evolution 대체 가능함을 확인. 단, 아직 교체는 하지 않음 (이득 미검증, 리스크만 추가) — 상세는 [roadmap.md](roadmap.md) 참고.
+
+- 안전 후보 3곳: `rssm_rollout.py::advance_balls`, `train_rssm.py`의 `compute_shot_ss_loss._advance()`, `viz_rssm.py::_evolve()`
+- 제외(별도 검증 필요): `event_detector.py::get_next_event()` 등 충돌시각 solver — 이번 검증 범위 밖

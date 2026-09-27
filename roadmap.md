@@ -252,6 +252,14 @@ q_target = r + gamma * V(s') + lambda * pocket_prob
 
 Difference from Dyna: WM provides Q-labels directly rather than generating (s,a,r,s') → **WM-augmented critic**
 
+### R-SSM 물리 엔진: pure_physics.py 대체 검토 (보류)
+
+마찰계수 버그 수정(`ball_motion.py`, [experiments.md](experiments.md) 참고) 검증 과정에서 pooltool-free 재구현체 `pure_physics.py`가 free-motion evolution 용도로 `ph.evolve_ball_motion`의 drop-in 대체가 가능함을 확인 (300샷 0.0000cm 일치).
+
+- 안전 교체 후보: `rssm_rollout.py::advance_balls`, `train_rssm.py::compute_shot_ss_loss._advance()`, `viz_rssm.py::_evolve()`
+- 제외(미검증): `event_detector.py`의 충돌시각 solver (`get_next_event()`)
+- **[ ] Pending** — 교체 이득(속도) 미검증, pooltool 의존성 제거가 시급하지 않아 보류. 필요 시 재검토.
+
 ---
 
 ## Next: Exp-17 · Phase 0 HRL
