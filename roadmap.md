@@ -252,6 +252,21 @@ q_target = r + gamma * V(s') + lambda * pocket_prob
 
 Difference from Dyna: WM provides Q-labels directly rather than generating (s,a,r,s') → **WM-augmented critic**
 
+### R-SSM QHead: 배선 완료, 학습 신호 없음
+
+Q-value 추출 목표 대비 현재 위치 점검 (2026-09-27):
+
+- `rssm_model.py:220 aggregate_q(h)` — attention pool(`q_proj`) → `q_head` → scalar Q. `project_rssm_architecture.md` 설계(attention pool, N-independent) 그대로 구현되어 있음
+- `rssm_rollout.py:253 Q = self.model.aggregate_q(h)` → `RolloutResult.Q`로 rollout 끝까지 연결됨 — forward pass 자체는 이미 end-to-end
+- **`train_rssm.py`에 `q_head`/`aggregate_q` 참조 전혀 없음** — Q label도 loss도 없어서, 진행 중인 rssm_v4 학습에서도 QHead는 계산만 되고 학습되지 않는 죽은 출력 상태
+
+**[ ] Pending** — Q label 소스 결정 필요, 후보:
+1. MC return (에피소드 종료 후 실제 reward로 역산)
+2. SAC critic bootstrap
+3. 위 ③ Q-target Augmentation(`pocket_prob` heuristic)과 병행할지, QHead로 대체할지
+
+결정 후 `train_rssm.py`에 Q loss 추가.
+
 ### R-SSM 물리 엔진: pure_physics.py 대체 검토 (보류)
 
 마찰계수 버그 수정(`ball_motion.py`, [experiments.md](experiments.md) 참고) 검증 과정에서 pooltool-free 재구현체 `pure_physics.py`가 free-motion evolution 용도로 `ph.evolve_ball_motion`의 drop-in 대체가 가능함을 확인 (300샷 0.0000cm 일치).
