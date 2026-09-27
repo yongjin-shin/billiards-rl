@@ -1719,3 +1719,19 @@ steps ∝ performance. Diminishing returns beginning. Due to the wide coverage s
 
 - 안전 후보 3곳: `rssm_rollout.py::advance_balls`, `train_rssm.py`의 `compute_shot_ss_loss._advance()`, `viz_rssm.py::_evolve()`
 - 제외(별도 검증 필요): `event_detector.py::get_next_event()` 등 충돌시각 solver — 이번 검증 범위 밖
+
+### R-SSM pocket head 검증: AUC=0.919 "Too good to be true?" 리크 헌팅 (`eval_pocket_head.py`)
+
+**배경**: rssm_v4 학습 중 "공 흐름 예측이 부실해 보인다"는 관찰에서 시작 — per-event-type RMSE를 뜯어보니 실제 약점은 cushion 충돌(`cue_linear`/`cue_circ`/`tgt_linear`/`tgt_circ`, RMSE 2.7~3.4)이었고 `ball_ball`(RMSE~0.91)은 양호했다(SGDR warm restart로 인한 일시적 val_rmse 스파이크와도 별개). 이 김에 pocket 예측(`predict_pocket`)만 따로 정밀 평가(`eval_pocket_head.py`)했더니 AUC=0.919가 나왔고, 사용자가 "Too good to be true"라고 리크 가능성을 제기 → 두 가지 가설을 코드로 직접 검증.
+
+| 가설 | 검증 방법 | 결과 |
+|------|-----------|------|
+| ① tautology leak: first-touch 이벤트 자체가 포켓 이벤트인 공(사전 충돌 0회로 바로 포켓)은 `make_node()`가 `event_type=pocket`을 입력 feature에 원-핫으로 직접 심어버려서, `predict_pocket(h)`가 미래를 맞히는 게 아니라 입력을 그대로 되읽는 것일 수 있음 | 전체 8267개 샘플 중 tautological 92개(1.1%) 분리, 제외 후 재계산 | AUC 0.919→0.917, 거의 무변화. **리크는 실재하지만 결과를 설명하지 못함** |
+| ② geometric shortcut: 물리 시뮬레이션 없이, 충돌 직후(post-collision) 속도 방향의 직선 연장선이 포켓 근처를 지나가는지만 보는 0-파라미터 baseline | `geometric_baseline_score()` — post-collision vel(= `node_i`의 pre-collision vel + 그 이벤트의 `gt_deltas_i` Δvel)로 직선 ray → 최근접 pocket까지 거리 | Baseline AUC = **0.827** (genuine 샘플 기준) |
+
+가설 ②는 처음에 pre-collision 속도(`node_i[2:4]`, 즉 이 충돌이 일어나기 *전* 방향)로 잘못 구현해서 AUC 0.266~0.283(랜덤보다 낮음)이 나왔던 버그를 거쳐 확정됨 — post-collision 방향(`node_i[2:4] + gt_deltas_i[k][0:2]`)으로 고치자 정상적인 baseline 값이 나왔다. 이 버그 자체가 "충돌 전/후 방향이 실제로 크게 다르다"는 것의 반증이기도 했다 (한 실 샷에서 `gt_deltas_i[0]`의 Δvel_y=-13.25, cushion bounce로 방향이 뒤집힌 사례 확인).
+
+**결론**:
+- **리크는 아님** — tautology 제외해도 AUC 불변, baseline은 완전히 별도 경로로 계산됨.
+- 하지만 **헤드라인 숫자가 주는 인상보다 훨씬 소박한 결과**임. genuine AUC 0.917 중 0.827은 "충돌 직후 속도가 대략 포켓 쪽을 향하는가"라는 공짜 기하학 baseline만으로 이미 달성된다. 모델이 학습으로 추가한 판별력은 0.917-0.827 ≈ **+0.09 AUC**뿐. task 자체가 "공이 충돌 후 어느 쪽으로 튀는가"라는 쉬운 기하학적 구조를 갖고 있어서, 순수 baseline도 상당히 높은 점수를 낸다.
+- **별도 flag**: `will_pocket=True` base rate가 46%로 매우 높다 (5000샷 중 first-touch된 공 8267개 기준, 즉 샷당 평균 1.65개 공만 터치되고 그중 46%가 포켓됨). 실제 플레이 대비 데이터 생성이 "생산적인" 샷 쪽으로 편향돼 있을 가능성 — 아직 미확인, 별도 검증 필요.

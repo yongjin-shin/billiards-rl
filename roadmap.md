@@ -275,6 +275,8 @@ Q-value 추출 목표 대비 현재 위치 점검 (2026-09-27):
 
 결정 후 `train_rssm.py`에 Q loss 추가.
 
+**후보 3 관련 경고** — `pocket_prob`(= `predict_pocket` head) 자체를 `eval_pocket_head.py`로 리크 헌팅한 결과(상세: [experiments.md](experiments.md)), AUC=0.919 중 0.827은 물리 시뮬레이션 없는 0-파라미터 기하학 baseline(post-collision 속도 방향 직선 연장)만으로 이미 나오는 값이었다. 즉 이 heuristic이 "학습된 물리 이해"를 반영한다고 보기엔 근거가 약함. QHead도 같은 h를 입력으로 쓰므로, 학습 신호가 생긴 뒤 평가할 때 반드시 같은 방식(trivial/geometric baseline 대비)으로 검증할 것 — 정확도나 AUC 단독 숫자를 그대로 믿지 말 것.
+
 ### R-SSM 물리 엔진: pure_physics.py 대체 검토 (보류)
 
 마찰계수 버그 수정(`ball_motion.py`, [experiments.md](experiments.md) 참고) 검증 과정에서 pooltool-free 재구현체 `pure_physics.py`가 free-motion evolution 용도로 `ph.evolve_ball_motion`의 drop-in 대체가 가능함을 확인 (300샷 0.0000cm 일치).
