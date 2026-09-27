@@ -17,6 +17,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import collections
 import os
 import sys
 
@@ -124,6 +125,109 @@ def collect_pocket_preds(
     return np.array(probs), np.array(labels), np.array(tauto), np.array(baseline)
 
 
+def collect_pocket_preds_all_touches(
+    model: RSSMModel,
+    shots: list,
+    device: torch.device,
+) -> list[dict]:
+    """
+    Unlike collect_pocket_preds() (first touch only), this records
+    predict_pocket(h) at EVERY event a ball participates in — mirroring how
+    train_rssm.py's training loss actually queries predict_pocket (line 271:
+    `pocket_probs = model.predict_pocket(h)` runs inside the per-event loop,
+    for every ball, not just at first touch). During a real rollout the head
+    would be queried the same way — after every event — so first-touch-only
+    accuracy doesn't tell us whether the prediction stays reliable, improves,
+    or degrades across the rest of the sequence.
+
+    Also records `is_last_real_touch`: True if this is the ball's last touch
+    BEFORE either (a) the pocket event itself, or (b) the shot ending with
+    the ball still on the table. Lets us check whether confidence rises
+    monotonically as the ball approaches its actual fate.
+    """
+    records: list[dict] = []
+
+    model.eval()
+    with torch.no_grad():
+        for shot in shots:
+            h = model.init_hidden(shot.n_balls, device)
+            touch_n: dict[int, int] = {}
+
+            # Pre-scan: how many total touches does each ball get, so we know
+            # which touch is "last" for it.
+            total_touches: dict[int, int] = {}
+            for ev in shot.event_steps:
+                total_touches[ev.ball_i] = total_touches.get(ev.ball_i, 0) + 1
+                if ev.ball_j is not None:
+                    total_touches[ev.ball_j] = total_touches.get(ev.ball_j, 0) + 1
+
+            for k, ev in enumerate(shot.event_steps):
+                node_i = ev.node_i.to(device)
+                node_j = ev.node_j.to(device) if ev.node_j is not None else None
+                edge   = ev.edge.to(device)   if ev.edge   is not None else None
+
+                if ev.event_type == 0 and ev.ball_j is not None:  # EVENT_BALL_BALL
+                    h, _, _, _, _ = model.step_ball_ball(
+                        h, ev.ball_i, ev.ball_j, node_i, node_j, edge,
+                    )
+                else:
+                    h, _, _ = model.step_single(
+                        h, ev.ball_i, node_i, ev.normal.to(device),
+                    )
+
+                touches = [(ev.ball_i, ev.event_type == EVENT_POCKET)]
+                if ev.ball_j is not None:
+                    touches.append((ev.ball_j, False))
+
+                for b, is_pocket_ev in touches:
+                    touch_n[b] = touch_n.get(b, 0) + 1
+                    if is_pocket_ev:
+                        continue  # tautological — the pocket event IS the label, skip
+                    p = model.predict_pocket(h[b].unsqueeze(0)).item()
+                    will_pocket = shot.will_pocket.get(b, False)
+                    # "last real touch" = last touch BEFORE the ball's fate is
+                    # settled. For balls that get pocketed, that's one touch
+                    # before the (excluded) pocket event; for balls that never
+                    # get pocketed, it's just their actual last touch. Getting
+                    # this branch wrong makes the slice 100%-one-label by
+                    # construction (label leaks into which record gets kept).
+                    last_real_idx = total_touches[b] - 1 if will_pocket else total_touches[b]
+                    is_last_real = touch_n[b] == last_real_idx
+                    records.append({
+                        "touch_idx": touch_n[b],
+                        "total_touches": total_touches[b],
+                        "is_last_real_touch": is_last_real,
+                        "label": int(will_pocket),
+                        "prob": p,
+                    })
+
+    return records
+
+
+def report_by_touch_index(records: list[dict]) -> None:
+    by_idx: dict[int, list[dict]] = collections.defaultdict(list)
+    for r in records:
+        # bucket 4+ together — sample count thins out fast
+        idx = min(r["touch_idx"], 4)
+        by_idx[idx].append(r)
+
+    print(f"{'touch#':>7} {'n':>6} {'pos_rate':>9} {'AUC':>7}")
+    for idx in sorted(by_idx):
+        rs = by_idx[idx]
+        labels = np.array([r["label"] for r in rs])
+        probs  = np.array([r["prob"]  for r in rs])
+        label_str = f"{idx}" if idx < 4 else "4+"
+        auc = auc_score(probs, labels)
+        print(f"{label_str:>7} {len(rs):>6} {labels.mean():>9.3f} {auc:>7.3f}")
+
+    last_real = [r for r in records if r["is_last_real_touch"]]
+    labels = np.array([r["label"] for r in last_real])
+    probs  = np.array([r["prob"]  for r in last_real])
+    print()
+    print(f"Last real touch before shot ends (excl. pocket event itself, N={len(last_real)}):")
+    print(f"  pos_rate={labels.mean():.3f}  AUC={auc_score(probs, labels):.3f}")
+
+
 def auc_score(scores: np.ndarray, labels: np.ndarray) -> float:
     pos = scores[labels == 1]
     neg = scores[labels == 0]
@@ -212,6 +316,13 @@ def main() -> None:
     print(f"Baseline AUC (all)     = {auc_score(baseline, labels):.3f}")
     print(f"Baseline AUC (genuine) = {auc_score(baseline[mask], labels[mask]):.3f}")
     print(f"Model AUC    (genuine) = {auc_score(probs[mask], labels[mask]):.3f}  <- repeated for comparison")
+
+    print()
+    print("=== By touch index: is the prediction still accurate at 2nd, 3rd, ... touch? ===")
+    print("(train_rssm.py queries predict_pocket(h) after EVERY event, not just first touch —")
+    print(" this checks whether accuracy holds up across the whole sequence, or was cherry-picked)")
+    records = collect_pocket_preds_all_touches(model, val_shots, device)
+    report_by_touch_index(records)
 
 
 if __name__ == "__main__":
