@@ -1717,6 +1717,24 @@ steps ∝ performance. Diminishing returns beginning. Due to the wide coverage s
 
 **출력**: `world_model/results/rssm_v5/`, 로그 `/tmp/rssm_v5.log`
 
+**진행 관찰 (2026-09-28)**: epoch 110에서 val=1.81041(당시 best) 찍은 뒤 epoch 320(val=1.78991)까지 약 90분간 non-improving 정체. epoch 110~300 구간은 scheduled sampling `ss`가 0.455→0.000으로 떨어지는 구간과 겹쳐서, 학습(train)은 점점 free-running(자기 예측 입력)에 맞춰지는데 eval은 계속 teacher-forced라 지표가 일시적으로 어긋났을 가능성을 논의함(아래 "eval 메서드 논의" 참고). ss=0.000 고정 이후 epoch 320에서 정체 해소, 다시 개선 시작.
+
+#### eval 메서드가 항상 teacher-forcing이라는 점 (결정 필요)
+
+**발견 경위**: 학습 중 epoch 110(ss=0.455)이 epoch 200+(ss=0.000)보다 val_rmse가 낮게 나오는 게 이상하다는 지적에서, `evaluate()`(`train_rssm.py:622-719`) 구현을 다시 확인함.
+
+**사실 확인**:
+- `evaluate()`는 매 이벤트마다 `shot.raw_rvws_i[k]`/`raw_rvws_j[k]`(GT)로 `node_i`/`node_j`를 만든다(line 656-664) — **학습 중 ss_prob 값과 무관하게 항상 완전 teacher-forcing(ss=1 상당)**. free-running 예측을 전혀 쓰지 않는다.
+- 즉 val_rmse는 "GT가 항상 주어졌을 때 다음 델타를 얼마나 잘 맞히나"만 측정하고, 실제 배포 목표("큐샷 1회 → multi-step rollout imagining → Q-value MC 추정", `roadmap.md` ③)가 필요로 하는 "자기 예측을 계속 먹이는 free-running rollout에서 얼마나 안 어긋나는가"는 전혀 측정하지 않는다.
+- 학습 curriculum(ss: 1.0→0.0)이 free-running 쪽으로 이동하는 동안, eval 지표는 계속 teacher-forcing만 재는 다른 것을 측정하므로, "val_rmse가 나빠졌다"가 곧 "모델이 실사용 목적에서 나빠졌다"를 의미하지 않을 수 있다.
+
+**체크포인트 손실**: `train_rssm.py:942-944`(best.pt, 갱신 시 덮어씀) / `:986`(last.pt, 마지막 epoch만)만 저장하므로, epoch 110 시점 가중치는 epoch 320이 새 best가 되며 **이미 덮어써져 복구 불가**. teacher-forced 기준으로든 free-running 기준으로든 재평가 자체가 불가능해졌다.
+
+**결정할 것**:
+- **[ ]** free-running(ss=0, 자기 예측을 다음 입력으로 사용) multi-step rollout eval을 별도로 추가해서, teacher-forced val_rmse가 뽑은 "best"가 실제 rollout 품질과 상관관계가 있는지 확인 필요.
+- **[ ]** v6부터는 `best.pt`/`last.pt` 단일 덮어쓰기 대신 주기적 체크포인트(예: N epoch마다)를 보관해서, 사후에 여러 시점을 비교할 수 있게 할지 결정.
+- v5 자체는 재시작하지 않고 끝까지 진행 — 위 변경은 v6 이후 적용 대상.
+
 ### 물리 엔진 버그: ball_motion.py 마찰계수 (commit 4bbf568)
 
 **배경**: long shot일수록 RSSM 예측 오차가 커지는 원인을 추적하던 중 발견.
