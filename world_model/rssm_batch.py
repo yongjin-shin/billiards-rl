@@ -48,12 +48,20 @@ def split_wavefront_by_type(
     shots  : list[ShotData],
     active : list[WavefrontItem],
 ) -> tuple[list[WavefrontItem], list[WavefrontItem]]:
-    """Split a wavefront into (ball_ball_items, single_items) by event_type."""
+    """
+    Split a wavefront into (ball_ball_items, single_items).
+
+    event_type == EVENT_BALL_BALL alone is not sufficient: when the second
+    ball involved isn't tracked (e.g. filtered out of this shot's ball set),
+    ball_j is None even though event_type is still EVENT_BALL_BALL — that
+    event must be routed to the single-ball path, matching
+    compute_shot_ss_loss's `if ev_type == EVENT_BALL_BALL and bj is not None`.
+    """
     ball_ball: list[WavefrontItem] = []
     single   : list[WavefrontItem] = []
     for s, k in active:
         ev = shots[s].event_steps[k]
-        if ev.event_type == EVENT_BALL_BALL:
+        if ev.event_type == EVENT_BALL_BALL and ev.ball_j is not None:
             ball_ball.append((s, k))
         else:
             single.append((s, k))

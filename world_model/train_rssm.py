@@ -44,6 +44,7 @@ from world_model.rssm_model import (
 )
 from world_model.rssm_dataset import ShotData, collect_dataset, load_dataset
 from world_model.rssm_rollout import make_node, make_edge
+from world_model.rssm_batch import iter_wavefronts, split_wavefront_by_type
 
 
 TYPE_NAMES = {
@@ -173,6 +174,135 @@ def _focal_cross_entropy(
 
 # ── Loss ──────────────────────────────────────────────────────────────────────
 
+def _pick_node_i(
+    ev, k: int, shot: ShotData,
+    pred_rvws: dict[int, np.ndarray],
+    ss_prob: float, device: torch.device,
+) -> tuple[bool, np.ndarray, torch.Tensor]:
+    """Decide GT-vs-predicted rvw for ball_i and build/reuse its node tensor."""
+    bi     = ev.ball_i
+    use_gt = (random.random() < ss_prob) or (bi not in pred_rvws)
+    rvw    = shot.raw_rvws_i[k] if use_gt else pred_rvws[bi]
+    # ② reuse pre-built node when GT (None-guarded for new data without stored tensors)
+    if use_gt and ev.node_i is not None:
+        node = ev.node_i.to(device)
+    else:
+        node = make_node(rvw, ev.event_type).to(device)
+    return use_gt, rvw, node
+
+
+def _pick_node_j(
+    ev, k: int, shot: ShotData,
+    pred_rvws: dict[int, np.ndarray],
+    ss_prob: float, device: torch.device,
+) -> tuple[bool, np.ndarray, torch.Tensor]:
+    """Decide GT-vs-predicted rvw for ball_j and build/reuse its node tensor."""
+    bj        = ev.ball_j
+    raw_rvw_j = shot.raw_rvws_j[k]
+    use_gt    = (random.random() < ss_prob) or (bj not in pred_rvws) or (raw_rvw_j is None)
+    rvw       = raw_rvw_j if use_gt else pred_rvws[bj]
+    if use_gt and ev.node_j is not None:
+        node = ev.node_j.to(device)
+    else:
+        node = make_node(rvw, ev.event_type).to(device)
+    return use_gt, rvw, node
+
+
+def _pick_edge(
+    use_gt_i: bool, use_gt_j: bool, ev,
+    rvw_i: np.ndarray, rvw_j: np.ndarray, device: torch.device,
+) -> torch.Tensor:
+    """Reuse the pre-built edge tensor when both sides are GT, else recompute."""
+    if use_gt_i and use_gt_j and ev.edge is not None:
+        return ev.edge.to(device)
+    return make_edge(rvw_i, rvw_j, ev.normal.numpy()).to(device)
+
+
+def _advance_rvw(
+    raw_rvw: np.ndarray,
+    delta  : torch.Tensor,
+    dt     : float,
+    ss_prob: float,
+    params : FrictionParams,
+) -> np.ndarray:
+    """
+    Apply predicted Δvel/Δavel to raw_rvw and roll forward by dt for SS bookkeeping.
+
+    Uses a fast linear approximation during warmup (ss_prob > 0.1) and full
+    physics only near free-running (ss_prob <= 0.1), since SS's predicted
+    rvw is only used as a rough teacher-forcing substitute, not a training target.
+    """
+    rvw = raw_rvw.copy()
+    rvw[1, :2] += delta[:2].detach().cpu().numpy()
+    rvw[2]     += delta[2:].detach().cpu().numpy()
+    if dt > 1e-9:
+        if ss_prob > 0.1:
+            rvw[0, :2] += rvw[1, :2] * dt * 0.7
+            spd = float(np.linalg.norm(rvw[1, :2]))
+            if spd > 1e-4:
+                decel = params.u_r * params.g
+                scale = max(0.0, 1.0 - decel * dt / spd)
+                rvw[1, :2] *= scale
+        else:
+            rvw, _ = evolve_ball_motion(
+                SLIDING, rvw,
+                R=params.R, m=params.m,
+                u_s=params.u_s, u_sp=params.u_sp,
+                u_r=params.u_r, g=params.g,
+                t=dt,
+            )
+    return rvw
+
+
+def _vel_loss_term(
+    delta_i          : torch.Tensor,
+    gt_i             : torch.Tensor,
+    delta_j          : Optional[torch.Tensor],
+    gt_j             : Optional[torch.Tensor],
+    ev_type          : int,
+    vel_type_weights : Optional[torch.Tensor],
+    delta_scale_w    : Optional[torch.Tensor],
+) -> torch.Tensor:
+    """Scale-weighted + type-freq-weighted velocity MSE for one event."""
+    vw = vel_type_weights[ev_type] if vel_type_weights is not None else 1.0
+    if delta_scale_w is not None:
+        vel_err = (((delta_i - gt_i) ** 2) * delta_scale_w).mean() * vw
+    else:
+        vel_err = F.mse_loss(delta_i, gt_i) * vw
+    if delta_j is not None and gt_j is not None:
+        if delta_scale_w is not None:
+            vel_err = vel_err + (((delta_j - gt_j) ** 2) * delta_scale_w).mean() * vw
+        else:
+            vel_err = vel_err + F.mse_loss(delta_j, gt_j) * vw
+    return vel_err
+
+
+def _type_loss_term(
+    type_i       : torch.Tensor,
+    gt_type_i    : Optional[int],
+    type_j       : Optional[torch.Tensor],
+    gt_type_j    : Optional[int],
+    device       : torch.device,
+    type_weights : Optional[torch.Tensor],
+    focal_gamma  : float,
+) -> torch.Tensor:
+    """Focal (or standard) CE type loss for one event, summed over ball_i/ball_j."""
+    loss = torch.tensor(0.0, device=device)
+    if gt_type_i is not None:
+        tgt_i = torch.tensor([gt_type_i], device=device)
+        if focal_gamma > 0.0:
+            loss = loss + _focal_cross_entropy(type_i.unsqueeze(0), tgt_i, type_weights, focal_gamma)
+        else:
+            loss = loss + F.cross_entropy(type_i.unsqueeze(0), tgt_i, weight=type_weights)
+    if type_j is not None and gt_type_j is not None:
+        tgt_j = torch.tensor([gt_type_j], device=device)
+        if focal_gamma > 0.0:
+            loss = loss + _focal_cross_entropy(type_j.unsqueeze(0), tgt_j, type_weights, focal_gamma)
+        else:
+            loss = loss + F.cross_entropy(type_j.unsqueeze(0), tgt_j, weight=type_weights)
+    return loss
+
+
 def compute_shot_ss_loss(
     model             : RSSMModel,
     shot              : ShotData,
@@ -183,14 +313,14 @@ def compute_shot_ss_loss(
     vel_type_weights  : Optional[torch.Tensor] = None,
     delta_scale_w     : Optional[torch.Tensor] = None,
     focal_gamma       : float = 0.0,
-) -> tuple[torch.Tensor, torch.Tensor, int]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, int]:
     """
     Single-shot loss with Bengio Scheduled Sampling on node features.
 
     ss_prob=1.0 → teacher forcing  (always GT pre-collision rvw)
     ss_prob=0.0 → free running     (always predicted pre-collision rvw)
 
-    Returns (vel_loss_sum, type_loss_sum, n_events)
+    Returns (vel_loss_sum, type_loss_sum, pocket_loss_sum, n_events)
     """
     h = model.init_hidden(shot.n_balls, device)
 
@@ -208,27 +338,13 @@ def compute_shot_ss_loss(
         bj      = ev.ball_j
 
         # ── Choose GT or predicted rvw ────────────────────────────────────────
-        use_gt_i = (random.random() < ss_prob) or (bi not in pred_rvws)
-        rvw_i    = shot.raw_rvws_i[k] if use_gt_i else pred_rvws[bi]
-        # ② reuse pre-built node when GT (None-guarded for new data without stored tensors)
-        if use_gt_i and ev.node_i is not None:
-            node_i = ev.node_i.to(device)
-        else:
-            node_i = make_node(rvw_i, ev_type).to(device)
+        use_gt_i, rvw_i, node_i = _pick_node_i(ev, k, shot, pred_rvws, ss_prob, device)
 
         node_j = edge = rvw_j = None
+        use_gt_j = False
         if bj is not None:
-            raw_rvw_j = shot.raw_rvws_j[k]
-            use_gt_j  = (random.random() < ss_prob) or (bj not in pred_rvws) or (raw_rvw_j is None)
-            rvw_j     = raw_rvw_j if use_gt_j else pred_rvws[bj]
-            if use_gt_j and ev.node_j is not None:
-                node_j = ev.node_j.to(device)
-            else:
-                node_j = make_node(rvw_j, ev_type).to(device)
-            if use_gt_i and use_gt_j and ev.edge is not None:
-                edge = ev.edge.to(device)
-            else:
-                edge = make_edge(rvw_i, rvw_j, ev.normal.numpy()).to(device)
+            use_gt_j, rvw_j, node_j = _pick_node_j(ev, k, shot, pred_rvws, ss_prob, device)
+            edge = _pick_edge(use_gt_i, use_gt_j, ev, rvw_i, rvw_j, device)
 
         # ── Model step ────────────────────────────────────────────────────────
         if ev_type == EVENT_BALL_BALL and bj is not None:
@@ -242,37 +358,17 @@ def compute_shot_ss_loss(
             delta_j = type_j = None
 
         # ── Velocity loss (scale-weighted + type-freq-weighted) ──────────────
-        gt_i    = shot.gt_deltas_i[k].to(device)
-        vw      = vel_type_weights[ev_type] if vel_type_weights is not None else 1.0
-        if delta_scale_w is not None:
-            vel_err = (((delta_i - gt_i) ** 2) * delta_scale_w).mean() * vw
-        else:
-            vel_err = F.mse_loss(delta_i, gt_i) * vw
-        if delta_j is not None and shot.gt_deltas_j[k] is not None:
-            gt_j = shot.gt_deltas_j[k].to(device)
-            if delta_scale_w is not None:
-                vel_err = vel_err + (((delta_j - gt_j) ** 2) * delta_scale_w).mean() * vw
-            else:
-                vel_err = vel_err + F.mse_loss(delta_j, gt_j) * vw
-        vel_loss_sum = vel_loss_sum + vel_err
+        gt_i = shot.gt_deltas_i[k].to(device)
+        gt_j = shot.gt_deltas_j[k].to(device) if shot.gt_deltas_j[k] is not None else None
+        vel_loss_sum = vel_loss_sum + _vel_loss_term(
+            delta_i, gt_i, delta_j, gt_j, ev_type, vel_type_weights, delta_scale_w,
+        )
 
         # ── Type loss (focal CE) ───────────────────────────────────────────────
-        if shot.gt_types_i[k] is not None:
-            tgt_i = torch.tensor([shot.gt_types_i[k]], device=device)
-            if focal_gamma > 0.0:
-                type_loss_sum = type_loss_sum + _focal_cross_entropy(
-                    type_i.unsqueeze(0), tgt_i, type_weights, focal_gamma)
-            else:
-                type_loss_sum = type_loss_sum + F.cross_entropy(
-                    type_i.unsqueeze(0), tgt_i, weight=type_weights)
-        if type_j is not None and shot.gt_types_j[k] is not None:
-            tgt_j = torch.tensor([shot.gt_types_j[k]], device=device)
-            if focal_gamma > 0.0:
-                type_loss_sum = type_loss_sum + _focal_cross_entropy(
-                    type_j.unsqueeze(0), tgt_j, type_weights, focal_gamma)
-            else:
-                type_loss_sum = type_loss_sum + F.cross_entropy(
-                    type_j.unsqueeze(0), tgt_j, weight=type_weights)
+        type_loss_sum = type_loss_sum + _type_loss_term(
+            type_i, shot.gt_types_i[k], type_j, shot.gt_types_j[k],
+            device, type_weights, focal_gamma,
+        )
 
         # ── Pocket prediction loss (per ball, per event) ─────────────────────
         # ③ batched BCE — one (n_balls,) call instead of n_balls 1-element calls
@@ -289,38 +385,228 @@ def compute_shot_ss_loss(
 
         # ── Update predicted rvw ──────────────────────────────────────────────
         # Skip when full teacher forcing (pred_rvws never used).
-        # Use fast linear approx during warmup; full physics only when ss_prob≈0.
         if ss_prob < 1.0:
             dt = shot.dt_to_next[k]
-
-            def _advance(raw_rvw: np.ndarray, delta: torch.Tensor) -> np.ndarray:
-                rvw = raw_rvw.copy()
-                rvw[1, :2] += delta[:2].detach().cpu().numpy()
-                rvw[2]     += delta[2:].detach().cpu().numpy()
-                if dt > 1e-9:
-                    if ss_prob > 0.1:
-                        # Fast linear approximation: pos += vel * dt * 0.7 (avg decel factor)
-                        rvw[0, :2] += rvw[1, :2] * dt * 0.7
-                        spd = float(np.linalg.norm(rvw[1, :2]))
-                        if spd > 1e-4:
-                            decel = params.u_r * params.g
-                            scale = max(0.0, 1.0 - decel * dt / spd)
-                            rvw[1, :2] *= scale
-                    else:
-                        rvw, _ = evolve_ball_motion(
-                            SLIDING, rvw,
-                            R=params.R, m=params.m,
-                            u_s=params.u_s, u_sp=params.u_sp,
-                            u_r=params.u_r, g=params.g,
-                            t=dt,
-                        )
-                return rvw
-
-            pred_rvws[bi] = _advance(rvw_i, delta_i)
+            pred_rvws[bi] = _advance_rvw(rvw_i, delta_i, dt, ss_prob, params)
             if bj is not None and delta_j is not None and rvw_j is not None:
-                pred_rvws[bj] = _advance(rvw_j, delta_j)
+                pred_rvws[bj] = _advance_rvw(rvw_j, delta_j, dt, ss_prob, params)
 
     return vel_loss_sum, type_loss_sum, pocket_loss_sum, n_events
+
+
+def compute_batch_ss_loss(
+    model             : RSSMModel,
+    shots             : list[ShotData],
+    ss_prob           : float,
+    params            : FrictionParams,
+    device            : torch.device,
+    type_weights      : Optional[torch.Tensor] = None,
+    vel_type_weights  : Optional[torch.Tensor] = None,
+    delta_scale_w     : Optional[torch.Tensor] = None,
+    focal_gamma       : float = 0.0,
+) -> list[tuple[torch.Tensor, torch.Tensor, torch.Tensor, int]]:
+    """
+    Batched version of compute_shot_ss_loss: runs multiple shots' event
+    sequences concurrently via wavefront scheduling (world_model.rssm_batch),
+    so neural-net forward calls are batched across shots instead of B=1.
+
+    All rolling state (h, pred_rvws, loss accumulators) is kept as Python
+    lists — list-element reassignment, never in-place tensor mutation — the
+    same autograd-safe pattern as RSSMModel.init_hidden's per-ball h list.
+
+    Returns a list of (vel_loss_sum, type_loss_sum, pocket_loss_sum, n_events)
+    tuples, one per input shot, in the same order as `shots` — the exact
+    per-shot signature of compute_shot_ss_loss, so callers can process a
+    batch result the same way they process a single-shot result.
+    """
+    if not shots:
+        return []
+
+    n_balls_set = {s.n_balls for s in shots}
+    assert len(n_balls_set) == 1, (
+        f"compute_batch_ss_loss requires uniform n_balls across the batch, got {n_balls_set}"
+    )
+    n_balls = n_balls_set.pop()
+
+    h_list        : list[list[torch.Tensor]]      = [model.init_hidden(n_balls, device) for _ in shots]
+    pred_rvws_list: list[dict[int, np.ndarray]]    = [{} for _ in shots]
+
+    vel_sum_list    = [torch.tensor(0.0, device=device) for _ in shots]
+    type_sum_list   = [torch.tensor(0.0, device=device) for _ in shots]
+    pocket_sum_list = [torch.tensor(0.0, device=device) for _ in shots]
+    n_ev_list       = [0 for _ in shots]
+
+    for wavefront in iter_wavefronts(shots):
+        ball_ball_items, single_items = split_wavefront_by_type(shots, wavefront)
+
+        if ball_ball_items:
+            _run_ball_ball_batch(
+                model, shots, h_list, pred_rvws_list,
+                vel_sum_list, type_sum_list, n_ev_list,
+                ball_ball_items, ss_prob, params, device,
+                type_weights, vel_type_weights, delta_scale_w, focal_gamma,
+            )
+
+        if single_items:
+            _run_single_batch(
+                model, shots, h_list, pred_rvws_list,
+                vel_sum_list, type_sum_list, n_ev_list,
+                single_items, ss_prob, params, device,
+                type_weights, vel_type_weights, delta_scale_w, focal_gamma,
+            )
+
+        # ── Pocket loss: once per active shot in this wavefront ──────────────
+        # (matches compute_shot_ss_loss calling predict_pocket once per event),
+        # batched across all active shots regardless of ball_ball/single type.
+        active_shots = sorted({s for s, _ in wavefront})
+        h_batch = torch.stack(
+            [torch.stack(h_list[s], dim=0) for s in active_shots], dim=0,
+        )   # (S', n_balls, h_dim)
+        pocket_probs = model.predict_pocket(h_batch)   # (S', n_balls)
+        for row, s in enumerate(active_shots):
+            pocket_targets = torch.tensor(
+                [float(shots[s].will_pocket.get(bi, False)) for bi in range(n_balls)],
+                device=device,
+            )
+            pocket_sum_list[s] = pocket_sum_list[s] + F.binary_cross_entropy(
+                pocket_probs[row], pocket_targets, reduction="sum"
+            )
+
+    return [
+        (vel_sum_list[s], type_sum_list[s], pocket_sum_list[s], n_ev_list[s])
+        for s in range(len(shots))
+    ]
+
+
+def _run_ball_ball_batch(
+    model            : RSSMModel,
+    shots            : list[ShotData],
+    h_list           : list[list[torch.Tensor]],
+    pred_rvws_list   : list[dict[int, np.ndarray]],
+    vel_sum_list     : list[torch.Tensor],
+    type_sum_list    : list[torch.Tensor],
+    n_ev_list        : list[int],
+    items            : list[tuple[int, int]],   # (shot_idx, event_idx)
+    ss_prob          : float,
+    params           : FrictionParams,
+    device           : torch.device,
+    type_weights     : Optional[torch.Tensor],
+    vel_type_weights : Optional[torch.Tensor],
+    delta_scale_w    : Optional[torch.Tensor],
+    focal_gamma      : float,
+) -> None:
+    """Process one wavefront's ball_ball items as a single batched model call."""
+    h_i_list, h_j_list = [], []
+    node_i_list, node_j_list, edge_list = [], [], []
+    meta = []   # (s, k, ev, bi, bj, rvw_i, rvw_j, use_gt_i, use_gt_j)
+
+    for s, k in items:
+        shot = shots[s]
+        ev   = shot.event_steps[k]
+        bi, bj = ev.ball_i, ev.ball_j
+        pred_rvws = pred_rvws_list[s]
+
+        use_gt_i, rvw_i, node_i = _pick_node_i(ev, k, shot, pred_rvws, ss_prob, device)
+        use_gt_j, rvw_j, node_j = _pick_node_j(ev, k, shot, pred_rvws, ss_prob, device)
+        edge = _pick_edge(use_gt_i, use_gt_j, ev, rvw_i, rvw_j, device)
+
+        h_i_list.append(h_list[s][bi])
+        h_j_list.append(h_list[s][bj])
+        node_i_list.append(node_i)
+        node_j_list.append(node_j)
+        edge_list.append(edge)
+        meta.append((s, k, ev, bi, bj, rvw_i, rvw_j))
+
+    h_i_new, h_j_new, delta_i, delta_j, type_i, type_j = model.step_ball_ball_batch(
+        torch.stack(h_i_list, dim=0),
+        torch.stack(h_j_list, dim=0),
+        torch.stack(node_i_list, dim=0),
+        torch.stack(node_j_list, dim=0),
+        torch.stack(edge_list, dim=0),
+    )
+
+    for idx, (s, k, ev, bi, bj, rvw_i, rvw_j) in enumerate(meta):
+        shot = shots[s]
+        # List reassignment — never in-place tensor mutation (autograd-safe).
+        h_list[s][bi] = h_i_new[idx]
+        h_list[s][bj] = h_j_new[idx]
+
+        gt_i = shot.gt_deltas_i[k].to(device)
+        gt_j = shot.gt_deltas_j[k].to(device) if shot.gt_deltas_j[k] is not None else None
+        vel_sum_list[s] = vel_sum_list[s] + _vel_loss_term(
+            delta_i[idx], gt_i, delta_j[idx], gt_j, ev.event_type,
+            vel_type_weights, delta_scale_w,
+        )
+        type_sum_list[s] = type_sum_list[s] + _type_loss_term(
+            type_i[idx], shot.gt_types_i[k], type_j[idx], shot.gt_types_j[k],
+            device, type_weights, focal_gamma,
+        )
+        n_ev_list[s] += 1
+
+        if ss_prob < 1.0:
+            dt = shot.dt_to_next[k]
+            pred_rvws_list[s][bi] = _advance_rvw(rvw_i, delta_i[idx], dt, ss_prob, params)
+            pred_rvws_list[s][bj] = _advance_rvw(rvw_j, delta_j[idx], dt, ss_prob, params)
+
+
+def _run_single_batch(
+    model            : RSSMModel,
+    shots            : list[ShotData],
+    h_list           : list[list[torch.Tensor]],
+    pred_rvws_list   : list[dict[int, np.ndarray]],
+    vel_sum_list     : list[torch.Tensor],
+    type_sum_list    : list[torch.Tensor],
+    n_ev_list        : list[int],
+    items            : list[tuple[int, int]],   # (shot_idx, event_idx)
+    ss_prob          : float,
+    params           : FrictionParams,
+    device           : torch.device,
+    type_weights     : Optional[torch.Tensor],
+    vel_type_weights : Optional[torch.Tensor],
+    delta_scale_w    : Optional[torch.Tensor],
+    focal_gamma      : float,
+) -> None:
+    """Process one wavefront's single-ball items as a single batched model call."""
+    h_i_list, node_i_list, normal_list = [], [], []
+    meta = []   # (s, k, ev, bi, rvw_i)
+
+    for s, k in items:
+        shot = shots[s]
+        ev   = shot.event_steps[k]
+        bi   = ev.ball_i
+        pred_rvws = pred_rvws_list[s]
+
+        _, rvw_i, node_i = _pick_node_i(ev, k, shot, pred_rvws, ss_prob, device)
+
+        h_i_list.append(h_list[s][bi])
+        node_i_list.append(node_i)
+        normal_list.append(ev.normal.to(device))
+        meta.append((s, k, ev, bi, rvw_i))
+
+    h_i_new, delta_i, type_i = model.step_single_batch(
+        torch.stack(h_i_list, dim=0),
+        torch.stack(node_i_list, dim=0),
+        torch.stack(normal_list, dim=0),
+    )
+
+    for idx, (s, k, ev, bi, rvw_i) in enumerate(meta):
+        shot = shots[s]
+        h_list[s][bi] = h_i_new[idx]
+
+        gt_i = shot.gt_deltas_i[k].to(device)
+        vel_sum_list[s] = vel_sum_list[s] + _vel_loss_term(
+            delta_i[idx], gt_i, None, None, ev.event_type,
+            vel_type_weights, delta_scale_w,
+        )
+        type_sum_list[s] = type_sum_list[s] + _type_loss_term(
+            type_i[idx], shot.gt_types_i[k], None, None,
+            device, type_weights, focal_gamma,
+        )
+        n_ev_list[s] += 1
+
+        if ss_prob < 1.0:
+            dt = shot.dt_to_next[k]
+            pred_rvws_list[s][bi] = _advance_rvw(rvw_i, delta_i[idx], dt, ss_prob, params)
 
 
 # ── Evaluation ────────────────────────────────────────────────────────────────

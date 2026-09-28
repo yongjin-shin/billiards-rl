@@ -32,7 +32,13 @@ def _ev(event_type: int, ball_i: int = 0, ball_j: int | None = None) -> EventSte
 def _shot(event_types: list[int], n_balls: int = 2) -> ShotData:
     """Minimal ShotData with only event_steps populated meaningfully."""
     n = len(event_types)
-    event_steps = [_ev(et) for et in event_types]
+    # ball_ball events need a real ball_j (matches rssm_dataset.py's normal
+    # case); ball_j=None is only for the untracked-second-ball edge case,
+    # tested explicitly in test_ball_ball_type_with_none_ball_j_routed_to_single.
+    event_steps = [
+        _ev(et, ball_j=1) if et == EVENT_BALL_BALL else _ev(et)
+        for et in event_types
+    ]
     return ShotData(
         n_balls     = n_balls,
         event_steps = event_steps,
@@ -132,3 +138,17 @@ class TestSplitWavefrontByType:
         bb, single = split_wavefront_by_type(shots, wavefront)
         assert bb == []
         assert len(single) == 2
+
+    def test_ball_ball_type_with_none_ball_j_routed_to_single(self):
+        """
+        raw_type==0 events with an untracked second ball keep event_type ==
+        EVENT_BALL_BALL but ball_j is None (see rssm_dataset.py's else-branch
+        fallback) — these must be routed to the single-ball path, matching
+        compute_shot_ss_loss's `ev_type == EVENT_BALL_BALL and bj is not None` guard.
+        """
+        shot = _shot([EVENT_BALL_BALL])
+        shot.event_steps[0].ball_j = None
+        wavefront = next(iter_wavefronts([shot]))
+        bb, single = split_wavefront_by_type([shot], wavefront)
+        assert bb == []
+        assert single == [(0, 0)]
