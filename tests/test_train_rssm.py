@@ -10,6 +10,7 @@ import sys
 import os
 import json
 import tempfile
+from pathlib import Path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pytest
@@ -101,7 +102,7 @@ class TestEvaluate:
         shots  = collect_dataset(n_shots=5, n_balls=1, seed_start=0)
         model  = RSSMModel(h_dim=32, hidden=[64, 64])
         device = torch.device("cpu")
-        rmse, per_type, acc = evaluate(model, shots, device)
+        rmse, per_type, acc, pocket_acc = evaluate(model, shots, device)
         assert rmse < float("inf"), "val_rmse should be finite"
         assert 0.0 <= acc <= 1.0,   "type_acc must be in [0, 1]"
 
@@ -157,3 +158,112 @@ class TestShotSSLoss:
         loss.backward()
         grads = [p.grad for p in model.parameters() if p.grad is not None]
         assert len(grads) > 0, "no gradients were computed"
+
+
+# ── TestSmokePkl ──────────────────────────────────────────────────────────────
+
+_ROOT      = Path(__file__).parent.parent
+_DATA_N1   = _ROOT / "world_model" / "data_rssm"
+_DATA_N2   = _ROOT / "world_model" / "data_rssm_n2"
+
+def _has_chunks(data_dir: Path) -> bool:
+    return data_dir.is_dir() and bool(list(data_dir.glob("*_chunk*.pkl")))
+
+
+def _pkl_config(out_dir: str, data_dir: Path, n_balls: int) -> TrainConfig:
+    """Minimal config that loads from pre-generated pkl."""
+    return TrainConfig(
+        n_balls       = n_balls,
+        n_shots_train = 20,
+        n_shots_val   = 10,
+        h_dim         = 32,
+        hidden        = [64, 64],
+        lr            = 1e-3,
+        max_epochs    = 2,
+        patience      = 10,
+        eval_every    = 1,
+        accum_steps   = 4,
+        use_kendall   = True,
+        ss_warmup     = 2,
+        data_dir      = str(data_dir),
+        out_dir       = out_dir,
+        device        = "cpu",
+    )
+
+
+@pytest.mark.skipif(not _has_chunks(_DATA_N1), reason="data_rssm pkl not found")
+class TestSmokePklN1:
+    """Smoke tests loading real n_balls=1 pkl data (fix ⑤: node_i=None)."""
+
+    def test_load_and_train_completes(self):
+        """train() with pkl data_dir must complete and write result.json."""
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = _pkl_config(tmp, _DATA_N1, n_balls=1)
+            train(cfg)
+            result = json.load(open(os.path.join(tmp, "result.json")))
+            assert "best_val_rmse" in result
+            assert result["best_val_rmse"] < float("inf")
+
+    def test_node_is_none_in_loaded_shots(self):
+        """Shots from new pkl must have node_i=None (fix ⑤ applied at generation)."""
+        from world_model.rssm_dataset import load_dataset
+        shots = load_dataset(str(_DATA_N1), max_shots=10)
+        assert shots, "no shots loaded"
+        for shot in shots:
+            for ev in shot.event_steps:
+                assert ev.node_i is None, \
+                    f"node_i should be None in new pkl; got {type(ev.node_i)}"
+                assert ev.node_j is None
+                assert ev.edge   is None
+
+    def test_val_rmse_finite_from_pkl(self):
+        """evaluate() on pkl-loaded shots must return finite RMSE."""
+        from world_model.rssm_dataset import load_dataset
+        shots = load_dataset(str(_DATA_N1), max_shots=10)
+        model = RSSMModel(h_dim=32, hidden=[64, 64])
+        from world_model.train_rssm import evaluate
+        rmse, _, acc, _ = evaluate(model, shots, torch.device("cpu"))
+        assert rmse < float("inf")
+        assert 0.0 <= acc <= 1.0
+
+
+@pytest.mark.skipif(not _has_chunks(_DATA_N2), reason="data_rssm_n2 pkl not found")
+class TestSmokePklN2:
+    """Smoke tests loading real n_balls=2 pkl data."""
+
+    def test_load_and_train_completes(self):
+        """train() with n_balls=2 pkl data_dir must complete without error."""
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = _pkl_config(tmp, _DATA_N2, n_balls=2)
+            train(cfg)
+            result = json.load(open(os.path.join(tmp, "result.json")))
+            assert "best_val_rmse" in result
+            assert result["best_val_rmse"] < float("inf")
+
+    def test_node_is_none_in_loaded_shots(self):
+        """n_balls=2 pkl must also have node_i=None."""
+        from world_model.rssm_dataset import load_dataset
+        shots = load_dataset(str(_DATA_N2), max_shots=5)
+        assert shots, "no shots loaded"
+        for shot in shots:
+            for ev in shot.event_steps:
+                assert ev.node_i is None, \
+                    f"node_i should be None; got {type(ev.node_i)}"
+
+    def test_n2_shot_has_three_balls(self):
+        """--n-balls 2 means 2 object balls + cue = 3 total; shot.n_balls must be 3."""
+        from world_model.rssm_dataset import load_dataset
+        shots = load_dataset(str(_DATA_N2), max_shots=5)
+        for shot in shots:
+            assert shot.n_balls == 3, \
+                f"expected n_balls=3 (cue+2 obj), got {shot.n_balls}"
+
+    def test_val_rmse_finite_from_pkl(self):
+        """evaluate() on n_balls=2 pkl shots must return finite RMSE."""
+        from world_model.rssm_dataset import load_dataset
+        shots = load_dataset(str(_DATA_N2), max_shots=5)
+        model = RSSMModel(h_dim=32, hidden=[64, 64])
+        from world_model.train_rssm import evaluate
+        rmse, _, acc, _ = evaluate(model, shots, torch.device("cpu"))
+        assert rmse < float("inf")
+        assert 0.0 <= acc <= 1.0
