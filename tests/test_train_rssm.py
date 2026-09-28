@@ -20,7 +20,7 @@ import torch
 
 from world_model.train_rssm import (
     TrainConfig, train,
-    compute_type_class_weights, evaluate,
+    compute_type_class_weights, evaluate, evaluate_free_running,
     compute_shot_ss_loss, compute_batch_ss_loss,
 )
 from world_model.rssm_model import RSSMModel, H_DIM, EventStep, EVENT_BALL_BALL, NODE_DIM, EDGE_DIM
@@ -83,6 +83,74 @@ class TestSmokeTrainLoop:
             assert result["best_val_rmse"] > 0.0
 
 
+# ── TestPeriodicCheckpoint ──────────────────────────────────────────────────
+#
+# train() used to only ever save best.pt (overwritten on improvement) and
+# last.pt (final epoch) -- any intermediate epoch's weights were
+# irrecoverably lost once a later epoch became the new best. ckpt_every adds
+# independent periodic snapshots.
+
+class TestPeriodicCheckpoint:
+    def test_periodic_checkpoints_written(self):
+        """ckpt_every=1 must write an epoch_NNNN.pt for every epoch."""
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = _tiny_config(tmp)
+            cfg.max_epochs = 3
+            cfg.ckpt_every = 1
+            train(cfg)
+            for epoch in (1, 2, 3):
+                path = os.path.join(tmp, f"epoch_{epoch:04d}.pt")
+                assert os.path.exists(path), f"{path} not saved"
+            ckpt = torch.load(os.path.join(tmp, "epoch_0002.pt"), weights_only=False)
+            assert ckpt["epoch"] == 2
+            assert "state" in ckpt
+
+    def test_ckpt_every_zero_disables_periodic_saves(self):
+        """ckpt_every=0 (disabled) must not write any epoch_NNNN.pt file."""
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = _tiny_config(tmp)
+            cfg.max_epochs = 3
+            cfg.ckpt_every = 0
+            train(cfg)
+            assert not list(Path(tmp).glob("epoch_*.pt")), \
+                "ckpt_every=0 should disable periodic checkpoints"
+            # best/last logic must be unaffected
+            assert os.path.exists(os.path.join(tmp, "last.pt"))
+
+
+# ── TestLRSchedule ────────────────────────────────────────────────────────────
+#
+# LR must stay constant at cfg.lr while ss_prob anneals (ss_start→ss_end),
+# then a fresh CosineAnnealingLR cycle starts exactly when ss_prob first
+# reaches ss_end -- not a single global schedule spanning all of max_epochs.
+
+class TestLRSchedule:
+    def test_lr_constant_during_ss_warmup_then_decays(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = _tiny_config(tmp)
+            cfg.max_epochs = 4
+            cfg.ss_warmup  = 1     # ss_prob reaches ss_end at epoch 2
+            cfg.eval_every = 1
+            train(cfg)
+            lrs = json.load(open(os.path.join(tmp, "result.json")))["lr_history"]
+            assert len(lrs) == 4
+            # Epoch 1 (ss_prob=1.0, still annealing) and epoch 2 (ss_prob
+            # first hits ss_end) both train at the unmodified base LR.
+            assert lrs[0] == pytest.approx(cfg.lr)
+            assert lrs[1] == pytest.approx(cfg.lr)
+            # From epoch 3 on, the fresh cosine cycle has taken at least one
+            # step, so LR must have started decaying.
+            assert lrs[2] < lrs[1]
+
+    def test_lr_history_present_in_result_json(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = _tiny_config(tmp)
+            train(cfg)
+            result = json.load(open(os.path.join(tmp, "result.json")))
+            assert "lr_history" in result
+            assert len(result["lr_history"]) == result["epochs_run"]
+
+
 # ── TestClassWeights ─────────────────────────────────────────────────────────
 
 class TestClassWeights:
@@ -115,6 +183,57 @@ class TestEvaluate:
         model.train()
         evaluate(model, shots, torch.device("cpu"))
         assert model.training, "model should be in train mode after evaluate()"
+
+
+# ── TestEvaluateFreeRunning ───────────────────────────────────────────────────
+#
+# evaluate() is always teacher-forced (GT pre-event rvw) regardless of the
+# model's trained ss_prob regime, which doesn't measure the actual
+# deployment target: free-running multi-step rollout for Q-value MC
+# estimation (roadmap ③). evaluate_free_running() chains the model's own
+# predictions forward instead (ss_prob=0.0 semantics), mirroring
+# compute_shot_ss_loss's free-running branch.
+
+class TestEvaluateFreeRunning:
+    def test_returns_finite(self):
+        shots  = collect_dataset(n_shots=5, n_balls=1, seed_start=0)
+        model  = RSSMModel(h_dim=32, hidden=[64, 64])
+        device = torch.device("cpu")
+        rmse, per_type, acc, pocket_acc = evaluate_free_running(model, shots, device)
+        assert rmse < float("inf")
+        assert 0.0 <= acc <= 1.0
+        assert 0.0 <= pocket_acc <= 1.0
+
+    def test_model_back_to_train(self):
+        """evaluate_free_running() must leave the model in train mode."""
+        shots  = collect_dataset(n_shots=3, n_balls=1, seed_start=0)
+        model  = RSSMModel(h_dim=32, hidden=[64, 64])
+        model.train()
+        evaluate_free_running(model, shots, torch.device("cpu"))
+        assert model.training
+
+    def test_multiball_shots_do_not_crash(self):
+        """n_balls=2 exercises the ball_ball free-running chaining branch."""
+        shots  = collect_dataset(n_shots=5, n_balls=2, seed_start=0)
+        model  = RSSMModel(h_dim=32, hidden=[64, 64])
+        rmse, per_type, acc, pocket_acc = evaluate_free_running(model, shots, torch.device("cpu"))
+        assert rmse < float("inf")
+
+    def test_differs_from_teacher_forced_evaluate(self):
+        """
+        A randomly-initialized (untrained) model's free-running predictions
+        diverge from GT quickly, so RMSE should generally differ from
+        evaluate()'s teacher-forced RMSE on shots with >1 event. Not a strict
+        inequality requirement (could coincide by chance on tiny data), but
+        both must at least be well-defined finite numbers computed
+        independently via different code paths.
+        """
+        shots = collect_dataset(n_shots=10, n_balls=1, seed_start=0)
+        model = RSSMModel(h_dim=32, hidden=[64, 64])
+        device = torch.device("cpu")
+        tf_rmse, _, _, _ = evaluate(model, shots, device)
+        fr_rmse, _, _, _ = evaluate_free_running(model, shots, device)
+        assert tf_rmse < float("inf") and fr_rmse < float("inf")
 
 
 # ── TestShotSSLoss ────────────────────────────────────────────────────────────

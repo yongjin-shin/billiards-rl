@@ -4,7 +4,9 @@ world_model/train_rssm.py
 Training script for R-SSM (Relational State-Space Model).
 
 Features:
-  - AdamW + CosineAnnealingLR (single decay cycle over max_epochs)
+  - AdamW + 2-phase LR: held at `lr` while scheduled sampling anneals
+    (ss_start→ss_end), then a fresh CosineAnnealingLR cycle starts exactly
+    when ss_prob first reaches ss_end, spanning the remaining epochs.
   - Kendall multi-task loss weighting (vel + type)
   - Bengio Scheduled Sampling: ss_prob 1.0 → 0.0 over ss_warmup epochs
   - Per-shot length-invariant RMSE evaluation (mean over shots, not events)
@@ -102,6 +104,7 @@ class TrainConfig:
     ss_end         : float = 0.0
     ss_warmup      : int   = 200
     # Output
+    ckpt_every     : int   = 50    # periodic snapshot every N epochs; 0 = disabled
     out_dir        : str   = "world_model/results/rssm_v1"
     device         : str   = "cpu"
 
@@ -719,6 +722,107 @@ def evaluate(
     return val_rmse, per_type, type_acc, pocket_acc
 
 
+def evaluate_free_running(
+    model  : RSSMModel,
+    shots  : list[ShotData],
+    device : torch.device,
+    params : FrictionParams = DEFAULT_FRICTION,
+) -> tuple[float, dict[str, float], float, float]:
+    """
+    Free-running evaluation: chains the model's own predicted rvw forward
+    (ss_prob=0.0, via _pick_node_i/_pick_node_j/_advance_rvw — the same
+    primitives compute_shot_ss_loss uses during free-running training)
+    instead of evaluate()'s always-teacher-forced GT rvw.
+
+    evaluate() measures next-event-delta accuracy given the true pre-event
+    state, regardless of the ss_prob the model was actually trained under.
+    That is not the deployment target: multi-step rollout imagining for
+    Q-value MC estimation (roadmap ③) requires the model to condition on its
+    own prior predictions. This function measures that instead.
+
+    Same return shape as evaluate(): (val_rmse, per_type_rmse_dict, type_acc, pocket_acc)
+    """
+    model.eval()
+    shot_rmses  : list[float]            = []
+    type_mses   : dict[int, list[float]] = defaultdict(list)
+    correct = total = 0
+    pocket_correct = pocket_total = 0
+
+    with torch.no_grad():
+        for shot in shots:
+            h = model.init_hidden(shot.n_balls, device)
+            pred_rvws: dict[int, np.ndarray] = {}
+            event_mses: list[float] = []
+            first_touch_h: dict[int, torch.Tensor] = {}
+
+            for k, ev in enumerate(shot.event_steps):
+                use_gt_i, rvw_i, node_i = _pick_node_i(ev, k, shot, pred_rvws, 0.0, device)
+
+                node_j = edge = rvw_j = None
+                use_gt_j = False
+                if ev.ball_j is not None:
+                    use_gt_j, rvw_j, node_j = _pick_node_j(ev, k, shot, pred_rvws, 0.0, device)
+                    edge = _pick_edge(use_gt_i, use_gt_j, ev, rvw_i, rvw_j, device)
+
+                if ev.event_type == EVENT_BALL_BALL and ev.ball_j is not None:
+                    h, delta_i, delta_j, type_i, type_j = model.step_ball_ball(
+                        h, ev.ball_i, ev.ball_j, node_i, node_j, edge,
+                    )
+                else:
+                    h, delta_i, type_i = model.step_single(
+                        h, ev.ball_i, node_i, ev.normal.to(device),
+                    )
+                    delta_j = type_j = None
+
+                gt_i = shot.gt_deltas_i[k].to(device)
+                mse  = F.mse_loss(delta_i, gt_i).item()
+                if delta_j is not None and shot.gt_deltas_j[k] is not None:
+                    gt_j = shot.gt_deltas_j[k].to(device)
+                    mse  = (mse + F.mse_loss(delta_j, gt_j).item()) / 2.0
+
+                event_mses.append(mse)
+                type_mses[ev.event_type].append(mse)
+
+                if shot.gt_types_i[k] is not None:
+                    correct += int(type_i.argmax().item() == shot.gt_types_i[k])
+                    total   += 1
+                if type_j is not None and shot.gt_types_j[k] is not None:
+                    correct += int(type_j.argmax().item() == shot.gt_types_j[k])
+                    total   += 1
+
+                if ev.ball_i not in first_touch_h:
+                    first_touch_h[ev.ball_i] = h[ev.ball_i].clone()
+                if ev.ball_j is not None and ev.ball_j not in first_touch_h:
+                    first_touch_h[ev.ball_j] = h[ev.ball_j].clone()
+
+                # Chain this event's prediction forward for the next lookup
+                # of the same ball (free-running — no GT after first touch).
+                dt = shot.dt_to_next[k]
+                pred_rvws[ev.ball_i] = _advance_rvw(rvw_i, delta_i, dt, 0.0, params)
+                if ev.ball_j is not None and delta_j is not None and rvw_j is not None:
+                    pred_rvws[ev.ball_j] = _advance_rvw(rvw_j, delta_j, dt, 0.0, params)
+
+            if event_mses:
+                shot_rmses.append(float(np.sqrt(np.mean(event_mses))))
+
+            for bi_idx, h_i in first_touch_h.items():
+                gt_pock   = shot.will_pocket.get(bi_idx, False)
+                pred_pock = model.predict_pocket(h_i.unsqueeze(0)).item() >= 0.5
+                pocket_correct += int(pred_pock == gt_pock)
+                pocket_total   += 1
+
+    val_rmse = float(np.mean(shot_rmses)) if shot_rmses else float("inf")
+    per_type = {
+        TYPE_NAMES.get(t, str(t)): float(np.sqrt(np.mean(mses)))
+        for t, mses in type_mses.items()
+    }
+    type_acc   = correct / total if total > 0 else 0.0
+    pocket_acc = pocket_correct / pocket_total if pocket_total > 0 else 0.0
+
+    model.train()
+    return val_rmse, per_type, type_acc, pocket_acc
+
+
 # ── Charts ────────────────────────────────────────────────────────────────────
 
 def save_charts(history: dict, out_dir: str) -> None:
@@ -831,10 +935,11 @@ def train(cfg: TrainConfig) -> None:
         [log_var_vel, log_var_type] if cfg.use_kendall else []
     )
 
-    opt   = torch.optim.AdamW(all_params, lr=cfg.lr, weight_decay=cfg.weight_decay)
-    sched = torch.optim.lr_scheduler.CosineAnnealingLR(
-        opt, T_max=cfg.max_epochs, eta_min=cfg.lr * 0.01,
-    )
+    opt = torch.optim.AdamW(all_params, lr=cfg.lr, weight_decay=cfg.weight_decay)
+    # LR held constant at cfg.lr while scheduled sampling anneals; a fresh
+    # CosineAnnealingLR cycle starts exactly when ss_prob first reaches
+    # ss_end (see epoch loop below), spanning the remaining epochs.
+    sched: Optional[torch.optim.lr_scheduler.CosineAnnealingLR] = None
 
     # ── History ───────────────────────────────────────────────────────────────
     history: dict = {
@@ -858,6 +963,14 @@ def train(cfg: TrainConfig) -> None:
             ss_prob = cfg.ss_start + (cfg.ss_end - cfg.ss_start) * t_frac
         else:
             ss_prob = cfg.ss_end
+
+        # Start the free-running phase's own cosine anneal exactly when ss
+        # first reaches ss_end, rather than repositioning it on a single
+        # fixed-length global schedule (see module docstring).
+        if sched is None and ss_prob <= cfg.ss_end + 1e-9:
+            sched = torch.optim.lr_scheduler.CosineAnnealingLR(
+                opt, T_max=max(cfg.max_epochs - epoch + 1, 1), eta_min=cfg.lr * 0.01,
+            )
 
         model.train()
         random.shuffle(train_shots)
@@ -922,7 +1035,8 @@ def train(cfg: TrainConfig) -> None:
         opt.step()
         opt.zero_grad()
 
-        sched.step()
+        if sched is not None:
+            sched.step()
 
         train_rmse = float(np.mean(train_rmses)) if train_rmses else float("nan")
 
@@ -946,6 +1060,12 @@ def train(cfg: TrainConfig) -> None:
                 saved = " *"
             else:
                 stall += 1
+
+        if cfg.ckpt_every > 0 and epoch % cfg.ckpt_every == 0:
+            torch.save(
+                {"state": model.state_dict(), "epoch": epoch, "val_rmse": val_rmse},
+                out_dir / f"epoch_{epoch:04d}.pt",
+            )
 
         # ── Print ─────────────────────────────────────────────────────────────
         kw_str  = ""
@@ -985,7 +1105,7 @@ def train(cfg: TrainConfig) -> None:
     # ── Save ──────────────────────────────────────────────────────────────────
     torch.save({"state": model.state_dict(), "epoch": epoch}, out_dir / "last.pt")
     json.dump(
-        {"best_val_rmse": best_val, "epochs_run": epoch},
+        {"best_val_rmse": best_val, "epochs_run": epoch, "lr_history": history["lr"]},
         open(out_dir / "result.json", "w"), indent=2,
     )
     save_charts(dict(history), str(out_dir))
@@ -1024,6 +1144,8 @@ def main() -> None:
     p.add_argument("--ss-start",      type=float, default=1.0)
     p.add_argument("--ss-end",        type=float, default=0.0)
     p.add_argument("--ss-warmup",     type=int,   default=200)
+    p.add_argument("--ckpt-every",    type=int,   default=50,
+                   help="Save a periodic epoch_NNNN.pt snapshot every N epochs. 0=disabled.")
     p.add_argument("--out-dir",       default="world_model/results/rssm_v1")
     p.add_argument("--device",        default="cuda" if torch.cuda.is_available() else "cpu")
     args = p.parse_args()
@@ -1050,6 +1172,7 @@ def main() -> None:
         ss_start      = args.ss_start,
         ss_end        = args.ss_end,
         ss_warmup     = args.ss_warmup,
+        ckpt_every    = args.ckpt_every,
         out_dir       = args.out_dir,
         device        = args.device,
     )
