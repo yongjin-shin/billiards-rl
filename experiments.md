@@ -1769,6 +1769,47 @@ steps ∝ performance. Diminishing returns beginning. Due to the wide coverage s
 
 **결론**: "val_rmse가 항상 teacher-forcing만 잰다"는 우려와 달리, v5처럼 학습 후반부가 이미 ss=0인 경우 teacher-forced eval이 실사용(free-running) 성능을 과소평가하는 방향으로 어긋날 수 있다는 것이 확인됨 — 방향은 걱정했던 것과 반대(free-running이 더 나쁠 거라 예상했으나 더 좋음). 다만 type_acc는 예상대로 약간 열화되므로 두 지표를 분리해서 계속 같이 보는 게 안전. v6부터는 두 eval을 모두 기록해서 추이를 비교할 것.
 
+#### v5 eval 심화 분석: 샷 길이별로 결과가 뒤집힌다 — 완료 (2026-09-28)
+
+**배경**: 위 aggregate 비교(전체 5000샷 평균)만으로 "free-running이 전반적으로 더 낫다"고 결론 내리기엔 이르다는 문제의식에서, 5000개 val 샷 각각에 대해 `evaluate()`/`evaluate_free_running()`을 개별 호출해 per-shot RMSE를 뽑아 분포를 뜯어봄.
+
+**per-shot 분포**:
+
+| 지표 | teacher-forced | free-running |
+|------|------|------|
+| mean | 1.7190 | 1.6646 |
+| median | 1.3884 | 1.2062 |
+| p10 / p90 | 0.578 / 3.155 | 0.523 / 3.226 |
+| max | 18.26 | **28.05** |
+
+- `corr(tf_rmse, fr_rmse) = 0.880` — 대체로 같이 움직이지만 완전히 같지는 않음.
+- free-running이 더 나은 샷: 2680/5000 (53.6%) — aggregate에서 본 "free-running이 근소 우위"라는 그림과 일치.
+
+**샷 길이(event 수)별로 쪼개면 결과가 뒤집힌다**:
+
+| 이벤트 수 | 샷 수 | tf_mean | fr_mean | gap(fr-tf) |
+|------|------|------|------|------|
+| 1-2   | 343  | 0.789 | 0.794 | +0.005 |
+| 3-4   | 1403 | 1.225 | 1.066 | **-0.160** |
+| 5-7   | 2223 | 1.730 | 1.572 | **-0.159** |
+| 8-12  | 941  | 2.595 | 2.830 | **+0.235** |
+| 13+   | 88   | 3.536 | 4.481 | **+0.944** |
+
+**해석**: 짧은/중간 길이 샷(3~7 이벤트, 전체의 73%)에서는 free-running이 더 낫지만, 긴 샷(8+ 이벤트, 21%)에서는 정확히 반대로 **teacher-forced가 더 낫고 격차가 이벤트 수에 비례해 커진다** — free-running 특유의 자기 예측 오차 누적(compounding error)이 짧은 샷에서는 self-conditioning 적응 이득에 가려지다가, 이벤트 수가 늘어날수록 누적 오차가 그 이득을 역전시키는 것으로 해석됨. 전체 aggregate(mean=1.665 vs 1.719)는 73%를 차지하는 짧은 샷들의 개선분이 21%인 긴 샷들의 악화분을 상쇄하고도 남아서 "free-running이 근소 우위"로 보이는 것 — **aggregate 숫자 하나만 보면 이 반전을 완전히 놓친다.**
+
+이는 로드맵 ③(큐샷 1회 → **60-step 같은 긴 rollout** → Q-value MC 추정)에 직접적인 시사점을 준다: 평균 5.76 이벤트인 이 val set의 aggregate free-running RMSE는 실제 목표인 "긴 rollout" 구간의 품질을 낙관적으로 과대평가하고 있을 가능성이 높다 — 정작 중요한 건 8+ 이벤트 구간의 성능인데, 그 구간에서는 free-running이 teacher-forced보다 뚜렷이 나쁘다.
+
+**포켓 여부별**: 포켓된 샷(n=3300)은 free-running이 더 낫고(gap -0.156), 포켓 안 된 샷(n=1700)은 teacher-forced가 더 낫다(gap +0.142) — 포켓 샷이 대체로 짧은 샷과 상관관계가 있을 가능성이 있어 위 길이별 효과의 부산물일 수 있음(별도 검증 안 함).
+
+**최악/최선 샷 (val_shots 인덱스, `world_model/data_rssm` 40000:45000 슬라이스 기준)**:
+- teacher-forced와 free-running 둘 다에서 압도적 최악인 샷 2개(`#2185` RMSE 18.3/28.0, `#3261` RMSE 15.0/19.7, 둘 다 4-이벤트) — 두 방식 모두에서 나쁘다는 건 ss 방식과 무관한 별도 원인(이상치 물리 상황 등)일 가능성.
+- free-running만 유독 나쁜 샷(`#1679`, `#1422`, 12/15 이벤트) — compounding error를 시각적으로 보여줄 좋은 후보.
+- free-running이 teacher-forced보다 훨씬 나은 샷(`#3216`, `#1562` 등) — 반대 사례.
+
+**결정할 것**:
+- **[ ]** 8+ 이벤트 구간에서의 free-running 열화가 진짜 문제인지, v6 재학습(2단계 LR 적용 후) 이후에도 재현되는지 확인 필요.
+- **[ ]** Q-value rollout 길이(60 step)에 더 가까운 긴 샷 전용 free-running 평가 지표를 별도로 트래킹할지 결정 (현재 val set은 평균 5.76 이벤트로 실제 rollout 길이와 괴리가 큼).
+
 ### 물리 엔진 버그: ball_motion.py 마찰계수 (commit 4bbf568)
 
 **배경**: long shot일수록 RSSM 예측 오차가 커지는 원인을 추적하던 중 발견.
