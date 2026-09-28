@@ -80,6 +80,14 @@ class TrainConfig:
     clip_grad      : float = 1.0
     # LR schedule (single CosineAnnealingLR cycle over max_epochs)
     # Training
+    # Shots are grouped into batches of `batch_size` and forwarded together
+    # via compute_batch_ss_loss (wavefront-scheduled across shots — see
+    # world_model/rssm_batch.py). `accum_steps` now counts *batches*, not
+    # shots: effective batch = batch_size * accum_steps. To reproduce a
+    # pre-batching config's effective batch size exactly, set
+    # batch_size=<old accum_steps>, accum_steps=1 (NOT both at the old value —
+    # that would multiply the effective batch by <old accum_steps> again).
+    batch_size     : int   = 1
     accum_steps    : int   = 32
     max_epochs     : int   = 500
     patience       : int   = 40
@@ -857,37 +865,54 @@ def train(cfg: TrainConfig) -> None:
         train_rmses: list[float] = []
         opt.zero_grad()
 
-        for shot_idx, shot in enumerate(train_shots):
-            if not shot.event_steps:
+        batch_starts = range(0, len(train_shots), cfg.batch_size)
+        for batch_idx, batch_start in enumerate(batch_starts):
+            batch = [
+                s for s in train_shots[batch_start: batch_start + cfg.batch_size]
+                if s.event_steps
+            ]
+            if not batch:
                 continue
 
-            vel_loss, type_loss, pocket_loss, n_ev = compute_shot_ss_loss(
-                model, shot, ss_prob, params, device,
+            results = compute_batch_ss_loss(
+                model, batch, ss_prob, params, device,
                 type_weights     = type_weights,
                 vel_type_weights = vel_type_weights,
                 delta_scale_w    = delta_scale_w,
                 focal_gamma      = cfg.focal_gamma,
             )
-            if n_ev == 0:
+
+            # "샷별 정규화 평균의 평균" (design principle 2) — batch_size=1
+            # reduces to exactly the old per-shot loss, so accum_steps
+            # continues to behave identically when batch_size=1.
+            shot_losses: list[torch.Tensor] = []
+            for shot, (vel_loss, type_loss, pocket_loss, n_ev) in zip(batch, results):
+                if n_ev == 0:
+                    continue
+
+                vel_mean    = vel_loss    / n_ev
+                type_mean   = type_loss   / n_ev
+                pocket_mean = pocket_loss / (n_ev * shot.n_balls)
+
+                if cfg.use_kendall:
+                    lv = log_var_vel.clamp(-3, 2)
+                    lt = log_var_type.clamp(-3, 2)
+                    shot_loss = (torch.exp(-lv) * vel_mean + lv
+                                 + torch.exp(-lt) * type_mean + lt
+                                 + cfg.lam_pocket * pocket_mean)
+                else:
+                    shot_loss = vel_mean + cfg.lam_type * type_mean + cfg.lam_pocket * pocket_mean
+
+                shot_losses.append(shot_loss)
+                train_rmses.append(float(torch.sqrt(vel_mean).detach().item()))
+
+            if not shot_losses:
                 continue
 
-            vel_mean    = vel_loss    / n_ev
-            type_mean   = type_loss   / n_ev
-            pocket_mean = pocket_loss / (n_ev * shot.n_balls)
+            batch_loss = sum(shot_losses) / len(shot_losses)
+            (batch_loss / cfg.accum_steps).backward()
 
-            if cfg.use_kendall:
-                lv = log_var_vel.clamp(-3, 2)
-                lt = log_var_type.clamp(-3, 2)
-                loss = (torch.exp(-lv) * vel_mean + lv
-                        + torch.exp(-lt) * type_mean + lt
-                        + cfg.lam_pocket * pocket_mean)
-            else:
-                loss = vel_mean + cfg.lam_type * type_mean + cfg.lam_pocket * pocket_mean
-
-            (loss / cfg.accum_steps).backward()
-            train_rmses.append(float(torch.sqrt(vel_mean).detach().item()))
-
-            if (shot_idx + 1) % cfg.accum_steps == 0:
+            if (batch_idx + 1) % cfg.accum_steps == 0:
                 nn.utils.clip_grad_norm_(all_params, cfg.clip_grad)
                 opt.step()
                 opt.zero_grad()
@@ -988,6 +1013,9 @@ def main() -> None:
     p.add_argument("--max-epochs",    type=int,   default=500)
     p.add_argument("--patience",      type=int,   default=40)
     p.add_argument("--eval-every",    type=int,   default=10)
+    p.add_argument("--batch-size",    type=int,   default=1,
+                   help="Shots forwarded together per step (wavefront-batched). "
+                        "effective batch = batch_size * accum_steps.")
     p.add_argument("--accum-steps",   type=int,   default=32)
     p.add_argument("--lam-type",      type=float, default=0.3)
     p.add_argument("--lam-pocket",    type=float, default=0.5,
@@ -1014,6 +1042,7 @@ def main() -> None:
         max_epochs    = args.max_epochs,
         patience      = args.patience,
         eval_every    = args.eval_every,
+        batch_size    = args.batch_size,
         accum_steps   = args.accum_steps,
         lam_type      = args.lam_type,
         lam_pocket    = args.lam_pocket,

@@ -221,7 +221,7 @@ def _synth_shot(event_types: list[int], n_balls: int = 2) -> ShotData:
 class TestBatchSSLoss:
     def test_batch_loss_size1_matches_compute_shot_ss_loss(self):
         """A batch of exactly one shot must reduce to compute_shot_ss_loss exactly."""
-        shots = collect_dataset(n_shots=1, n_balls=2, seed_start=0)
+        shots = collect_dataset(n_shots=5, n_balls=2, seed_start=0)
         shot  = shots[0]
         model = RSSMModel(h_dim=32, hidden=[64, 64])
 
@@ -382,6 +382,74 @@ class TestBatchSSLoss:
             model, [], ss_prob=1.0, params=DEFAULT_FRICTION, device=torch.device("cpu"),
         )
         assert results == []
+
+    def test_batch_loss_mean_matches_manual_per_shot_accum_gradients(self):
+        """
+        Design principle 2: train()'s batch_loss = mean(per-shot normalized
+        losses), backward()'d once. This must equal the old accum_steps
+        pattern of (shot_loss / N).backward() called N times (summed grads),
+        since mean(x_i) and sum(x_i/N) are the same expression — exactly, by
+        linearity of autograd, not just approximately.
+        """
+        shots = collect_dataset(n_shots=3, n_balls=1, seed_start=0)
+        model_a = RSSMModel(h_dim=16, hidden=[32])
+        model_b = RSSMModel(h_dim=16, hidden=[32])
+        model_b.load_state_dict(model_a.state_dict())
+
+        # (a) new pattern: one batched call, mean of shot losses, one backward()
+        results = compute_batch_ss_loss(
+            model_a, shots, ss_prob=1.0, params=DEFAULT_FRICTION, device=torch.device("cpu"),
+        )
+        shot_losses_a = [
+            vel / n + tp / n + pk / (n * shot.n_balls)
+            for shot, (vel, tp, pk, n) in zip(shots, results)
+        ]
+        (sum(shot_losses_a) / len(shot_losses_a)).backward()
+
+        # (b) old pattern: per-shot call, (loss / accum_steps).backward() per shot
+        n_shots = len(shots)
+        for shot in shots:
+            vel, tp, pk, n = compute_shot_ss_loss(
+                model_b, shot, ss_prob=1.0, params=DEFAULT_FRICTION, device=torch.device("cpu"),
+            )
+            shot_loss = vel / n + tp / n + pk / (n * shot.n_balls)
+            (shot_loss / n_shots).backward()
+
+        compared = 0
+        for pa, pb in zip(model_a.parameters(), model_b.parameters()):
+            # q_proj/q_head are only used by aggregate_q, never by the SS loss
+            # path — both stay ungrad-touched here, which is expected, not a bug.
+            if pa.grad is None and pb.grad is None:
+                continue
+            assert torch.allclose(pa.grad, pb.grad, atol=1e-5), \
+                "batched mean-loss gradient must match manual per-shot accum gradient"
+            compared += 1
+        assert compared > 0, "no parameters received gradients — test is vacuous"
+
+
+# ── TestTrainBatchSize ───────────────────────────────────────────────────────
+
+class TestTrainBatchSize:
+    def test_train_with_batch_size_smoke(self):
+        """batch_size > 1 must complete train() and write result.json."""
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = _tiny_config(tmp)
+            cfg.batch_size  = 4
+            cfg.accum_steps = 1
+            train(cfg)
+            result = json.load(open(os.path.join(tmp, "result.json")))
+            assert result["best_val_rmse"] < float("inf")
+            assert result["best_val_rmse"] > 0.0
+
+    def test_train_batch_size_larger_than_dataset_no_crash(self):
+        """batch_size >= n_shots_train collapses to a single batch per epoch."""
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = _tiny_config(tmp)
+            cfg.batch_size  = 100   # > n_shots_train=20
+            cfg.accum_steps = 1
+            train(cfg)
+            result = json.load(open(os.path.join(tmp, "result.json")))
+            assert result["best_val_rmse"] < float("inf")
 
 
 # ── TestSmokePkl ──────────────────────────────────────────────────────────────
