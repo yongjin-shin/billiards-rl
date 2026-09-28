@@ -1831,6 +1831,34 @@ python world_model/viz_rssm.py \
 
 **아직 안 한 것**: 영상을 실제로 육안 검토해서 "compounding error가 시각적으로 어떻게 나타나는지"(예: 공이 실제 궤적에서 점점 벗어나 이상한 방향으로 굴러가는지, 특정 이벤트 타입에서 급격히 어긋나는지)를 서술하는 것 — 이 세션에서는 렌더링까지만 완료, 시청 후 해석은 별도로 필요.
 
+#### 렌더링한 15개 샷의 이벤트별 추론값 분해 — 완료 (2026-09-29)
+
+**배경**: 영상/aggregate RMSE만으로는 "왜" 틀리는지 알 수 없어서, 위 15개 샷 각각을 이벤트 단위로 쪼개 teacher-forced/free-running 예측 델타(Δvel+Δavel)와 GT 델타를 직접 비교. 스크립트: `/tmp/analyze_interesting_shots_inference.py` (미커밋, ad-hoc), 결과: `/tmp/interesting_shots_trace.json`.
+
+**발견 1 — 샷의 나쁜 RMSE는 "전체 이벤트에 걸친 균등한 누적"이 아니라 특정 이벤트 1~2개의 대형 오차 때문**: 15개 샷 전부에서 tf_err(teacher-forced 상태에서도!)가 유독 큰 이벤트가 1~2개씩 있고(`#2185` k=1: tf_err=53.3, `#4544` k=6: tf_err=87.4, `#2478` k=2: tf_err=77.1 등), 나머지 이벤트는 tf_err 1~10 수준으로 평범함. 즉 앞서 "샷 길이가 길수록 나쁘다"는 상관관계는 **긴 샷일수록 이런 극단 이벤트를 하나 포함할 확률이 높아서 생기는 결과**에 가깝고, 매 스텝 오차가 조금씩 쌓이는 그림이 아님.
+
+**발견 2 — 이 대형 오차는 teacher-forcing으로도 못 고친다 (compounding error 문제가 아니라 회귀 자체의 문제)**: 위 대형-오차 이벤트들은 **GT 델타 자체가 원래 크다**(예: `#4544` k=6은 avel 성분이 실제로 105, -56 rad/s급 — 강한 스핀이 쿠션에서 급격히 전환되는 물리적으로 진짜 격렬한 반사). teacher-forced 모드는 정확한 GT 입력을 주는데도 이 이벤트의 델타를 크게 틀린다 — free-running의 상태 표류(compounding) 문제가 아니라 **dec_mlp가 극단적 스핀 전환 이벤트 자체를 회귀하지 못하는 것**이 1차 원인.
+
+**발견 3 — 오차와 |GT delta| 크기의 관계는 U자형이다**: val shot 1000개(이벤트 8186개) 샘플로 |GT delta| 구간별 tf_err를 봤더니:
+
+| \|GT delta\| 구간 | 비중 | tf_err 평균 |
+|---|---|---|
+| 0–1 (거의 무변화) | 20.5% | **4.75** |
+| 1–3 | 2.5% | 1.79 |
+| 3–10 | 19.1% | 1.61 |
+| 10–30 | 23.0% | 3.29 |
+| 30+ (극단적 변화) | 34.9% | **4.64** |
+
+중간(1~10)은 잘 맞히는데 양 극단(거의 무변화 vs 극단적 변화)에서 둘 다 나쁘다 — 전형적인 "heavy-tailed/이봉(bimodal) 타깃 분포에 대한 MSE 회귀의 평균 회귀(regression-to-the-mean)" 패턴. 이벤트 타입별로도 `type=1`(cue_linear, gt_norm 평균 51/p99 192)과 `type=2`(cue_circular, gt_norm 평균 7이지만 p99 128 — 대부분 작다가 드물게 폭발)가 tf_err 평균이 가장 높은 두 그룹.
+
+이건 이 repo에서 병행 중인 `world_model/spr_mdn/`(SPR + Laplace **Mixture** Density Network) 라인의 문제의식과 정확히 맞아떨어진다 — R-SSM의 단일-포인트(MSE) 델타 회귀가 이런 이봉 분포 이벤트에서 구조적으로 약하다는 걸 이 분석이 실측으로 보여준 셈. R-SSM 자체를 MDN으로 바꾸자는 얘기는 아니고(별도 exp 라인이므로 섞지 않음), R-SSM의 약점이 "compounding" 서사만으로는 설명 안 된다는 근거로 기록.
+
+**발견 4 — type_mlp(다음 이벤트 타입 분류)는 두 가지 체계적 실수를 반복한다**: (a) 같은 물리적 상황의 "linear" vs "circular" 서브타입(1↔2, 5↔6)을 거의 항상 헷갈림(15개 샷 중 다수), (b) 공이 곧 포켓될 상황을 쿠션/충돌로 잘못 예측하는 경우가 반복됨(`#2185` k=2, `#3261` k=2, `#3389` k=2, `#1422` k=10, `#3621` k=0, `#1990` k=4, `#2445` k=3 등). **단, 이게 실제 자율 rollout(`rssm_rollout.py`의 `RolloutEngine`)의 안전성을 해치는 건 아님** — RolloutEngine은 type_mlp 예측이 아니라 `EventDetector`가 모델이 예측한 상태를 다시 물리 시뮬레이션해서 다음 이벤트를 직접 판정하므로, type_mlp 오분류는 보조 loss/metric 품질 문제일 뿐 rollout 분기 정확성과는 별개. (다만 발견 1~2의 상태 오차 자체는 `EventDetector`가 잘못된 위치/속도로 이벤트를 판정하게 만들어 rollout을 틀리게 만드는 진짜 원인.)
+
+**결정할 것**:
+- **[ ]** dec_mlp가 극단 스핀 이벤트(type=1/2, |delta|>30)에서 유독 약한 게 데이터 불균형(34.9%가 이 구간인데도 이 정도면 양 부족 문제는 아닐 수도) 때문인지 손실함수(MSE의 평균-회귀) 때문인지 확인 필요 — 후자라면 divergence/huber loss나 per-type loss weighting 검토.
+- **[ ]** type_mlp의 linear/circular 혼동이 라벨 정의 자체의 애매함(연속적인 sliding→rolling 전이를 이분류로 나눈 것)인지 feature 부족인지 `event_detector.py`의 COLL_TYPE 정의를 봐야 판단 가능.
+
 ### 물리 엔진 버그: ball_motion.py 마찰계수 (commit 4bbf568)
 
 **배경**: long shot일수록 RSSM 예측 오차가 커지는 원인을 추적하던 중 발견.
