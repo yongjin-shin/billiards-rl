@@ -246,7 +246,7 @@ Rationale:
 | **⑤ R-SSM 물리 엔진 pure_physics 교체** | 아래 "R-SSM 물리 엔진" 섹션 참고 | ✅ 핵심 3곳 완료 (벡터화 서브아이템은 저효용으로 보류) |
 | **⑥ R-SSM 배치 forward** | 아래 "R-SSM 배치 forward" 섹션 참고 | ✅ 완료 (Phase 0~3) |
 | **⑦ rssm_v5 재학습** | ⑥의 `batch_size` 옵션으로 재시작 필요 — `results/rssm_v5/best.pt`만 있고 history 없이 중단됨 | ✅ 완료 (val_rmse 1.71900, v4 대비 개선) |
-| **⑧ v6: free-running eval + 주기적 체크포인트 + 2단계 LR** | `ckpt_every`, ss=0 시점부터 fresh `CosineAnnealingLR`, `evaluate_free_running()` 구현 완료. per-shot 심화 분석 결과 **샷 길이에 따라 결과가 뒤집힘**: 짧은 샷(3-7 이벤트)은 free-running이 더 낫지만 긴 샷(8+ 이벤트)은 teacher-forced가 더 낫고 격차가 커짐(compounding error) — aggregate(free-running 1.665 vs 1.719 우위)만 보면 이 반전을 놓침. 로드맵 ③의 60-step rollout 목표와 직결되는 문제. 상세는 [experiments.md](experiments.md) "v5 eval 심화 분석" 참고 | ✅ 코드 완료, v6 재학습 A/B 및 긴 rollout 대응은 미실행 |
+| **⑧ v6: free-running eval + 주기적 체크포인트 + 2단계 LR** | `ckpt_every`, ss=0 시점부터 fresh `CosineAnnealingLR`, `evaluate_free_running()` 구현 완료. per-shot 심화 분석 결과 **샷 길이에 따라 결과가 뒤집힘**: 짧은 샷(3-7 이벤트)은 free-running이 더 낫지만 긴 샷(8+ 이벤트)은 teacher-forced가 더 낫고 격차가 커짐(compounding error) — aggregate(free-running 1.665 vs 1.719 우위)만 보면 이 반전을 놓침. 로드맵 ③의 60-step rollout 목표와 직결되는 문제. `viz_rssm.py`에 GT/TF/FR 3-way 비교 영상 렌더링 추가, 관심 샷 15개 `world_model/results/viz_rssm_v5_3way/`에 렌더링 완료(육안 검토는 미실시). 상세는 [experiments.md](experiments.md) "v5 eval 심화 분석" 참고 | ✅ 코드+영상 완료, v6 재학습 A/B 및 긴 rollout 대응은 미실행 |
 
 ### ③ Q-target Augmentation (WM-augmented critic)
 

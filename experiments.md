@@ -1810,6 +1810,27 @@ steps ∝ performance. Diminishing returns beginning. Due to the wide coverage s
 - **[ ]** 8+ 이벤트 구간에서의 free-running 열화가 진짜 문제인지, v6 재학습(2단계 LR 적용 후) 이후에도 재현되는지 확인 필요.
 - **[ ]** Q-value rollout 길이(60 step)에 더 가까운 긴 샷 전용 free-running 평가 지표를 별도로 트래킹할지 결정 (현재 val set은 평균 5.76 이벤트로 실제 rollout 길이와 괴리가 큼).
 
+#### 위 분석의 시각 자료: GT/TF/FR 3-way 비교 영상 추출 — 완료 (2026-09-28)
+
+**배경**: 위 length-bucket 반전 현상을 숫자표뿐 아니라 실제 궤적으로 확인하기 위해, 기존 `world_model/viz_rssm.py`(teacher-forcing 궤적만 렌더링하던 코드)를 확장. `shot_rmse()`가 fix⑤ 이후(node_i/node_j/edge가 항상 None) `ev.node_i.to(device)`를 직접 호출해 깨져 있던 것도 같이 고침(`make_node`/`make_edge`로 None-safe하게).
+
+**구현**: `reconstruct(free_running=...)` — teacher-forcing(기존 동작, 매 이벤트 GT pre-state 입력) vs free-running(첫 접촉 이후 모델 자신의 이전 예측을 입력으로 사용, `evaluate_free_running()`/`compute_shot_ss_loss`의 free-running 분기와 동일 semantics)을 하나의 함수로 통합. `reconstruct_both()` + `make_video_3way()`로 GT(실선)/teacher-forced 예측(점선)/free-running 예측(점점선)을 한 화면에 동시 렌더링. `tests/test_viz_rssm.py`에 첫 접촉 시 두 모드 입력이 동일함을 확인하는 테스트, 재접촉 후 (미학습 모델 기준) 두 모드가 갈라짐을 확인하는 테스트 등 추가.
+
+**실행**: `rssm_v5/best.pt` + val slice(`world_model/data_rssm`, offset 40000, n=5000) 기준, 위 분석에서 뽑은 관심 샷 15개(`worst_tf`, `worst_fr`, `fr_much_worse`, `fr_much_better` 그룹의 합집합: `#2185 #3261 #4544 #2478 #3389 #1679 #1422 #3621 #1990 #3537 #3216 #1562 #4553 #429 #2445`)를 3-way 모드로 렌더링:
+
+```bash
+python world_model/viz_rssm.py \
+  --ckpt world_model/results/rssm_v5/best.pt \
+  --data-dir world_model/data_rssm --val-offset 40000 --n-shots 5000 \
+  --mode both --tag interesting \
+  --indices "2185,3261,4544,2478,3389,1679,1422,3621,1990,3537,3216,1562,4553,429,2445" \
+  --out-dir world_model/results/viz_rssm_v5_3way
+```
+
+결과물: `world_model/results/viz_rssm_v5_3way/interesting_{01..15}_rmse{...}.mp4` 15개(파일명 순서 = 위 인덱스 나열 순서, rmse는 free-running 기준 재계산값). `interesting_01~10`이 두 방식 모두/free-running만 나쁜 그룹, `interesting_11~15`가 free-running이 오히려 훨씬 나은 그룹.
+
+**아직 안 한 것**: 영상을 실제로 육안 검토해서 "compounding error가 시각적으로 어떻게 나타나는지"(예: 공이 실제 궤적에서 점점 벗어나 이상한 방향으로 굴러가는지, 특정 이벤트 타입에서 급격히 어긋나는지)를 서술하는 것 — 이 세션에서는 렌더링까지만 완료, 시청 후 해석은 별도로 필요.
+
 ### 물리 엔진 버그: ball_motion.py 마찰계수 (commit 4bbf568)
 
 **배경**: long shot일수록 RSSM 예측 오차가 커지는 원인을 추적하던 중 발견.
