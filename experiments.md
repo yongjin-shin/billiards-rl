@@ -1730,9 +1730,9 @@ steps ∝ performance. Diminishing returns beginning. Due to the wide coverage s
 | 검증 2 (신규) | `viz_pure_physics.py` — 동일 GT 충돌-후 상태에서 pooltool·pure_physics 양쪽으로 자유주행시켜 궤적을 겹쳐 그린 worst/best 5개 mp4 |
 | 결과 | 300샷 전체 min=max=mean=median **0.0000cm** — long shot 포함 전 구간에서 두 엔진 완전 일치 |
 
-**`pure_physics.py` drop-in 대체 가능성**: `evolve_ball_motion(state, rvw, R, m, u_s, u_sp, u_r, g, t) -> (rvw, state)` signature 동일, state 상수(`STATIONARY=0, SPINNING=1, SLIDING=2, ROLLING=3, POCKETED=4`) 동일 → free-motion evolution 대체 가능함을 확인. 단, 아직 교체는 하지 않음 (이득 미검증, 리스크만 추가) — 상세는 [roadmap.md](roadmap.md) 참고.
+**`pure_physics.py` drop-in 대체 가능성**: `evolve_ball_motion(state, rvw, R, m, u_s, u_sp, u_r, g, t) -> (rvw, state)` signature 동일, state 상수(`STATIONARY=0, SPINNING=1, SLIDING=2, ROLLING=3, POCKETED=4`) 동일 → free-motion evolution 대체 가능함을 확인.
 
-- 안전 후보 3곳: `rssm_rollout.py::advance_balls`, `train_rssm.py`의 `compute_shot_ss_loss._advance()`, `viz_rssm.py::_evolve()`
+- 교체 대상 3곳 — **완료 (2026-09-28)**: `rssm_rollout.py::advance_balls`, `train_rssm.py::_advance_rvw()`, `viz_rssm.py::_evolve()` 전부 `pure_physics.evolve_ball_motion` 사용으로 전환
 - 제외(별도 검증 필요): `event_detector.py::get_next_event()` 등 충돌시각 solver — 이번 검증 범위 밖
 
 ### R-SSM pocket head 검증: AUC=0.919 "Too good to be true?" 리크 헌팅 (`eval_pocket_head.py`)
@@ -1818,3 +1818,31 @@ Pairwise rescue: baseline이 잘못 순서를 매긴 쌍 2,866,568개(전체 쌍
 - **[ ]** `will_pocket` base rate 46%가 데이터 생성(`generate_rssm_data.py`) 샷 샘플링 편향 때문인지 실제 분포를 반영하는지 확인 필요 — 편향이면 pocket head/QHead 전체의 학습 분포가 실제 사용 환경과 다를 수 있음.
 - **[ ]** 모델의 진짜 +0.09 AUC 기여가 다운스트림(Q-value 추정, 정책 학습)에 실질적 가치가 있는지는 이번 검증 범위 밖 — 별도로 확인할 방법 필요.
 - **[ ]** `train_rssm.py:271`의 pocket loss는 아직 접촉 안 한 공(h=0)까지 포함해 매 이벤트마다 전체 공에 대해 계산됨 — 이게 학습 신호를 얼마나 희석시키는지, first-touch 이후 시점만 loss에 포함하도록 바꿔야 하는지는 이번 검증 범위 밖(별도 확인 필요).
+
+### R-SSM 배치 forward: GPU 활용률 개선 (2026-09-28)
+
+**배경**: `compute_shot_ss_loss`가 샷 1개씩(`batch_size=1`) forward하고 있어서 GPU 활용률이 낮았다. `rssm_model.py`의 모든 MLP(`msg_mlp`/`upd_mlp`/`single_mlp`/`dec_mlp`/`type_mlp`)는 `nn.Linear`+`SiLU`만 쌓은 구조라 leading batch dim을 그대로 broadcast한다 — 즉 모델 구조 자체는 이미 배치를 지원하고 있었고, 병목은 100% 호출부(`compute_shot_ss_loss`)가 `(dim,)` 1-샘플 텐서만 만들어 넘기는 데이터 마샬링 문제였다. 새 수식이나 파라미터 없이 순수 오케스트레이션 리팩터로 풀 수 있는 문제라고 판단해 Phase 0→3 순서로 진행했다.
+
+**구현**:
+- **Phase 0** — wavefront 스케줄러 (`rssm_batch.py::iter_wavefronts`, `split_wavefront_by_type`): 샷마다 이벤트 개수가 다르므로, "아직 이벤트가 안 끝난 모든 샷의 다음 이벤트"를 한 배치로 묶어 순회하고, 샷은 이벤트가 끝나면 드롭아웃. 샷 간 공유 상태가 없으므로 배치 내 순서는 무관.
+- **Phase 1** — `step_ball_ball_batch`/`step_single_batch` (`rssm_model.py`): 기존 `step_ball_ball`/`step_single`과 동일 가중치를 재사용하는 순수 배치 래퍼.
+- **Phase 2** — `compute_batch_ss_loss` (`train_rssm.py`): wavefront 단위로 노드/엣지를 `torch.stack`해서 배치 forward, 결과를 다시 list 원소로 scatter. `h`/`pred_rvws`/loss 누적값 전부 Python list로 유지(텐서 in-place 금지 — 기존 `h.clone()` 제거 패턴의 일반화, autograd 안전성 확보).
+- **Phase 3** — `train()` 루프를 shot당 forward에서 batch당 forward로 교체. `TrainConfig.batch_size` 추가. `accum_steps`의 의미가 "샷 개수"에서 "batch 개수"로 바뀜 (`effective_batch = batch_size * accum_steps`) — 기존 설정과 동일한 effective batch를 유지하려면 `batch_size=<기존 accum_steps>, accum_steps=1`로 설정할 것 (둘 다 기존 값으로 두면 effective batch가 중복 곱해짐).
+
+**정합성 검증**:
+- `ss_prob∈{0.0, 1.0}`에서 배치(wavefront 인터리빙) 결과가 순차 처리와 bit-identical함을 증명 — 이 두 지점에서는 `random.random() < ss_prob` 분기 결과가 실제 뽑힌 RNG 값과 무관하기 때문(`ss_prob=1.0`→항상 True, `ss_prob=0.0`→항상 False). `0<ss_prob<1`에서는 RNG 소비 순서가 달라 정확히 일치하진 않지만 finite/no-crash만 확인.
+- `batch_loss = mean(per-shot loss)` 1회 backward가 기존 `sum((shot_loss/accum_steps).backward())`와 gradient 수준에서 정확히 동치임을 전용 비교 테스트로 검증 (선형성에 의해 수학적으로 동일).
+- 리팩터 도중 발견한 버그: `rssm_dataset.py`의 `generate_shot_data`에서 `event_type==EVENT_BALL_BALL`이어도 두 번째 공이 tracked 안 되면 `ball_j=None`으로 떨어지는 케이스가 있는데, Phase 0의 `split_wavefront_by_type`이 `event_type`만 보고 라우팅해서 이 케이스를 놓쳤음 (기존 `compute_shot_ss_loss`는 `ev_type==EVENT_BALL_BALL and bj is not None` 가드가 있어서 문제없었음). `ball_j is not None` 체크 추가로 수정, 회귀 테스트 추가.
+- 관련 없는 사전 존재 실패 7건(`test_rssm_dataset.py`, `test_rssm_rollout.py`, `test_spr_mdn_model.py`, `TestClassWeights::test_weights_positive`)은 git-stash 비교로 이번 작업 이전부터 있던 것으로 확인, 무관하므로 미수정.
+
+**속도 실측** (`h_dim=32, hidden=[64,64]` 소형 모델, wall-clock 단순 forward+backward 1회 기준):
+
+| 환경 | 샷 수 | 순차(기존) | 배치(신규) | 향상 |
+|---|---|---|---|---|
+| MPS | 25 | 0.39s | 0.23s | 1.7배 |
+| MPS | 96 | 1.67s | 0.96s | 1.7배 |
+| CPU | 69 | 0.11s | 0.03s | 3.7배 |
+
+**흥미로운 부수 발견**: 이 모델 크기에서는 **MPS가 CPU보다 느리다** (예: 96샷 기준 MPS 0.96s vs CPU 0.03s대). MPS 커널 launch 오버헤드가 개별 연산의 실제 compute 시간보다 커서, 작은 텐서 위주의 이 워크로드에서는 GPU 이점이 없다. → rssm_v5 재학습 시 `--device cpu` 권장.
+
+**pure_physics 벡터화(`evolve_ball_motion_batch()`) 보류 결정**: roadmap의 ⑤ 서브 아이템으로 남아있던 물리 호출 벡터화가 이 배치 forward 이후에도 의미 있는지 프로파일링으로 확인했다. `_advance_rvw`(`train_rssm.py`)는 `ss_prob>0.1`일 때 fast-linear 근사만 쓰고 `evolve_ball_motion`을 아예 호출하지 않으며, `ss_prob=0.0`(완전 free-running)일 때만 실제 물리 호출을 한다. `cProfile`로 `ss_prob=0.0` 케이스를 뜯어본 결과 `_advance_rvw`가 전체 iteration 시간의 ~10%에 불과했다 (`ss_prob=1.0`→`0.0` 비교 시 총 시간 증가도 18%뿐, 1443회 호출에 0.011s / 총 0.118s). 완전 벡터화해도 최선의 경우 ~10% 개선이 한계이므로, 방금 확인한 배치 forward의 1.7~3.7배 개선 대비 우선순위가 낮다고 판단해 보류.

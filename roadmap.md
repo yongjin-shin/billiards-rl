@@ -243,7 +243,9 @@ Rationale:
 | ~~② v34 event-boundary MDN~~ | ~~충돌 순간에만 K=5 MDN~~ | ❌ 폐기 (R-SSM이 이미 이 설계) |
 | ~~③ WM → RL 통합 (v28 기반)~~ | ~~v28_dt01_3s best.pt(15.4cm) 기반 SAC critic 보강~~ | ❌ 폐기 (R-SSM 기반으로 대체) |
 | **④ 3-ball data + GNN extension** | Generate 3-ball data; extend GNN to N=3 | [ ] Pending |
-| **⑤ R-SSM 물리 엔진 pure_physics 교체** | 아래 "R-SSM 물리 엔진" 섹션 참고 — 보류 해제, 진행 중 | [ ] In progress |
+| **⑤ R-SSM 물리 엔진 pure_physics 교체** | 아래 "R-SSM 물리 엔진" 섹션 참고 | ✅ 핵심 3곳 완료 (벡터화 서브아이템은 저효용으로 보류) |
+| **⑥ R-SSM 배치 forward** | 아래 "R-SSM 배치 forward" 섹션 참고 | ✅ 완료 (Phase 0~3) |
+| **⑦ rssm_v5 재학습** | ⑥의 `batch_size` 옵션으로 재시작 필요 — `results/rssm_v5/best.pt`만 있고 history 없이 중단됨 | [ ] Pending |
 
 ### ③ Q-target Augmentation (WM-augmented critic)
 
@@ -280,14 +282,15 @@ Q-value 추출 목표 대비 현재 위치 점검 (2026-09-27):
 
 **후보 3 관련 경고** — `pocket_prob`(= `predict_pocket` head) 자체를 `eval_pocket_head.py`로 리크 헌팅한 결과(상세: [experiments.md](experiments.md)), AUC=0.919 중 0.827은 물리 시뮬레이션 없는 0-파라미터 기하학 baseline(post-collision 속도 방향 직선 연장)만으로 이미 나오는 값이었다. 즉 이 heuristic이 "학습된 물리 이해"를 반영한다고 보기엔 근거가 약함. QHead도 같은 h를 입력으로 쓰므로, 학습 신호가 생긴 뒤 평가할 때 반드시 같은 방식(trivial/geometric baseline 대비)으로 검증할 것 — 정확도나 AUC 단독 숫자를 그대로 믿지 말 것.
 
-### R-SSM 물리 엔진: pure_physics.py 대체 (진행 중, 2026-09-28 보류 해제)
+### R-SSM 물리 엔진: pure_physics.py 대체 (완료, 2026-09-28)
 
-마찰계수 버그 수정(`ball_motion.py`, [experiments.md](experiments.md) 참고) 검증 과정에서 pooltool-free 재구현체 `pure_physics.py`가 free-motion evolution 용도로 `ph.evolve_ball_motion`의 drop-in 대체가 가능함을 확인 (300샷 0.0000cm 일치).
+교체 대상 3곳(`rssm_rollout.py::advance_balls`, `train_rssm.py::_advance_rvw()`, `viz_rssm.py::_evolve()`) 전부 완료. 벡터화(`evolve_ball_motion_batch()`) 서브 아이템은 저효용으로 판단해 보류. 상세 및 근거는 [experiments.md](experiments.md) 참고.
 
-- 교체 대상(3곳): `rssm_rollout.py::advance_balls`, `train_rssm.py::compute_shot_ss_loss._advance()`, `viz_rssm.py::_evolve()`
-- 제외(미검증): `event_detector.py`의 충돌시각 solver (`get_next_event()`)
-- 소규모 벡터화: `pure_physics.py`에 `evolve_ball_motion_batch()` 추가 — 공 여러 개(다른 state 섞여도)를 한 번의 numpy 호출로 처리, `advance_balls`처럼 N개 공 Python 루프가 있는 지점에 적용. 학습 루프 전체를 shot-batch 텐서 연산으로 재구조화하는 것(더 큰 작업)은 범위 밖 — 이번엔 물리 호출 자체의 스왑+국소 벡터화만.
-- 진행 상황과 벤치마크 수치는 [experiments.md](experiments.md) 참고.
+### R-SSM 배치 forward (완료, 2026-09-28)
+
+`compute_shot_ss_loss`의 shot당 forward(batch_size=1)를 wavefront 기반 배치 forward로 교체 (Phase 0~3). 속도 1.7~3.7배 개선 확인. 상세, 검증 방법, 벤치마크 수치는 [experiments.md](experiments.md) 참고.
+
+rssm_v5 재학습 시 이 `--batch-size` 옵션을 쓸 것. 단, 이 모델 크기(h_dim=32)에서는 MPS 커널 오버헤드가 커서 CPU가 MPS보다 빠르므로 `--device cpu` 권장.
 
 ---
 
