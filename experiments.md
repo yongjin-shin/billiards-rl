@@ -1735,8 +1735,8 @@ steps ∝ performance. Diminishing returns beginning. Due to the wide coverage s
 **체크포인트 손실**: `train_rssm.py:942-944`(best.pt, 갱신 시 덮어씀) / `:986`(last.pt, 마지막 epoch만)만 저장하므로, epoch 110 시점 가중치는 epoch 320이 새 best가 되며 **이미 덮어써져 복구 불가**. teacher-forced 기준으로든 free-running 기준으로든 재평가 자체가 불가능해졌다.
 
 **결정할 것**:
-- **[ ]** free-running(ss=0, 자기 예측을 다음 입력으로 사용) multi-step rollout eval을 별도로 추가해서, teacher-forced val_rmse가 뽑은 "best"가 실제 rollout 품질과 상관관계가 있는지 확인 필요.
-- **[ ]** v6부터는 `best.pt`/`last.pt` 단일 덮어쓰기 대신 주기적 체크포인트(예: N epoch마다)를 보관해서, 사후에 여러 시점을 비교할 수 있게 할지 결정.
+- **[x]** free-running(ss=0, 자기 예측을 다음 입력으로 사용) multi-step rollout eval을 별도로 추가해서, teacher-forced val_rmse가 뽑은 "best"가 실제 rollout 품질과 상관관계가 있는지 확인 필요. → `evaluate_free_running()` 추가, 결과는 아래 "v6 구현" 참고.
+- **[x]** v6부터는 `best.pt`/`last.pt` 단일 덮어쓰기 대신 주기적 체크포인트(예: N epoch마다)를 보관해서, 사후에 여러 시점을 비교할 수 있게 할지 결정. → `ckpt_every` 추가.
 - v5 자체는 재시작하지 않고 끝까지 진행 — 위 변경은 v6 이후 적용 대상.
 
 #### ss_warmup vs LR anneal 타이밍 (v6 후보 튜닝)
@@ -1745,7 +1745,29 @@ steps ∝ performance. Diminishing returns beginning. Due to the wide coverage s
 
 **가설 (수정)**: 처음엔 "`ss_warmup`을 늘려서 ss=0 시점을 lr이 이미 낮아진 구간에 맞추자"고 생각했으나, 이는 방향이 반대일 수 있다 — `ss_warmup`만 늘리고 전체 LR 스케줄(`T_max=max_epochs`)을 그대로 두면 free-running(ss=0) 구간이 시작되는 시점 자체가 뒤로 밀려서, 정작 중요한 free-running 학습 구간에 남는 lr 예산과 epoch 수가 줄어든다. 실제로 v5에서 새 best 갱신은 전부 ss=0 이후 구간(epoch 320~460)에서 나왔고, 이 구간은 현재 스케줄상 전체 lr 예산의 60%(300 epoch, ss_warmup=200/max_epochs=500 기준)를 그대로 넘겨받아 자연 anneal된 결과다. 즉 free-running 구간이 "남은 부스러기 lr"이 아니라 **자기 전용 anneal 예산**을 갖는 게 핵심이지, ss=0 시점을 lr 저점에 맞추는 게 핵심이 아니다.
 
-**[ ]** 결정할 것 — v6에서는 `ss_warmup`을 건드리는 대신, **ss=0이 되는 시점부터 LR 스케줄을 새로 시작**(2단계: teacher-forcing 구간은 lr 완만하게 유지, ss=0부터 `CosineAnnealingLR(T_max=max_epochs-ss_warmup)`을 새로 fresh하게 적용)하는 방식을 실험해볼지. 다만 이것도 가설 단계 — v5 로그만으로는 "현재 스케줄이 이미 충분히 괜찮다(free-running 구간에 60% 예산 할당됨)"와 "2단계로 명시적으로 분리하면 더 낫다"를 구분할 수 없어 v6에서 A/B 필요.
+**[x]** 결정할 것 — v6에서는 `ss_warmup`을 건드리는 대신, **ss=0이 되는 시점부터 LR 스케줄을 새로 시작**(2단계: teacher-forcing 구간은 lr 완만하게 유지, ss=0부터 `CosineAnnealingLR(T_max=max_epochs-ss_warmup)`을 새로 fresh하게 적용)하는 방식을 구현함. 다만 이것도 가설 단계 — v5 로그만으로는 "현재 스케줄이 이미 충분히 괜찮다(free-running 구간에 60% 예산 할당됨)"와 "2단계로 명시적으로 분리하면 더 낫다"를 구분할 수 없어 v6 학습 A/B로 검증 필요 (아직 미실행).
+
+#### v6 구현: 주기적 체크포인트 / 2단계 LR / free-running eval — 완료 (2026-09-28)
+
+위 두 절의 "결정할 것"을 코드로 구현:
+
+| 변경 | 내용 |
+|------|------|
+| 주기적 체크포인트 | `TrainConfig.ckpt_every`(기본 50) — `best.pt`/`last.pt`와 별개로 `epoch_NNNN.pt`를 N epoch마다 저장. `--ckpt-every 0`으로 비활성화 가능 |
+| 2단계 LR | `sched`를 학습 시작 시점에 즉시 만들지 않고 `None`으로 시작. epoch 루프에서 `ss_prob`가 `ss_end`에 처음 도달하는 시점에 `CosineAnnealingLR(T_max=max_epochs-epoch+1, eta_min=lr*0.01)`을 그 시점부터 새로 생성. 그 전까지는 lr이 `cfg.lr`로 고정(스케줄러가 없으므로 step 자체가 없음) |
+| free-running eval | `evaluate_free_running()` 추가 — `evaluate()`와 동일한 시그니처/반환값이지만, `_pick_node_i`/`_pick_node_j`/`_advance_rvw`를 `ss_prob=0.0`으로 호출해서 GT 대신 모델 자기 예측을 다음 이벤트의 입력으로 체이닝(=`compute_shot_ss_loss`의 free-running 분기와 동일한 시맨틱). `pocket_acc`는 각 공의 first-touch h 기준이라 첫 접촉은 항상 GT를 쓰므로(=`pred_rvws`가 비어있을 때만 GT 판정) 두 eval 함수에서 이론상 완전히 동일해야 함 |
+
+**v5 `best.pt`(epoch 500)에 대한 teacher-forced vs free-running 비교** (val 5000샷, `world_model/data_rssm` 슬라이스 40000:45000, 동일 체크포인트):
+
+| 지표 | teacher-forced (`evaluate`) | free-running (`evaluate_free_running`) |
+|------|------|------|
+| val RMSE | 1.71900 | **1.66458** |
+| type_acc | 0.831 | 0.799 |
+| pocket_acc | 0.857 | 0.857 (예상대로 동일 — 위 표 참고) |
+
+**해석**: free-running RMSE가 teacher-forced보다 오히려 **더 낮다**. v5는 전체 500 epoch 중 마지막 300 epoch(60%)를 `ss=0`(완전 free-running)으로 학습했으므로, 모델이 "자기 예측을 이어받는 입력 분포"에 더 잘 적응한 상태고, 반대로 teacher-forced 입력(GT rvw)은 학습 후반부에는 거의 본 적 없는 분포라 오히려 약간 못 맞히는 것으로 보인다. type_acc는 free-running이 약간 낮은데(0.799 vs 0.831) — 자기 예측 오차가 누적되며 다음 이벤트 타입 분류가 더 어려워지는, 원래 기대했던 방향의 열화. pocket_acc는 정의상(first-touch h는 GT 고정) 완전히 동일하게 나온 것으로 구현이 의도대로 동작함을 재확인.
+
+**결론**: "val_rmse가 항상 teacher-forcing만 잰다"는 우려와 달리, v5처럼 학습 후반부가 이미 ss=0인 경우 teacher-forced eval이 실사용(free-running) 성능을 과소평가하는 방향으로 어긋날 수 있다는 것이 확인됨 — 방향은 걱정했던 것과 반대(free-running이 더 나쁠 거라 예상했으나 더 좋음). 다만 type_acc는 예상대로 약간 열화되므로 두 지표를 분리해서 계속 같이 보는 게 안전. v6부터는 두 eval을 모두 기록해서 추이를 비교할 것.
 
 ### 물리 엔진 버그: ball_motion.py 마찰계수 (commit 4bbf568)
 
