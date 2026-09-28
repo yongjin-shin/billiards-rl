@@ -1735,6 +1735,14 @@ steps ∝ performance. Diminishing returns beginning. Due to the wide coverage s
 - **[ ]** v6부터는 `best.pt`/`last.pt` 단일 덮어쓰기 대신 주기적 체크포인트(예: N epoch마다)를 보관해서, 사후에 여러 시점을 비교할 수 있게 할지 결정.
 - v5 자체는 재시작하지 않고 끝까지 진행 — 위 변경은 v6 이후 적용 대상.
 
+#### ss_warmup vs LR anneal 타이밍 (v6 후보 튜닝)
+
+**관찰**: `ss_warmup=200`(기본값, `train_rssm.py:103`) → ss는 epoch 201에서 이미 0.000 도달. 그 시점 `CosineAnnealingLR(T_max=500)` 기준 lr은 아직 ~1.97e-4(초기 3e-4의 66%)로 높은 채였다. 그런데 val_rmse 정체는 ss=0 도달 후로도 ~110 epoch 더 지속되다가 epoch 320(lr≈8.08e-5, 초기의 27%)에서야 풀렸다 — "ss가 완전히 self-conditioning으로 바뀌는 시점에 lr이 아직 크게 남아있는 것"이 정체를 길게 만든 요인일 수 있다는 가설.
+
+**가설 (수정)**: 처음엔 "`ss_warmup`을 늘려서 ss=0 시점을 lr이 이미 낮아진 구간에 맞추자"고 생각했으나, 이는 방향이 반대일 수 있다 — `ss_warmup`만 늘리고 전체 LR 스케줄(`T_max=max_epochs`)을 그대로 두면 free-running(ss=0) 구간이 시작되는 시점 자체가 뒤로 밀려서, 정작 중요한 free-running 학습 구간에 남는 lr 예산과 epoch 수가 줄어든다. 실제로 v5에서 새 best 갱신은 전부 ss=0 이후 구간(epoch 320~460)에서 나왔고, 이 구간은 현재 스케줄상 전체 lr 예산의 60%(300 epoch, ss_warmup=200/max_epochs=500 기준)를 그대로 넘겨받아 자연 anneal된 결과다. 즉 free-running 구간이 "남은 부스러기 lr"이 아니라 **자기 전용 anneal 예산**을 갖는 게 핵심이지, ss=0 시점을 lr 저점에 맞추는 게 핵심이 아니다.
+
+**[ ]** 결정할 것 — v6에서는 `ss_warmup`을 건드리는 대신, **ss=0이 되는 시점부터 LR 스케줄을 새로 시작**(2단계: teacher-forcing 구간은 lr 완만하게 유지, ss=0부터 `CosineAnnealingLR(T_max=max_epochs-ss_warmup)`을 새로 fresh하게 적용)하는 방식을 실험해볼지. 다만 이것도 가설 단계 — v5 로그만으로는 "현재 스케줄이 이미 충분히 괜찮다(free-running 구간에 60% 예산 할당됨)"와 "2단계로 명시적으로 분리하면 더 낫다"를 구분할 수 없어 v6에서 A/B 필요.
+
 ### 물리 엔진 버그: ball_motion.py 마찰계수 (commit 4bbf568)
 
 **배경**: long shot일수록 RSSM 예측 오차가 커지는 원인을 추적하던 중 발견.
