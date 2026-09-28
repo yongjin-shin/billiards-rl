@@ -235,12 +235,15 @@ Rationale:
 
 ### Plan (in priority order)
 
+**우선순위 변경 (2026-09-28)**: 아래 ①②③(v33 chaining 검증 / v34 event-boundary MDN / v28 기반 WM→RL 통합)을 폐기한다. 셋 다 SMDN/segment 계열(z-space MDN, per-step 또는 세그먼트 단위) 라인의 다음 단계였는데, R-SSM이 이미 "이벤트 경계에서만 확률적, 구간 내부는 결정론적 물리"로 v34가 풀려던 문제(per-step MDN collapse)를 아키텍처 차원에서 해결한 상태다. 두 라인을 병행 유지할 이유가 없으므로 이벤트 드리븐(R-SSM) 하나로 완전히 전환하고, SMDN 계열은 여기서 종료. ④는 R-SSM의 N-ball 일반화 목표와 직결되므로 유지.
+
 | Step | Content | Status |
 |------|---------|--------|
-| **① v33 chaining 검증** | 연속 세그먼트 rollout 성능 측정 (4.3cm → rollout 몇 cm?) | [ ] Next |
-| **② v34 event-boundary MDN** | 충돌 순간에만 K=5 MDN, 구간 내는 결정론적 → collapse 자연 해결 | [ ] Planned |
-| **③ WM → RL 통합** | v28_dt01_3s best.pt(15.4cm) 기반 SAC critic 보강 | [ ] Pending |
+| ~~① v33 chaining 검증~~ | ~~연속 세그먼트 rollout 성능 측정~~ | ❌ 폐기 (이벤트 드리븐 전환) |
+| ~~② v34 event-boundary MDN~~ | ~~충돌 순간에만 K=5 MDN~~ | ❌ 폐기 (R-SSM이 이미 이 설계) |
+| ~~③ WM → RL 통합 (v28 기반)~~ | ~~v28_dt01_3s best.pt(15.4cm) 기반 SAC critic 보강~~ | ❌ 폐기 (R-SSM 기반으로 대체) |
 | **④ 3-ball data + GNN extension** | Generate 3-ball data; extend GNN to N=3 | [ ] Pending |
+| **⑤ R-SSM 물리 엔진 pure_physics 교체** | 아래 "R-SSM 물리 엔진" 섹션 참고 — 보류 해제, 진행 중 | [ ] In progress |
 
 ### ③ Q-target Augmentation (WM-augmented critic)
 
@@ -277,13 +280,14 @@ Q-value 추출 목표 대비 현재 위치 점검 (2026-09-27):
 
 **후보 3 관련 경고** — `pocket_prob`(= `predict_pocket` head) 자체를 `eval_pocket_head.py`로 리크 헌팅한 결과(상세: [experiments.md](experiments.md)), AUC=0.919 중 0.827은 물리 시뮬레이션 없는 0-파라미터 기하학 baseline(post-collision 속도 방향 직선 연장)만으로 이미 나오는 값이었다. 즉 이 heuristic이 "학습된 물리 이해"를 반영한다고 보기엔 근거가 약함. QHead도 같은 h를 입력으로 쓰므로, 학습 신호가 생긴 뒤 평가할 때 반드시 같은 방식(trivial/geometric baseline 대비)으로 검증할 것 — 정확도나 AUC 단독 숫자를 그대로 믿지 말 것.
 
-### R-SSM 물리 엔진: pure_physics.py 대체 검토 (보류)
+### R-SSM 물리 엔진: pure_physics.py 대체 (진행 중, 2026-09-28 보류 해제)
 
 마찰계수 버그 수정(`ball_motion.py`, [experiments.md](experiments.md) 참고) 검증 과정에서 pooltool-free 재구현체 `pure_physics.py`가 free-motion evolution 용도로 `ph.evolve_ball_motion`의 drop-in 대체가 가능함을 확인 (300샷 0.0000cm 일치).
 
-- 안전 교체 후보: `rssm_rollout.py::advance_balls`, `train_rssm.py::compute_shot_ss_loss._advance()`, `viz_rssm.py::_evolve()`
+- 교체 대상(3곳): `rssm_rollout.py::advance_balls`, `train_rssm.py::compute_shot_ss_loss._advance()`, `viz_rssm.py::_evolve()`
 - 제외(미검증): `event_detector.py`의 충돌시각 solver (`get_next_event()`)
-- **[ ] Pending** — 교체 이득(속도) 미검증, pooltool 의존성 제거가 시급하지 않아 보류. 필요 시 재검토.
+- 소규모 벡터화: `pure_physics.py`에 `evolve_ball_motion_batch()` 추가 — 공 여러 개(다른 state 섞여도)를 한 번의 numpy 호출로 처리, `advance_balls`처럼 N개 공 Python 루프가 있는 지점에 적용. 학습 루프 전체를 shot-batch 텐서 연산으로 재구조화하는 것(더 큰 작업)은 범위 밖 — 이번엔 물리 호출 자체의 스왑+국소 벡터화만.
+- 진행 상황과 벤치마크 수치는 [experiments.md](experiments.md) 참고.
 
 ---
 

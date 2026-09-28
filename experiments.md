@@ -1689,7 +1689,7 @@ steps ∝ performance. Diminishing returns beginning. Due to the wide coverage s
 | type_acc | 0.822 |
 | **버그 발견** | `compute_vel_type_weights`/`compute_type_class_weights`: count=0인 타입(stick_ball)을 `clamp(min=1)`로 처리 → 이 값이 `.mean()`/`.sum()`을 지배해서 실사용 타입 가중치가 전부 0에 가깝게 붕괴 (vel_mean 0.017, 정상값의 1/57). `kw_vel`이 clamp 상한(exp(2)=7.4) 근처인 20.14까지 치솟음 → epoch 10에서 중단. |
 
-### v4 (rssm_v4) — 진행 중
+### v4 (rssm_v4) — 완료 ✅
 
 | 항목 | 값 |
 |------|-----|
@@ -1700,7 +1700,22 @@ steps ∝ performance. Diminishing returns beginning. Due to the wide coverage s
 | 신규 기능 | **per-ball pocket prediction head** (`pocket_mlp`, `predict_pocket(h)`): 이벤트마다 h[i]→P(공 i가 이번 샷에서 포켓될지) sigmoid, BCE loss, `lam_pocket=0.5` |
 | | `will_pocket` 라벨 추가 (ShotData, pickle 호환 `__setstate__`) |
 | | eval에 `pock_acc` 리포트 추가 |
+| val RMSE | **1.98340** (epoch 130) — 500 epoch 전체 실행, early stop 없이 종료 |
+| type_acc / pock_acc (epoch 130 기준) | 0.863 / 0.853 |
+
+**SGDR(`CosineAnnealingWarmRestarts`, T_0=50, T_mult=2) 관찰**: restart가 epoch 51/151/351에서 발생, 매번 val_rmse가 일시적으로 2.6~3.0대로 튀었다가 LR이 decay되며 회복하는 패턴이 반복됨. 2번째 사이클(51~150)은 epoch 130에서 최종 best(1.98340)를 찍었고, 3번째 사이클(351~550)은 길이가 200 epoch이라 `max_epochs=500`으로 끝날 때까지 회복을 완료하지 못해(마지막 eval val=2.89) 결국 epoch 130 체크포인트가 최종 best로 남았다. 즉 SGDR 주기가 `max_epochs`보다 길게 잡히면 마지막 사이클이 미완주로 끝나 자원 낭비가 될 수 있음 — 다음 실험에서는 `T_mult` 또는 `max_epochs`를 사이클 경계에 맞춰 조정하는 게 나을 듯.
+
+### v5 (rssm_v5) — 진행 중
+
+**가설**: v4의 SGDR restart는 매번 val_rmse를 일시적으로 망가뜨렸을 뿐, restart가 만든 mid-cycle optimum(epoch 130, 1.98340)을 넘어서는 이득을 준 적이 없었다. 특히 3번째 사이클은 `max_epochs`보다 길어서 미완주로 끝나 자원만 낭비했다. Warm restart 없이 단일 cosine decay로 학습하면 이런 디스럽션 없이 더 매끄럽게, 적어도 v4와 동등하거나 더 빠르게 수렴할 것이라는 가설.
+
+| 항목 | 값 |
+|------|-----|
+| 데이터/설정 | v4와 동일 (40K/5K, focal_gamma=2.0, lam_pocket=0.5) |
+| 변경점 | `CosineAnnealingWarmRestarts(T_0=50, T_mult=2)` → `CosineAnnealingLR(T_max=max_epochs)` — restart 없이 3e-4→3e-6로 500 epoch에 걸쳐 단조 감소. `T_0`/`T_mult` config·CLI 인자 제거 |
 | val RMSE | TBD |
+
+**출력**: `world_model/results/rssm_v5/`, 로그 `/tmp/rssm_v5.log`
 
 ### 물리 엔진 버그: ball_motion.py 마찰계수 (commit 4bbf568)
 

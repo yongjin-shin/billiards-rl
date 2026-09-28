@@ -86,178 +86,198 @@ def evolve_trajectory(rvw0: np.ndarray, s0: int, duration: float, fps: int = FPS
     return np.column_stack([xs, ys])
 
 
+def _ball_state(agent_state):
+    """agent.initial / agent.final → (rvw (3,3), s)."""
+    fin = agent_state
+    if hasattr(fin, "state"):
+        rvw = np.array(fin.state.rvw, dtype=np.float64)
+        s   = int(fin.state.s)
+    else:
+        vel_n = np.linalg.norm([fin.vel[0], fin.vel[1]])
+        rvw = np.array([[fin.xyz[0], fin.xyz[1], 0.],
+                         [fin.vel[0], fin.vel[1], 0.],
+                         [fin.avel[0], fin.avel[1], fin.avel[2]]], dtype=np.float64)
+        s = const.sliding if vel_n > 1e-4 else const.stationary
+    return rvw, s
+
+
+def _advance_state(rvw, s, duration):
+    """duration 후 (rvw, s) 반환."""
+    rvw_new, s_new = evolve.evolve_ball_motion(
+        state=s, rvw=rvw.copy(),
+        R=BALL_PARAMS["R"], m=BALL_PARAMS["m"],
+        u_s=BALL_PARAMS["u_s"], u_sp=BALL_PARAMS["u_sp"],
+        u_r=BALL_PARAMS["u_r"], g=BALL_PARAMS["g"], t=duration,
+    )
+    return np.array(rvw_new, dtype=np.float64), int(s_new)
+
+
 def run_gt_trajectory(system):
-    """pooltool system에서 cue/tgt 연속 궤적 추출 (normalized [0,1])."""
-    cue_path, tgt_path = [], []
-
+    """GT: 두 공 모두 매 이벤트 구간에서 진행. 길이 보장."""
     events = [e for e in system.events if str(e.event_type) != "none"]
+    if not events:
+        return np.zeros((2, 2)), np.zeros((2, 2))
 
-    for i, ev in enumerate(events):
-        t_start = ev.time
-        t_end   = events[i+1].time if i+1 < len(events) else t_start + 0.5
-
-        duration = float(t_end - t_start)
-        if duration <= 0:
-            continue
-
-        # 이벤트 직후 state
+    # 첫 등장 시점의 initial state로 초기화
+    cue_rvw = cue_s = None
+    tgt_rvw = tgt_s = None
+    for ev in events:
         for agent in ev.agents:
             if getattr(agent, "agent_type", "") != "ball":
                 continue
-            fin = agent.final
-            rvw = np.array(fin.state.rvw if hasattr(fin, "state") else
-                           [[fin.xyz[0], fin.xyz[1], 0],
-                            [fin.vel[0], fin.vel[1], 0],
-                            [fin.avel[0], fin.avel[1], fin.avel[2]]])
-            s   = int(fin.state.s) if hasattr(fin, "state") else const.sliding
-
-            traj = evolve_trajectory(rvw, s, duration)
-            if agent.id == "cue":
-                cue_path.append(traj)
-            elif agent.id == "1":
-                tgt_path.append(traj)
-
-    cue = np.concatenate(cue_path, axis=0) if cue_path else np.zeros((2, 2))
-    tgt = np.concatenate(tgt_path, axis=0) if tgt_path else np.zeros((2, 2))
-    # 길이 맞추기
-    n = min(len(cue), len(tgt))
-    return cue[:n], tgt[:n]
-
-
-def run_gnn_trajectory(system, model, device):
-    """GNN resolver로 충돌 해결, pooltool kinematic으로 사이 적분."""
-    cue_path, tgt_path = [], []
-
-    events_raw = [e for e in system.events if str(e.event_type) != "none"]
-
-    # 초기 state (stick_ball 이전: cue는 정지 상태)
-    cue_rvw = None
-    cue_s   = const.stationary
-    tgt_rvw = None
-    tgt_s   = const.stationary
-
-    # stick_ball에서 초기 cue state 읽기
-    for ev in events_raw:
-        if str(ev.event_type) == "stick_ball":
-            for agent in ev.agents:
-                if getattr(agent, "agent_type", "") == "ball" and agent.id == "cue":
-                    ini = agent.initial
-                    tgt_for_ini = next(
-                        (a for a in ev.agents
-                         if getattr(a, "agent_type", "") == "ball" and a.id == "1"),
-                        None
-                    )
-                    cue_rvw = np.array([[ini.xyz[0], ini.xyz[1], 0.0],
-                                         [0.0, 0.0, 0.0],
-                                         [0.0, 0.0, 0.0]])
-                    cue_s = const.stationary
-            # tgt 초기 위치
-            for ev2 in events_raw:
-                if str(ev2.event_type) == "ball_ball":
-                    for ag2 in ev2.agents:
-                        if getattr(ag2, "agent_type", "") == "ball" and ag2.id == "1":
-                            ini2 = ag2.initial
-                            tgt_rvw = np.array([[ini2.xyz[0], ini2.xyz[1], 0.0],
-                                                 [0.0, 0.0, 0.0],
-                                                 [0.0, 0.0, 0.0]])
-                            tgt_s = const.stationary
-                    break
+            rvw, s = _ball_state(agent.initial)
+            if agent.id == "cue" and cue_rvw is None:
+                cue_rvw, cue_s = rvw, s
+            elif agent.id == "1" and tgt_rvw is None:
+                tgt_rvw, tgt_s = rvw, s
+        if cue_rvw is not None and tgt_rvw is not None:
             break
 
     if cue_rvw is None:
         return np.zeros((2, 2)), np.zeros((2, 2))
+    if tgt_rvw is None:
+        tgt_rvw = np.zeros((3, 3))
+        tgt_s   = const.stationary
+
+    cue_path, tgt_path = [], []
+
+    for i, ev in enumerate(events):
+        # 이벤트 참여 공 → post-collision state 업데이트
+        for agent in ev.agents:
+            if getattr(agent, "agent_type", "") != "ball":
+                continue
+            rvw, s = _ball_state(agent.final)
+            if agent.id == "cue":
+                cue_rvw, cue_s = rvw, s
+            elif agent.id == "1":
+                tgt_rvw, tgt_s = rvw, s
+
+        # 두 공 모두 다음 이벤트까지 진행
+        t_end    = events[i+1].time if i+1 < len(events) else ev.time + 0.5
+        duration = max(0., float(t_end - ev.time))
+        if duration <= 0:
+            continue
+
+        cue_path.append(evolve_trajectory(cue_rvw, cue_s, duration))
+        tgt_path.append(evolve_trajectory(tgt_rvw, tgt_s, duration))
+        cue_rvw, cue_s = _advance_state(cue_rvw, cue_s, duration)
+        tgt_rvw, tgt_s = _advance_state(tgt_rvw, tgt_s, duration)
+
+    cue = np.concatenate(cue_path) if cue_path else np.zeros((2, 2))
+    tgt = np.concatenate(tgt_path) if tgt_path else np.zeros((2, 2))
+    return cue, tgt  # 같은 길이 보장
+
+
+def run_gnn_trajectory(system, model, device):
+    """GNN resolver: 충돌 해결만 교체, 두 공 연속 전파. 텔레포트 없음."""
+    events_raw = [e for e in system.events if str(e.event_type) != "none"]
+    if not events_raw:
+        return np.zeros((2, 2)), np.zeros((2, 2))
+
+    # GT와 동일하게 초기 state 설정
+    cue_rvw = cue_s = None
+    tgt_rvw = tgt_s = None
+    for ev in events_raw:
+        for agent in ev.agents:
+            if getattr(agent, "agent_type", "") != "ball":
+                continue
+            rvw, s = _ball_state(agent.initial)
+            if agent.id == "cue" and cue_rvw is None:
+                cue_rvw, cue_s = rvw, s
+            elif agent.id == "1" and tgt_rvw is None:
+                tgt_rvw, tgt_s = rvw, s
+        if cue_rvw is not None and tgt_rvw is not None:
+            break
+
+    if cue_rvw is None:
+        return np.zeros((2, 2)), np.zeros((2, 2))
+    if tgt_rvw is None:
+        tgt_rvw = np.zeros((3, 3))
+        tgt_s   = const.stationary
 
     model.eval()
+    cue_path, tgt_path = [], []
+    import math
 
     for i, ev in enumerate(events_raw):
         et = str(ev.event_type)
-        if et not in COLL_TYPES:
-            continue
-        ct = COLL_TYPES[et]
 
-        t_start = ev.time
-        t_end   = events_raw[i+1].time if i+1 < len(events_raw) else t_start + 0.5
-        duration = max(0.0, float(t_end - t_start))
+        if et == "stick_ball":
+            # stick_ball = RL action 자체. GNN 예측 불필요, GT post_vel 직접 사용
+            cue_ball_agent = next(
+                (a for a in ev.agents if getattr(a, "agent_type", "") == "ball"), None)
+            if cue_ball_agent is not None:
+                cue_rvw = cue_rvw.copy()
+                cue_rvw[1, :2] = np.array(cue_ball_agent.final.vel[:2])
+                cue_rvw[2, :]  = np.array(cue_ball_agent.final.avel[:3])
+                cue_s = const.sliding if np.linalg.norm(cue_rvw[1, :2]) > 1e-4 else const.stationary
 
-        # pre-collision: pooltool GT에서 읽기
-        cue_pre_vel  = np.zeros(2)
-        cue_pre_avel = np.zeros(3)
-        tgt_pre_vel  = np.zeros(2)
-        tgt_pre_avel = np.zeros(3)
-        cue_pos = np.zeros(2)
-        tgt_pos = np.zeros(2)
-        has_tgt = False
-        normal  = np.array([1.0, 0.0])
+        elif et in COLL_TYPES:
+            # GNN 입력: 현재 전파된 상태 (GT 아님)
+            cue_pos      = cue_rvw[0, :2]
+            tgt_pos      = tgt_rvw[0, :2]
+            cue_pre_vel  = cue_rvw[1, :2]
+            tgt_pre_vel  = tgt_rvw[1, :2]
+            cue_pre_avel = cue_rvw[2, :]
+            tgt_pre_avel = tgt_rvw[2, :]
 
-        for agent in ev.agents:
-            atype = getattr(agent, "agent_type", "")
-            if atype == "ball":
-                ini = agent.initial
-                pos = np.array([ini.xyz[0], ini.xyz[1]])
-                vel = np.array(ini.vel[:2])
-                avl = np.array(ini.avel[:3])
-                if agent.id == "cue":
-                    cue_pre_vel, cue_pre_avel, cue_pos = vel, avl, pos
-                elif agent.id == "1":
-                    tgt_pre_vel, tgt_pre_avel, tgt_pos = vel, avl, pos
+            has_tgt = False
+            normal  = np.array([1.0, 0.0])
+
+            for agent in ev.agents:
+                atype = getattr(agent, "agent_type", "")
+                if atype == "ball" and agent.id == "1":
                     has_tgt = True
-            elif atype == "linear_cushion_segment":
-                normal = _contact_normal_linear(agent)
-            elif atype == "circular_cushion_segment":
-                normal = _contact_normal_circular(agent, cue_pos)
-            elif atype == "pocket":
-                normal = _contact_normal_pocket(agent, cue_pos)
-            elif atype == "cue":
-                import math
-                phi_rad = float(agent.initial.phi) * math.pi / 180.0
-                normal  = np.array([math.cos(phi_rad), math.sin(phi_rad)])
+                elif atype == "linear_cushion_segment":
+                    normal = _contact_normal_linear(agent)
+                elif atype == "circular_cushion_segment":
+                    normal = _contact_normal_circular(agent, cue_pos)
+                elif atype == "pocket":
+                    normal = _contact_normal_pocket(agent, cue_pos)
 
-        if et == "ball_ball" and has_tgt:
-            normal = _contact_normal_ball_ball(cue_pos, tgt_pos)
+            if et == "ball_ball" and has_tgt:
+                normal = _contact_normal_ball_ball(cue_pos, tgt_pos)
 
-        # GNN 예측
-        with torch.no_grad():
-            pv  = torch.tensor([[cue_pre_vel  / MAX_SPEED,
-                                  tgt_pre_vel  / MAX_SPEED]], dtype=torch.float32).to(device)
-            pa  = torch.tensor([[cue_pre_avel / MAX_AVEL,
-                                  tgt_pre_avel / MAX_AVEL]], dtype=torch.float32).to(device)
-            pos_t = torch.tensor([[[cue_pos[0]/TABLE_W, cue_pos[1]/TABLE_H],
-                                    [tgt_pos[0]/TABLE_W, tgt_pos[1]/TABLE_H]]],
-                                  dtype=torch.float32).to(device)
-            nrm = torch.tensor([normal], dtype=torch.float32).to(device)
-            htg = torch.tensor([has_tgt], dtype=torch.bool).to(device)
+            with torch.no_grad():
+                pv  = torch.tensor([[cue_pre_vel / MAX_SPEED,
+                                      tgt_pre_vel / MAX_SPEED]], dtype=torch.float32).to(device)
+                pa  = torch.tensor([[cue_pre_avel / MAX_AVEL,
+                                      tgt_pre_avel / MAX_AVEL]], dtype=torch.float32).to(device)
+                pos_t = torch.tensor([[[cue_pos[0]/TABLE_W, cue_pos[1]/TABLE_H],
+                                        [tgt_pos[0]/TABLE_W, tgt_pos[1]/TABLE_H]]],
+                                      dtype=torch.float32).to(device)
+                nrm = torch.tensor([normal], dtype=torch.float32).to(device)
+                htg = torch.tensor([has_tgt], dtype=torch.bool).to(device)
+                dv, da = model(pos_t, pv, pa, nrm, htg)
+                dv = dv[0].cpu().numpy()
+                da = da[0].cpu().numpy()
 
-            dv, da = model(pos_t, pv, pa, nrm, htg)
-            dv = dv[0].cpu().numpy()
-            da = da[0].cpu().numpy()
+            # 위치는 유지, 속도만 업데이트
+            cue_rvw = cue_rvw.copy()
+            cue_rvw[1, :2] = cue_pre_vel  + dv[0] * MAX_SPEED
+            cue_rvw[2, :]  = cue_pre_avel + da[0] * MAX_AVEL
+            cue_s = const.sliding if np.linalg.norm(cue_rvw[1, :2]) > 1e-4 else const.stationary
 
-        cue_post_vel  = cue_pre_vel  + dv[0] * MAX_SPEED
-        cue_post_avel = cue_pre_avel + da[0] * MAX_AVEL
-        tgt_post_vel  = tgt_pre_vel  + dv[1] * MAX_SPEED  if has_tgt else tgt_pre_vel
-        tgt_post_avel = tgt_pre_avel + da[1] * MAX_AVEL    if has_tgt else tgt_pre_avel
+            if has_tgt:
+                tgt_rvw = tgt_rvw.copy()
+                tgt_rvw[1, :2] = tgt_pre_vel  + dv[1] * MAX_SPEED
+                tgt_rvw[2, :]  = tgt_pre_avel + da[1] * MAX_AVEL
+                tgt_s = const.sliding if np.linalg.norm(tgt_rvw[1, :2]) > 1e-4 else const.stationary
 
-        # post-collision state 업데이트
-        if et != "ball_pocket":
-            cue_rvw = np.array([[cue_pos[0], cue_pos[1], 0.0],
-                                  [cue_post_vel[0], cue_post_vel[1], 0.0],
-                                  [cue_post_avel[0], cue_post_avel[1], cue_post_avel[2]]])
-            cue_s = const.sliding if np.linalg.norm(cue_post_vel) > 1e-4 else const.stationary
+        # 두 공 모두 다음 이벤트까지 진행
+        t_end    = events_raw[i+1].time if i+1 < len(events_raw) else ev.time + 0.5
+        duration = max(0., float(t_end - ev.time))
+        if duration <= 0:
+            continue
 
-        if has_tgt and et != "ball_pocket":
-            tgt_rvw = np.array([[tgt_pos[0], tgt_pos[1], 0.0],
-                                  [tgt_post_vel[0], tgt_post_vel[1], 0.0],
-                                  [tgt_post_avel[0], tgt_post_avel[1], tgt_post_avel[2]]])
-            tgt_s = const.sliding if np.linalg.norm(tgt_post_vel) > 1e-4 else const.stationary
+        cue_path.append(evolve_trajectory(cue_rvw, cue_s, duration))
+        tgt_path.append(evolve_trajectory(tgt_rvw, tgt_s, duration))
+        cue_rvw, cue_s = _advance_state(cue_rvw, cue_s, duration)
+        tgt_rvw, tgt_s = _advance_state(tgt_rvw, tgt_s, duration)
 
-        if duration > 0 and cue_rvw is not None:
-            cue_path.append(evolve_trajectory(cue_rvw, cue_s, duration))
-        if duration > 0 and tgt_rvw is not None:
-            tgt_path.append(evolve_trajectory(tgt_rvw, tgt_s, duration))
-
-    cue = np.concatenate(cue_path, axis=0) if cue_path else np.zeros((2, 2))
-    tgt = np.concatenate(tgt_path, axis=0) if tgt_path else np.zeros((2, 2))
-    n = min(len(cue), len(tgt))
-    return cue[:n], tgt[:n]
+    cue = np.concatenate(cue_path) if cue_path else np.zeros((2, 2))
+    tgt = np.concatenate(tgt_path) if tgt_path else np.zeros((2, 2))
+    return cue, tgt  # 같은 길이 보장
 
 
 def make_video(ep_idx, cue_gt, tgt_gt, cue_pr, tgt_pr, pocketed, out_path: Path):

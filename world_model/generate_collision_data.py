@@ -4,21 +4,25 @@ world_model/generate_collision_data.py
 각 충돌 이벤트마다 (pre_state, post_state, contact_normal, type) 쌍을 수집.
 GNN collision resolver 학습용.
 
-충돌 타입 (4종):
+충돌 타입 (7종):
     0 = ball_ball
-    1 = ball_linear_cushion
-    2 = ball_circular_cushion
-    3 = ball_pocket  (post_vel = 0 이므로 학습 제외해도 됨)
+    1 = cue_linear_cushion
+    2 = cue_circular_cushion
+    3 = ball_pocket  (cue 또는 target, post_vel = 0)
+    4 = stick_ball
+    5 = tgt_linear_cushion   (target ball만 관여)
+    6 = tgt_circular_cushion (target ball만 관여)
 
 Data format (per sample):
-    pre_vel    (2,2): [cue_vel, tgt_vel]  — ball_ball 아니면 tgt=0
-    pre_avel   (2,3): [cue_avel, tgt_avel]
-    post_vel   (2,2)
-    post_avel  (2,3)
-    pos        (2,2): [cue_pos, tgt_pos]  — normalized [0,1]
-    normal     (2,)  : contact normal (unit vector, world coords)
-    coll_type  (1,)  : int, 0~3
-    has_tgt    (1,)  : bool, ball_ball이면 1
+    pre_vel     (2,2): [protagonist_vel, companion_vel]  — ball_ball 아니면 companion=0
+    pre_avel    (2,3): [protagonist_avel, companion_avel]
+    post_vel    (2,2)
+    post_avel   (2,3)
+    pos         (2,2): [protagonist_pos, companion_pos]  — normalized [0,1]
+    normal      (2,)  : contact normal (unit vector)
+    coll_type   (1,)  : int, 0~6
+    has_tgt     (1,)  : bool, ball_ball이면 1
+    will_pocket (1,)  : bool, 이 샷에서 target ball이 포켓됐는지
 
 Usage:
     python world_model/generate_collision_data.py --n-episodes 50000
@@ -90,8 +94,11 @@ def _contact_normal_ball_ball(pos_cue, pos_tgt):
     return d / norm if norm > 1e-9 else np.array([1.0, 0.0])
 
 
-def extract_collisions(system):
-    """Shot 하나에서 모든 충돌 이벤트의 pre/post 쌍을 추출."""
+def extract_collisions(system, will_pocket: int = 0):
+    """Shot 하나에서 모든 충돌 이벤트의 pre/post 쌍을 추출.
+
+    will_pocket: 이 shot에서 target ball이 포켓됐는지 (전 이벤트 공유 레이블).
+    """
     samples = []
 
     for e in system.events:
@@ -100,30 +107,38 @@ def extract_collisions(system):
             continue
 
         coll_type = COLL_TYPES[et]
-
-        # ball agent 수집
         balls = {a.id: a for a in e.agents
                  if getattr(a, "agent_type", "") == "ball"}
 
         cue = balls.get("cue")
         tgt = balls.get("1")
 
-        if cue is None:
-            continue  # cue 없는 이벤트는 skip
-
-        cue_pre_vel, cue_pre_avel, cue_post_vel, cue_post_avel, cue_pos = \
-            _get_ball_pre_post(cue)
-
-        has_tgt = tgt is not None
-        if has_tgt:
-            tgt_pre_vel, tgt_pre_avel, tgt_post_vel, tgt_post_avel, tgt_pos = \
-                _get_ball_pre_post(tgt)
+        # protagonist = slot[0], companion = slot[1]
+        if cue is not None:
+            protagonist, companion = cue, tgt
+        elif tgt is not None:
+            # cue ball 없이 target ball만 관여하는 이벤트 (쿠션 / 포켓)
+            protagonist, companion = tgt, None
+            if   et == "ball_linear_cushion":   coll_type = 5
+            elif et == "ball_circular_cushion": coll_type = 6
+            elif et == "ball_pocket":           coll_type = 3
+            else:                               continue
         else:
-            tgt_pre_vel  = np.zeros(2)
-            tgt_pre_avel = np.zeros(3)
-            tgt_post_vel  = np.zeros(2)
-            tgt_post_avel = np.zeros(3)
-            tgt_pos       = np.zeros(2)
+            continue
+
+        pro_pre_vel, pro_pre_avel, pro_post_vel, pro_post_avel, pro_pos = \
+            _get_ball_pre_post(protagonist)
+
+        has_tgt = (companion is not None) and (et == "ball_ball")
+        if has_tgt:
+            com_pre_vel, com_pre_avel, com_post_vel, com_post_avel, com_pos = \
+                _get_ball_pre_post(companion)
+        else:
+            com_pre_vel   = np.zeros(2)
+            com_pre_avel  = np.zeros(3)
+            com_post_vel  = np.zeros(2)
+            com_post_avel = np.zeros(3)
+            com_pos       = np.zeros(2)
 
         # contact normal
         if et == "stick_ball":
@@ -132,7 +147,7 @@ def extract_collisions(system):
             phi_rad = float(stick.initial.phi) * np.pi / 180.0
             normal = np.array([np.cos(phi_rad), np.sin(phi_rad)])
         elif et == "ball_ball":
-            normal = _contact_normal_ball_ball(cue_pos, tgt_pos)
+            normal = _contact_normal_ball_ball(pro_pos, com_pos)
         elif et == "ball_linear_cushion":
             cush = next(a for a in e.agents
                         if getattr(a, "agent_type", "") == "linear_cushion_segment")
@@ -140,22 +155,25 @@ def extract_collisions(system):
         elif et == "ball_circular_cushion":
             cush = next(a for a in e.agents
                         if getattr(a, "agent_type", "") == "circular_cushion_segment")
-            normal = _contact_normal_circular(cush, cue_pos)
+            normal = _contact_normal_circular(cush, pro_pos)
         elif et == "ball_pocket":
             pock = next(a for a in e.agents
                         if getattr(a, "agent_type", "") == "pocket")
-            normal = _contact_normal_pocket(pock, cue_pos)
+            normal = _contact_normal_pocket(pock, pro_pos)
+        else:
+            normal = np.array([1.0, 0.0], dtype=np.float32)
 
         samples.append(dict(
-            pre_vel   = np.stack([cue_pre_vel,  tgt_pre_vel],  axis=0),   # (2,2)
-            pre_avel  = np.stack([cue_pre_avel, tgt_pre_avel], axis=0),   # (2,3)
-            post_vel  = np.stack([cue_post_vel, tgt_post_vel], axis=0),   # (2,2)
-            post_avel = np.stack([cue_post_avel, tgt_post_avel], axis=0), # (2,3)
-            pos       = np.stack([cue_pos / [TABLE_W, TABLE_H],
-                                  tgt_pos / [TABLE_W, TABLE_H]], axis=0), # (2,2) normalized
-            normal    = normal.astype(np.float32),                         # (2,)
-            coll_type = coll_type,
-            has_tgt   = int(has_tgt),
+            pre_vel     = np.stack([pro_pre_vel,  com_pre_vel],  axis=0),
+            pre_avel    = np.stack([pro_pre_avel, com_pre_avel], axis=0),
+            post_vel    = np.stack([pro_post_vel, com_post_vel], axis=0),
+            post_avel   = np.stack([pro_post_avel, com_post_avel], axis=0),
+            pos         = np.stack([pro_pos / [TABLE_W, TABLE_H],
+                                    com_pos / [TABLE_W, TABLE_H]], axis=0),
+            normal      = normal.astype(np.float32),
+            coll_type   = coll_type,
+            has_tgt     = int(has_tgt),
+            will_pocket = will_pocket,
         ))
 
     return samples
@@ -192,10 +210,15 @@ def generate(n_episodes, model_path=None, seed=0):
         obs, _ = env.reset(seed=int(rng.integers(0, 2**31)))
         action = policy_fn(obs)
         _, reward, _, _, info = env.step(action)
-        if info.get("pocketed"): pocketed += 1
+        will_pocket = int(bool(info.get("pocketed")))
+        if will_pocket: pocketed += 1
 
-        samples = extract_collisions(env.system)
-        all_samples.extend(normalize(samples))
+        samples = extract_collisions(env.system, will_pocket=will_pocket)
+        normalize(samples)
+        for i, s in enumerate(samples):
+            s["episode_id"] = ep
+            s["event_idx"]  = i
+        all_samples.extend(samples)
 
         if (ep + 1) % 5000 == 0:
             counts = {}
@@ -212,14 +235,17 @@ def generate(n_episodes, model_path=None, seed=0):
 def pack(samples):
     """list of dicts → dict of arrays."""
     return {
-        "pre_vel"  : np.stack([s["pre_vel"]   for s in samples]),  # (N,2,2)
-        "pre_avel" : np.stack([s["pre_avel"]  for s in samples]),  # (N,2,3)
-        "post_vel" : np.stack([s["post_vel"]  for s in samples]),  # (N,2,2)
-        "post_avel": np.stack([s["post_avel"] for s in samples]),  # (N,2,3)
-        "pos"      : np.stack([s["pos"]       for s in samples]),  # (N,2,2)
-        "normal"   : np.stack([s["normal"]    for s in samples]),  # (N,2)
-        "coll_type": np.array([s["coll_type"] for s in samples], dtype=np.int8),  # (N,)
-        "has_tgt"  : np.array([s["has_tgt"]   for s in samples], dtype=np.int8),  # (N,)
+        "pre_vel"    : np.stack([s["pre_vel"]     for s in samples]),
+        "pre_avel"   : np.stack([s["pre_avel"]    for s in samples]),
+        "post_vel"   : np.stack([s["post_vel"]    for s in samples]),
+        "post_avel"  : np.stack([s["post_avel"]   for s in samples]),
+        "pos"        : np.stack([s["pos"]         for s in samples]),
+        "normal"     : np.stack([s["normal"]      for s in samples]),
+        "coll_type"  : np.array([s["coll_type"]   for s in samples], dtype=np.int8),
+        "has_tgt"    : np.array([s["has_tgt"]     for s in samples], dtype=np.int8),
+        "will_pocket": np.array([s["will_pocket"] for s in samples], dtype=np.int8),
+        "episode_id" : np.array([s["episode_id"]  for s in samples], dtype=np.int32),
+        "event_idx"  : np.array([s["event_idx"]   for s in samples], dtype=np.int8),
     }
 
 
@@ -241,9 +267,10 @@ def main():
     counts = {}
     for ct in data["coll_type"]:
         counts[int(ct)] = counts.get(int(ct), 0) + 1
-    names = ["ball_ball", "linear", "circular", "pocket", "stick_ball"]
+    names = {0: "ball_ball", 1: "cue_linear", 2: "cue_circular",
+             3: "pocket", 4: "stick_ball", 5: "tgt_linear", 6: "tgt_circular"}
     print(f"\nTotal samples: {len(samples)}")
-    for i, name in enumerate(names):
+    for i, name in names.items():
         print(f"  {name:20s}: {counts.get(i, 0):6d}")
 
     ts   = datetime.now().strftime("%Y%m%d_%H%M%S")
