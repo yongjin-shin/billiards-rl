@@ -27,7 +27,6 @@ from world_model.event_detector import (
     _contact_normal_pocket,
 )
 from world_model.rssm_model import EventStep, N_TYPE
-from world_model.rssm_rollout import make_node, make_edge
 
 
 SKIP_EVENTS = frozenset({"stick_ball", "none"})
@@ -192,6 +191,25 @@ def generate_shot_data(
         and COLL_TYPE.get(str(ev.event_type), -1) != -1
     ]
 
+    # ④ pre-scan: compute (raw_type, normal, ball_id_set) once per event.
+    # Eliminates O(N²) _get_raw_type_and_normal calls from _find_next_type.
+    _pre_types   : list[int]          = []
+    _pre_normals : list               = []
+    _pre_bid_sets: list[frozenset]    = []
+    for _ev in physical_events:
+        _rt, _nm = _get_raw_type_and_normal(_ev, table)
+        _pre_types.append(_rt)
+        _pre_normals.append(_nm)
+        _pre_bid_sets.append(frozenset(
+            a.id for a in _ev.agents if getattr(a, "agent_type", "") == "ball"
+        ))
+
+    def _next_type(ev_idx: int, ball_id: str) -> Optional[int]:
+        for j in range(ev_idx + 1, len(physical_events)):
+            if ball_id in _pre_bid_sets[j] and _pre_types[j] != -1:
+                return _pre_types[j]
+        return None
+
     event_steps : list[EventStep]         = []
     gt_deltas_i : list[torch.Tensor]      = []
     gt_deltas_j : list                    = []
@@ -203,7 +221,8 @@ def generate_shot_data(
     event_times : list[float]             = []   # time of each tracked event
 
     for ev_idx, ev in enumerate(physical_events):
-        raw_type, normal = _get_raw_type_and_normal(ev, table)
+        raw_type = _pre_types[ev_idx]
+        normal   = _pre_normals[ev_idx]
         if raw_type == -1:
             continue
 
@@ -219,19 +238,20 @@ def generate_shot_data(
             a_i, a_j       = tracked_sorted[0], tracked_sorted[1]
             rvw_i, rvw_j   = a_i.initial.state.rvw, a_j.initial.state.rvw
 
+            # ⑤ node_i/node_j/edge stored as None — recomputed at training time
             event_steps.append(EventStep(
                 event_type = raw_type,
                 ball_i     = id_to_idx[a_i.id],
                 ball_j     = id_to_idx[a_j.id],
-                node_i     = make_node(rvw_i, raw_type),
-                node_j     = make_node(rvw_j, raw_type),
-                edge       = make_edge(rvw_i, rvw_j, normal),
+                node_i     = None,
+                node_j     = None,
+                edge       = None,
                 normal     = normal_t,
             ))
             gt_deltas_i.append(_extract_delta(a_i))
             gt_deltas_j.append(_extract_delta(a_j))
-            gt_types_i.append(_find_next_type(physical_events, ev_idx, a_i.id, table))
-            gt_types_j.append(_find_next_type(physical_events, ev_idx, a_j.id, table))
+            gt_types_i.append(_next_type(ev_idx, a_i.id))
+            gt_types_j.append(_next_type(ev_idx, a_j.id))
             raw_rvws_i.append(rvw_i.copy())
             raw_rvws_j.append(rvw_j.copy())
             event_times.append(float(ev.time))
@@ -240,18 +260,19 @@ def generate_shot_data(
             a_i   = tracked[0]
             rvw_i = a_i.initial.state.rvw
 
+            # ⑤ node_i stored as None — recomputed at training time
             event_steps.append(EventStep(
                 event_type = raw_type,
                 ball_i     = id_to_idx[a_i.id],
                 ball_j     = None,
-                node_i     = make_node(rvw_i, raw_type),
+                node_i     = None,
                 node_j     = None,
                 edge       = None,
                 normal     = normal_t,
             ))
             gt_deltas_i.append(_extract_delta(a_i))
             gt_deltas_j.append(None)
-            gt_types_i.append(_find_next_type(physical_events, ev_idx, a_i.id, table))
+            gt_types_i.append(_next_type(ev_idx, a_i.id))
             gt_types_j.append(None)
             raw_rvws_i.append(rvw_i.copy())
             raw_rvws_j.append(None)
