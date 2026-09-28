@@ -245,7 +245,7 @@ Rationale:
 | **④ 3-ball data + GNN extension** | Generate 3-ball data; extend GNN to N=3 | [ ] Pending |
 | **⑤ R-SSM 물리 엔진 pure_physics 교체** | 아래 "R-SSM 물리 엔진" 섹션 참고 | ✅ 핵심 3곳 완료 (벡터화 서브아이템은 저효용으로 보류) |
 | **⑥ R-SSM 배치 forward** | 아래 "R-SSM 배치 forward" 섹션 참고 | ✅ 완료 (Phase 0~3) |
-| **⑦ rssm_v5 재학습** | ⑥의 `batch_size` 옵션으로 재시작 필요 — `results/rssm_v5/best.pt`만 있고 history 없이 중단됨 | ✅ 진행 중 (2026-09-28 재시작, `/tmp/rssm_v5.log`) |
+| **⑦ rssm_v5 재학습** | ⑥의 `batch_size` 옵션으로 재시작 필요 — `results/rssm_v5/best.pt`만 있고 history 없이 중단됨 | ✅ 완료 (val_rmse 1.71900, v4 대비 개선) |
 | **⑧ v6: free-running eval + 주기적 체크포인트** | 현재 `evaluate()`는 ss_prob와 무관하게 항상 teacher-forcing이라 실사용(free-running rollout) 성능과 어긋날 수 있음. 상세는 [experiments.md](experiments.md) "eval 메서드가 항상 teacher-forcing이라는 점" 참고 | [ ] Pending |
 
 ### ③ Q-target Augmentation (WM-augmented critic)

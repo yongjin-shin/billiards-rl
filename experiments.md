@@ -1705,17 +1705,21 @@ steps ∝ performance. Diminishing returns beginning. Due to the wide coverage s
 
 **SGDR(`CosineAnnealingWarmRestarts`, T_0=50, T_mult=2) 관찰**: restart가 epoch 51/151/351에서 발생, 매번 val_rmse가 일시적으로 2.6~3.0대로 튀었다가 LR이 decay되며 회복하는 패턴이 반복됨. 2번째 사이클(51~150)은 epoch 130에서 최종 best(1.98340)를 찍었고, 3번째 사이클(351~550)은 길이가 200 epoch이라 `max_epochs=500`으로 끝날 때까지 회복을 완료하지 못해(마지막 eval val=2.89) 결국 epoch 130 체크포인트가 최종 best로 남았다. 즉 SGDR 주기가 `max_epochs`보다 길게 잡히면 마지막 사이클이 미완주로 끝나 자원 낭비가 될 수 있음 — 다음 실험에서는 `T_mult` 또는 `max_epochs`를 사이클 경계에 맞춰 조정하는 게 나을 듯.
 
-### v5 (rssm_v5) — 진행 중
+### v5 (rssm_v5) — 완료 (2026-09-28)
 
 **가설**: v4의 SGDR restart는 매번 val_rmse를 일시적으로 망가뜨렸을 뿐, restart가 만든 mid-cycle optimum(epoch 130, 1.98340)을 넘어서는 이득을 준 적이 없었다. 특히 3번째 사이클은 `max_epochs`보다 길어서 미완주로 끝나 자원만 낭비했다. Warm restart 없이 단일 cosine decay로 학습하면 이런 디스럽션 없이 더 매끄럽게, 적어도 v4와 동등하거나 더 빠르게 수렴할 것이라는 가설.
 
 | 항목 | 값 |
 |------|-----|
 | 데이터/설정 | v4와 동일 (40K/5K, focal_gamma=2.0, lam_pocket=0.5) |
-| 변경점 | `CosineAnnealingWarmRestarts(T_0=50, T_mult=2)` → `CosineAnnealingLR(T_max=max_epochs)` — restart 없이 3e-4→3e-6로 500 epoch에 걸쳐 단조 감소. `T_0`/`T_mult` config·CLI 인자 제거 |
-| val RMSE | TBD |
+| 변경점 | `CosineAnnealingWarmRestarts(T_0=50, T_mult=2)` → `CosineAnnealingLR(T_max=max_epochs)` — restart 없이 3e-4→3e-6로 500 epoch에 걸쳐 단조 감소. `T_0`/`T_mult` config·CLI 인자 제거. ⑥ 배치 forward(`--batch-size 32 --device cpu`)로 재시작 |
+| val RMSE | **1.71900** (epoch 500, early stop 없이 500 epoch 완주) — v4(1.98340) 대비 개선 |
+| type_acc / pock_acc (epoch 500 기준) | 0.831 / 0.857 |
+| 총 소요시간 | 18:42~23:21, 약 4시간 39분 |
 
-**출력**: `world_model/results/rssm_v5/`, 로그 `/tmp/rssm_v5.log`
+**가설 검증 결과**: warm restart 디스럽션은 확실히 사라졌으나(SGDR의 51/151/351 epoch 급락 패턴 없음), 대신 scheduled sampling(`ss` 1.0→0.0, `ss_warmup=200`)이 0으로 수렴하는 구간(epoch ~110~300)에서 약 190 epoch간 별도의 정체가 발생했다 — 상세 원인 논의는 아래 "eval 메서드..." / "ss_warmup vs LR anneal 타이밍" 참고. epoch 320 이후 정체 해소, 이후 매끄럽게 개선되어 최종 1.71900으로 v4를 갱신.
+
+**출력**: `world_model/results/rssm_v5/` (best.pt는 epoch 500 시점 가중치 — 중간 체크포인트는 덮어쓰기로 소실됨), 로그 `/tmp/rssm_v5.log`
 
 **진행 관찰 (2026-09-28)**: epoch 110에서 val=1.81041(당시 best) 찍은 뒤 epoch 320(val=1.78991)까지 약 90분간 non-improving 정체. epoch 110~300 구간은 scheduled sampling `ss`가 0.455→0.000으로 떨어지는 구간과 겹쳐서, 학습(train)은 점점 free-running(자기 예측 입력)에 맞춰지는데 eval은 계속 teacher-forced라 지표가 일시적으로 어긋났을 가능성을 논의함(아래 "eval 메서드 논의" 참고). ss=0.000 고정 이후 epoch 320에서 정체 해소, 다시 개선 시작.
 
