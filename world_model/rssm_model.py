@@ -197,6 +197,63 @@ class RSSMModel(nn.Module):
             self.type_mlp(h_i_new),
         )
 
+    # ── Batched step functions (training only) ───────────────────────────────
+    #
+    # Pure tensor-in/tensor-out orchestration over the SAME nn.Module calls
+    # used by step_ball_ball / step_single — no new formula, no new params.
+    # All nn.Linear-based MLPs already broadcast over leading batch dims, so
+    # these are thin wrappers that batch B' independent events in one call.
+    # No list/shot bookkeeping here — caller (compute_batch_ss_loss) owns that.
+
+    def step_ball_ball_batch(
+        self,
+        h_i    : torch.Tensor,   # (B', h_dim)
+        h_j    : torch.Tensor,   # (B', h_dim)
+        node_i : torch.Tensor,   # (B', NODE_DIM)
+        node_j : torch.Tensor,   # (B', NODE_DIM)
+        edge   : torch.Tensor,   # (B', EDGE_DIM) — i→j direction
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        Batched version of step_ball_ball. Same math, B' independent events.
+
+        Returns
+        -------
+        h_i_new, h_j_new : (B', h_dim)
+        delta_i, delta_j : (B', 5)
+        type_i, type_j   : (B', N_TYPE)
+        """
+        msg_i = self.msg_mlp(torch.cat([h_i, h_j, node_i, node_j,  edge], dim=-1))
+        msg_j = self.msg_mlp(torch.cat([h_j, h_i, node_j, node_i, -edge], dim=-1))
+
+        h_i_new = self.norm(h_i + self.upd_mlp(torch.cat([h_i, msg_i], dim=-1)))
+        h_j_new = self.norm(h_j + self.upd_mlp(torch.cat([h_j, msg_j], dim=-1)))
+
+        return (
+            h_i_new, h_j_new,
+            self.dec_mlp(h_i_new), self.dec_mlp(h_j_new),
+            self.type_mlp(h_i_new), self.type_mlp(h_j_new),
+        )
+
+    def step_single_batch(
+        self,
+        h_i    : torch.Tensor,   # (B', h_dim)
+        node_i : torch.Tensor,   # (B', NODE_DIM)
+        normal : torch.Tensor,   # (B', 2)
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        Batched version of step_single. Same math, B' independent events.
+
+        Returns
+        -------
+        h_i_new : (B', h_dim)
+        delta_i : (B', 5)
+        type_i  : (B', N_TYPE)
+        """
+        h_i_new = self.norm(
+            h_i + self.single_mlp(torch.cat([h_i, node_i, normal], dim=-1))
+        )
+        return h_i_new, self.dec_mlp(h_i_new), self.type_mlp(h_i_new)
+
     # ── Pocket prediction ─────────────────────────────────────────────────────
 
     def predict_pocket(self, h) -> torch.Tensor:

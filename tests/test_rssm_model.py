@@ -333,3 +333,135 @@ class TestAutogradSafety:
         h_id = id(h)
         h_ret, *_ = model.step_ball_ball(h, 0, 1, _node(), _node(), _edge())
         assert id(h_ret) == h_id, "step_ball_ball must return the same list object"
+
+
+# ── TestStepBatch (Phase 1: batch forward) ──────────────────────────────────
+
+class TestStepBallBallBatch:
+    def test_matches_single_call(self):
+        """Batched call must numerically match B' independent single calls."""
+        model = _model()
+        B = 3
+        h_i    = torch.randn(B, H_DIM)
+        h_j    = torch.randn(B, H_DIM)
+        node_i = torch.stack([_node() for _ in range(B)])
+        node_j = torch.stack([_node() for _ in range(B)])
+        edge   = torch.stack([_edge() for _ in range(B)])
+
+        h_i_new, h_j_new, d_i, d_j, t_i, t_j = model.step_ball_ball_batch(
+            h_i, h_j, node_i, node_j, edge
+        )
+
+        for b in range(B):
+            h_single = [h_i[b].clone(), h_j[b].clone()]
+            h_out, d_i_s, d_j_s, t_i_s, t_j_s = model.step_ball_ball(
+                h_single, 0, 1, node_i[b], node_j[b], edge[b]
+            )
+            assert torch.allclose(h_i_new[b], h_out[0], atol=1e-6)
+            assert torch.allclose(h_j_new[b], h_out[1], atol=1e-6)
+            assert torch.allclose(d_i[b], d_i_s, atol=1e-6)
+            assert torch.allclose(d_j[b], d_j_s, atol=1e-6)
+            assert torch.allclose(t_i[b], t_i_s, atol=1e-6)
+            assert torch.allclose(t_j[b], t_j_s, atol=1e-6)
+
+    def test_output_shapes(self):
+        model = _model()
+        B = 5
+        h_i, h_j = torch.randn(B, H_DIM), torch.randn(B, H_DIM)
+        node_i = torch.stack([_node() for _ in range(B)])
+        node_j = torch.stack([_node() for _ in range(B)])
+        edge   = torch.stack([_edge() for _ in range(B)])
+
+        h_i_new, h_j_new, d_i, d_j, t_i, t_j = model.step_ball_ball_batch(
+            h_i, h_j, node_i, node_j, edge
+        )
+        assert h_i_new.shape == (B, H_DIM)
+        assert h_j_new.shape == (B, H_DIM)
+        assert d_i.shape == (B, 5)
+        assert d_j.shape == (B, 5)
+        assert t_i.shape == (B, N_TYPE)
+        assert t_j.shape == (B, N_TYPE)
+
+    def test_gradients_flow(self):
+        model = _model()
+        B = 4
+        h_i    = torch.randn(B, H_DIM, requires_grad=True)
+        h_j    = torch.randn(B, H_DIM, requires_grad=True)
+        node_i = torch.stack([_node() for _ in range(B)])
+        node_j = torch.stack([_node() for _ in range(B)])
+        edge   = torch.stack([_edge() for _ in range(B)])
+
+        _, _, d_i, d_j, t_i, t_j = model.step_ball_ball_batch(
+            h_i, h_j, node_i, node_j, edge
+        )
+        (d_i.sum() + d_j.sum() + t_i.sum() + t_j.sum()).backward()
+
+        w_grad = model.msg_mlp[0].weight.grad
+        assert w_grad is not None
+        assert w_grad.abs().sum() > 0
+
+
+class TestStepSingleBatch:
+    def test_matches_single_call(self):
+        model = _model()
+        B = 3
+        h_i    = torch.randn(B, H_DIM)
+        node_i = torch.stack([_node(1) for _ in range(B)])
+        normal = torch.stack([_normal() for _ in range(B)])
+
+        h_i_new, d_i, t_i = model.step_single_batch(h_i, node_i, normal)
+
+        for b in range(B):
+            h_single = [h_i[b].clone()]
+            h_out, d_i_s, t_i_s = model.step_single(h_single, 0, node_i[b], normal[b])
+            assert torch.allclose(h_i_new[b], h_out[0], atol=1e-6)
+            assert torch.allclose(d_i[b], d_i_s, atol=1e-6)
+            assert torch.allclose(t_i[b], t_i_s, atol=1e-6)
+
+    def test_output_shapes(self):
+        model = _model()
+        B = 5
+        h_i    = torch.randn(B, H_DIM)
+        node_i = torch.stack([_node(1) for _ in range(B)])
+        normal = torch.stack([_normal() for _ in range(B)])
+
+        h_i_new, d_i, t_i = model.step_single_batch(h_i, node_i, normal)
+        assert h_i_new.shape == (B, H_DIM)
+        assert d_i.shape == (B, 5)
+        assert t_i.shape == (B, N_TYPE)
+
+    def test_gradients_flow(self):
+        model = _model()
+        B = 4
+        h_i    = torch.randn(B, H_DIM, requires_grad=True)
+        node_i = torch.stack([_node(1) for _ in range(B)])
+        normal = torch.stack([_normal() for _ in range(B)])
+
+        _, d_i, t_i = model.step_single_batch(h_i, node_i, normal)
+        (d_i.sum() + t_i.sum()).backward()
+
+        w_grad = model.single_mlp[0].weight.grad
+        assert w_grad is not None
+        assert w_grad.abs().sum() > 0
+
+
+class TestPredictPocketBatch:
+    def test_accepts_batched_BNH_tensor(self):
+        """predict_pocket must work directly on a (B, N, H) tensor (no new function needed)."""
+        model = _model()
+        B, N = 4, 3
+        h = torch.randn(B, N, H_DIM)
+        probs = model.predict_pocket(h)
+        assert probs.shape == (B, N)
+        assert torch.all((probs >= 0) & (probs <= 1))
+
+    def test_matches_per_shot_loop(self):
+        model = _model()
+        B, N = 4, 3
+        h_list_per_shot = [[torch.randn(H_DIM) for _ in range(N)] for _ in range(B)]
+        stacked = torch.stack([torch.stack(hs) for hs in h_list_per_shot])  # (B, N, H)
+
+        batched_probs = model.predict_pocket(stacked)
+        for b in range(B):
+            single_probs = model.predict_pocket(h_list_per_shot[b])  # (N,)
+            assert torch.allclose(batched_probs[b], single_probs, atol=1e-6)
