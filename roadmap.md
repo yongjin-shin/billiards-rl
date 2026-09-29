@@ -244,7 +244,7 @@ Rationale:
 | ~~① v33 chaining 검증~~ | ~~연속 세그먼트 rollout 성능 측정~~ | ❌ 폐기 (이벤트 드리븐 전환) |
 | ~~② v34 event-boundary MDN~~ | ~~충돌 순간에만 K=5 MDN~~ | ❌ 폐기 (R-SSM이 이미 이 설계) |
 | ~~③ WM → RL 통합 (v28 기반)~~ | ~~v28_dt01_3s best.pt(15.4cm) 기반 SAC critic 보강~~ | ❌ 폐기 (R-SSM 기반으로 대체) |
-| **④ 3-ball data + GNN extension** | Generate 3-ball data; extend GNN to N=3 | 🔄 진행 중 — balanced 3-ball 데이터 생성 완료(3000샷, 0/1/2-포켓 버킷 1000개씩). `rssm_v5`(n_balls=1 학습)를 zero-shot 평가한 결과 same-shot which-ball 판별력 79.5%(top-1/pairwise, chance=50%) — 재학습 없이도 "어느 공이 포켓될지" 상대 비교는 가능. 단 풀링 AUC는 0.487로 캘리브레이션 실패, 재학습 필요성은 미정. 상세는 [experiments.md](experiments.md) "\"어느 공이 포켓될지\" 예측 검증 계획" 참고 |
+| **④ 3-ball data + GNN extension** | Generate 3-ball data; extend GNN to N=3 | ✅ 완료 — balanced 3-ball 데이터(3000샷)로 처음부터 재학습(`rssm_v7_3ball`, best_val_rmse=6.044). zero-shot에서 무너졌던 절대 기준 판정이 재학습 후 모두 회복: pooled AUC 0.487→0.894, 개수 판정 41.9%→75.7%, 근시간 예측 AUC 0.61~0.66→0.81~0.84. which-ball(상대 비교)은 zero-shot에서도 강했던 만큼 0.795→0.818 소폭 개선. 가설(구조 문제 아닌 데이터 커버리지 문제) 확인됨. 남은 이슈: 개수 예측 잔여 오차(1개 포켓을 2개로 과대예측), `type_acc` 후반부 하락(0.66→0.59, kw 극값과 연관 추정, 미조사). 상세는 [experiments.md](experiments.md) "3-ball 데이터로 재학습" 참고 |
 | **⑤ R-SSM 물리 엔진 pure_physics 교체** | 아래 "R-SSM 물리 엔진" 섹션 참고 | ✅ 핵심 3곳 완료 (벡터화 서브아이템은 저효용으로 보류) |
 | **⑥ R-SSM 배치 forward** | 아래 "R-SSM 배치 forward" 섹션 참고 | ✅ 완료 (Phase 0~3) |
 | **⑦ rssm_v5 재학습** | ⑥의 `batch_size` 옵션으로 재시작 필요 — `results/rssm_v5/best.pt`만 있고 history 없이 중단됨 | ✅ 완료 (val_rmse 1.71900, v4 대비 개선) |
