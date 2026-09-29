@@ -1913,6 +1913,32 @@ cos[0.50,1.01): n=13402 (73.06%) gt_mag_mean=47.2
 
 **결정**: 다음 실험은 magnitude-bin 기반 `compute_vel_magnitude_weights()`를 `train_rssm.py`에 추가해서 `_vel_loss_term()`에 적용 — 타입 가중치와 별개로 크기 구간별 역빈도 가중치를 곱한다. `cos(incidence)` explicit feature 추가(구조 변경, 재학습 필요)는 2순위로 미룸.
 
+#### magnitude-bin weighting 방향 검증 (재학습 없이, v5 체크포인트 forward만) — 완료 (2026-09-29)
+
+구현 직후 "이 weighting이 실제로 근사-제로 그룹(rel_err=23)을 겨냥하는 게 맞는지" 재학습 없이 먼저 확인. `world_model/results/rssm_v5/best.pt`로 val set type=2 이벤트에 teacher-forced forward만 돌려서 `|gt_delta|` 구간별 count/loss 기여도/절대오차를 직접 집계.
+
+```
+[0,1)    count=52.6%  loss기여=35.0%  mean_sqerr=28.36  mean_abserr=4.11
+[1,3)    count= 1.1%  loss기여= 0.3%  mean_sqerr=12.06  mean_abserr=2.96
+[3,10)   count= 5.8%  loss기여= 2.4%  mean_sqerr=17.47  mean_abserr=3.12
+[10,30)  count=15.2%  loss기여=11.0%  mean_sqerr=30.91  mean_abserr=4.20
+[30,inf) count=25.3%  loss기여=51.3%  mean_sqerr=86.36  mean_abserr=6.51
+```
+
+**정정 1**: "근사-제로 그룹의 relative error가 큰 건 GT가 작아서 나누기 때문에 생기는 착시"라는 설명은 틀렸다. `|gt|<1`인데 평균 절대오차가 4.11 — 실제로 큰 폭으로 못 맞히고 있다(0.1~0.3 세부구간만 봐도 절대오차 동일하게 4.1대). relative error 착시가 아니라 진짜 예측 실패.
+
+**정정 2 (걱정했던 것과 반대)**: `compute_vel_magnitude_weights`는 type별이 아니라 전체 이벤트 풀링 기준으로 count를 세기 때문에, type=2 내부 비중(52.6%)만 보고 "다수 그룹이 더 downweight될 것"이라 걱정했던 건 틀린 계산이었다. 실제 학습에 쓰이는 (전체 이벤트 기준) weight `[1.49, 2.68, 0.35, 0.28, 0.20]`를 type=2 실측 오차에 곱해보면 loss 기여 비중이 근사-제로 35%→78%로 오히려 크게 올라가고 대형-delta는 51%→15%로 줄어든다 — 즉 구현 방향은 실제 문제(근사-제로 그룹의 절대오차)를 정확히 겨냥한다.
+
+**결론**: `--vel-mag-weight`는 v7 학습으로 실증 검증해볼 가치가 있음. (아직 미실행)
+
+#### bin 경계값을 하드코딩 대신 quantile로 자동화 — 완료 (2026-09-29)
+
+**문제 제기**: `DEFAULT_MAG_BIN_EDGES=[0,1,3,10,30,inf]`는 지금 데이터 분포를 손으로 보고 정한 값이라, 물리 파라미터나 샷 수가 바뀔 때마다 다시 히스토그램을 찍고 경계값을 조정해야 하는 구조였다. `compute_vel_type_weights`(카테고리 수 고정, N_TYPE=7)와 달리 magnitude bin은 연속값을 자르는 거라 경계값 자체가 데이터셋에 의존적이라는 게 근본 문제.
+
+**해결**: `compute_quantile_bin_edges(shots, n_bins=5)` 추가 — `|gt_delta|` 분포의 분위수(quantile)로 경계값을 매번 데이터에서 자동 계산. `compute_vel_magnitude_weights(bin_edges=None)`이 기본값이 되면서 자동으로 이 경로를 탐. `DEFAULT_MAG_BIN_EDGES` 상수는 제거. 기존 단위 테스트들은 반환된 edges를 그대로 재사용해서 bin을 계산하는 방식이라 전부 수정 없이 통과했다(우연이 아니라, quantile 분할이 다수/소수 클러스터를 자동으로 갈라주는 성질 덕분 — degenerate/동일값이 몰린 경우에도 검증됨).
+
+**RL 통합 시 재고 필요 사항 (지금은 미해결로 남김)**: roadmap.md의 WM→RL 통합(`s_hat = wm(s_1, n_steps=60)`)에서 R-SSM을 frozen으로 쓸지 RL이 만든 데이터로 continual fine-tune할지 아직 미정. frozen이면 quantile 자동화만으로 충분하지만, continual이면 정책이 좋아질수록 방문 분포가 바뀌어서 학습 시작 시 1회 계산한 quantile 경계값이 stale해짐 — 이 경우 주기적 재계산이나 온라인(EMA) 추정으로 바꿔야 함. 지금은 이 결정이 안 났으므로 오프라인 전제 그대로 두고, WM→RL 통합을 실제로 설계할 때 다시 열어보기로 함.
+
 ### 물리 엔진 버그: ball_motion.py 마찰계수 (commit 4bbf568)
 
 **배경**: long shot일수록 RSSM 예측 오차가 커지는 원인을 추적하던 중 발견.
