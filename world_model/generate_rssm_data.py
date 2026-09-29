@@ -121,6 +121,70 @@ def generate(
     return shots
 
 
+def generate_balanced(
+    quotas      : dict[int, int],
+    policy_fn,
+    n_balls     : int = 2,
+    seed_start  : int = 0,
+    max_attempts: int = 2_000_000,
+    report_every: int = 5_000,
+) -> list[ShotData]:
+    """Rejection-sample episodes into buckets keyed by n_pocketed_targets().
+
+    Keeps generating episodes until every bucket in `quotas` reaches its
+    target count (or `max_attempts` episodes have been tried). Shots whose
+    bucket is already full are discarded so rare buckets (e.g. 2-pocket)
+    don't get drowned out by the dominant 0-pocket bucket.
+    """
+    from simulator import BilliardsEnv
+
+    ball_ids = ["cue"] + [str(i) for i in range(1, n_balls + 1)]
+    buckets: dict[int, list[ShotData]] = {k: [] for k in quotas}
+    t0 = time.time()
+
+    env = BilliardsEnv(n_balls=n_balls)
+    try:
+        ep = 0
+        while ep < max_attempts:
+            if all(len(buckets[k]) >= quotas[k] for k in quotas):
+                break
+
+            obs, _ = env.reset(seed=seed_start + ep)
+            action  = policy_fn(obs)
+            env.step(action)
+            ep += 1
+
+            shot = generate_shot_data(env.system, ball_ids)
+            if not shot.event_steps:
+                continue
+
+            n_pocketed = shot.n_pocketed_targets()
+            bucket = buckets.get(n_pocketed)
+            if bucket is None or len(bucket) >= quotas[n_pocketed]:
+                continue
+            bucket.append(shot)
+
+            if ep % report_every == 0:
+                elapsed = time.time() - t0
+                eps_s   = ep / elapsed
+                ts      = datetime.now().strftime("%H:%M:%S")
+                counts  = "  ".join(f"n={k}:{len(buckets[k])}/{quotas[k]}" for k in sorted(quotas))
+                print(f"[{ts}] attempts={ep:>8}  {counts}  {eps_s:.1f}ep/s")
+    finally:
+        env.close()
+
+    total_attempts = ep
+    elapsed = time.time() - t0
+    ts = datetime.now().strftime("%H:%M:%S")
+    counts = "  ".join(f"n={k}:{len(buckets[k])}/{quotas[k]}" for k in sorted(quotas))
+    print(f"[{ts}] done: attempts={total_attempts}  {counts}  elapsed={elapsed/60:.1f}min")
+
+    shots: list[ShotData] = []
+    for k in sorted(buckets):
+        shots.extend(buckets[k])
+    return shots
+
+
 def save_chunks(shots: list[ShotData], out_dir: Path, tag: str, chunk_size: int):
     """Split shots into chunks and save as pickle files."""
     chunks = [shots[i:i+chunk_size] for i in range(0, len(shots), chunk_size)]
@@ -145,6 +209,12 @@ def main():
     p.add_argument("--seed",         type=int, default=42)
     p.add_argument("--chunk-size",   type=int, default=5_000)
     p.add_argument("--report-every", type=int, default=1_000)
+    p.add_argument("--balanced",     action="store_true",
+                    help="rejection-sample into pocket-count buckets instead of plain generation")
+    p.add_argument("--quota0",       type=int, default=1000, help="quota for 0-pocket bucket")
+    p.add_argument("--quota1",       type=int, default=1000, help="quota for 1-pocket bucket")
+    p.add_argument("--quota2",       type=int, default=1000, help="quota for 2-pocket bucket")
+    p.add_argument("--max-attempts", type=int, default=2_000_000, help="safety cap for --balanced")
     args = p.parse_args()
 
     out_dir = Path(args.out_dir)
@@ -156,18 +226,33 @@ def main():
     env_tmp.close()
 
     ts  = datetime.now().strftime("%Y%m%d_%H%M%S")
-    tag = f"{policy_tag}_n{args.n_episodes}_s{args.seed}_{ts}"
 
-    print(f"Generating {args.n_episodes} episodes  policy={policy_tag}  n_balls={args.n_balls}")
-    t0    = time.time()
-    shots = generate(
-        n_episodes   = args.n_episodes,
-        policy_fn    = policy_fn,
-        n_balls      = args.n_balls,
-        seed_start   = args.seed,
-        report_every = args.report_every,
-    )
-    elapsed = time.time() - t0
+    if args.balanced:
+        quotas = {0: args.quota0, 1: args.quota1, 2: args.quota2}
+        tag = f"{policy_tag}_balanced_q{args.quota0}-{args.quota1}-{args.quota2}_s{args.seed}_{ts}"
+        print(f"Generating balanced dataset  quotas={quotas}  policy={policy_tag}  n_balls={args.n_balls}")
+        t0    = time.time()
+        shots = generate_balanced(
+            quotas       = quotas,
+            policy_fn    = policy_fn,
+            n_balls      = args.n_balls,
+            seed_start   = args.seed,
+            max_attempts = args.max_attempts,
+            report_every = args.report_every,
+        )
+        elapsed = time.time() - t0
+    else:
+        tag = f"{policy_tag}_n{args.n_episodes}_s{args.seed}_{ts}"
+        print(f"Generating {args.n_episodes} episodes  policy={policy_tag}  n_balls={args.n_balls}")
+        t0    = time.time()
+        shots = generate(
+            n_episodes   = args.n_episodes,
+            policy_fn    = policy_fn,
+            n_balls      = args.n_balls,
+            seed_start   = args.seed,
+            report_every = args.report_every,
+        )
+        elapsed = time.time() - t0
 
     # Stats
     n_pocket = sum(

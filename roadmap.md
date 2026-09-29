@@ -244,7 +244,7 @@ Rationale:
 | ~~① v33 chaining 검증~~ | ~~연속 세그먼트 rollout 성능 측정~~ | ❌ 폐기 (이벤트 드리븐 전환) |
 | ~~② v34 event-boundary MDN~~ | ~~충돌 순간에만 K=5 MDN~~ | ❌ 폐기 (R-SSM이 이미 이 설계) |
 | ~~③ WM → RL 통합 (v28 기반)~~ | ~~v28_dt01_3s best.pt(15.4cm) 기반 SAC critic 보강~~ | ❌ 폐기 (R-SSM 기반으로 대체) |
-| **④ 3-ball data + GNN extension** | Generate 3-ball data; extend GNN to N=3 | [ ] Pending |
+| **④ 3-ball data + GNN extension** | Generate 3-ball data; extend GNN to N=3 | 🔄 진행 중 — 포켓 개수(0/1/2) 불균형 확인(93.3%/6.5%/0.18%), `generate_balanced()` 구현+테스트 완료, 실제 생성 실행은 아직. 상세는 [experiments.md](experiments.md) "3-ball 데이터 생성: 포켓 개수 불균형 확인 + balanced 샘플링 함수" 참고 |
 | **⑤ R-SSM 물리 엔진 pure_physics 교체** | 아래 "R-SSM 물리 엔진" 섹션 참고 | ✅ 핵심 3곳 완료 (벡터화 서브아이템은 저효용으로 보류) |
 | **⑥ R-SSM 배치 forward** | 아래 "R-SSM 배치 forward" 섹션 참고 | ✅ 완료 (Phase 0~3) |
 | **⑦ rssm_v5 재학습** | ⑥의 `batch_size` 옵션으로 재시작 필요 — `results/rssm_v5/best.pt`만 있고 history 없이 중단됨 | ✅ 완료 (val_rmse 1.71900, v4 대비 개선) |

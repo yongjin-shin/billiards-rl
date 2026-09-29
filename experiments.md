@@ -2068,3 +2068,29 @@ Pairwise rescue: baseline이 잘못 순서를 매긴 쌍 2,866,568개(전체 쌍
 **흥미로운 부수 발견**: 이 모델 크기에서는 **MPS가 CPU보다 느리다** (예: 96샷 기준 MPS 0.96s vs CPU 0.03s대). MPS 커널 launch 오버헤드가 개별 연산의 실제 compute 시간보다 커서, 작은 텐서 위주의 이 워크로드에서는 GPU 이점이 없다. → rssm_v5 재학습 시 `--device cpu` 권장.
 
 **pure_physics 벡터화(`evolve_ball_motion_batch()`) 보류 결정**: roadmap의 ⑤ 서브 아이템으로 남아있던 물리 호출 벡터화가 이 배치 forward 이후에도 의미 있는지 프로파일링으로 확인했다. `_advance_rvw`(`train_rssm.py`)는 `ss_prob>0.1`일 때 fast-linear 근사만 쓰고 `evolve_ball_motion`을 아예 호출하지 않으며, `ss_prob=0.0`(완전 free-running)일 때만 실제 물리 호출을 한다. `cProfile`로 `ss_prob=0.0` 케이스를 뜯어본 결과 `_advance_rvw`가 전체 iteration 시간의 ~10%에 불과했다 (`ss_prob=1.0`→`0.0` 비교 시 총 시간 증가도 18%뿐, 1443회 호출에 0.011s / 총 0.118s). 완전 벡터화해도 최선의 경우 ~10% 개선이 한계이므로, 방금 확인한 배치 forward의 1.7~3.7배 개선 대비 우선순위가 낮다고 판단해 보류.
+
+### 3-ball 데이터 생성: 포켓 개수 불균형 확인 + balanced 샘플링 함수 (2026-09-29)
+
+**배경**: roadmap ④(N-ball 일반화)의 첫 단계로 3-ball(cue+target 2개) 데이터 생성을 시작한다. `BilliardsEnv`의 `n_balls` 파라미터는 큐볼을 제외한 target 개수이므로, "3-ball"을 만들려면 `n_balls=2`로 호출해야 한다(`simulator.py:142-172` 확인 — `self._ball_ids = [str(i+1) for i in range(n_balls)]`). 또한 obs_dim이 `n_balls`에 따라 달라져서(`n_balls=1`→16-dim, `n_balls=2`→20-dim), 기존에 학습된 SAC 모델은 전부 `n_balls=1` 기준이라 재사용 불가 — 3-ball 데이터 생성은 `--policy random`만 가능하다.
+
+**가설**: 랜덤 정책으로 3-ball 샷을 생성하면 포켓 개수(0/1/2)의 분포가 심하게 불균형할 것이다(2-포켓 동시 성공은 희귀 이벤트).
+
+**검증 방법**: `n_balls=2` + random 정책으로 3000 에피소드를 돌려 각 샷의 `n_pocketed_targets()`(타깃 볼 중 포켓된 개수, 큐볼 스크래치는 제외)를 집계.
+
+**결과**: 3000 에피소드 중 2221개가 유효 샷(이벤트 발생), 508.1 ep/s.
+
+| n_pocketed | 개수 | 비율 |
+|---|---|---|
+| 0 | 2073 | 93.34% |
+| 1 | 144 | 6.48% |
+| 2 | 4 | 0.18% |
+
+**결론**: 랜덤 정책 그대로 대량 생성하면 2-포켓 샘플이 극도로 희귀해(0.18%) 학습 데이터에서 사실상 누락된다. 그대로 두면 안 되고, 포켓 개수 버킷별로 quota를 채울 때까지 reject-sampling 하는 방식이 필요하다고 판단.
+
+**구현**: `world_model/generate_rssm_data.py::generate_balanced(quotas, policy_fn, n_balls, seed_start, max_attempts, report_every)` 추가.
+- `ShotData.n_pocketed_targets()`(`world_model/rssm_dataset.py`, 큐볼 인덱스 0 제외하고 포켓된 target 개수 반환)로 각 샷을 버킷(0/1/2)에 라우팅.
+- 이미 quota가 찬 버킷은 버리고, 모든 버킷이 quota를 채우거나 `max_attempts`에 도달하면 종료 — 희귀 버킷(2-포켓) 때문에 무한 루프에 빠지지 않도록 안전장치.
+- CLI에 `--balanced`, `--quota0/1/2`, `--max-attempts` 옵션 추가(기본 동작인 `generate()`는 그대로 유지, `--balanced` opt-in).
+- 테스트: `tests/test_generate_rssm_data.py` — quota 초과 안 하는지, 도달 불가능한 버킷(quota가 매우 큰데 n_balls=1이라 2-포켓 자체가 불가능한 경우)에서 `max_attempts`로 정상 종료하는지 확인.
+
+**다음**: 실제 quota를 정해 balanced 데이터셋을 생성 실행(2-포켓 quota가 클수록 시간이 오래 걸림 — 위 측정 기준 quota=1000이면 약 25분 추정). roadmap ④ 상태 업데이트는 실제 생성 완료 후 진행.
