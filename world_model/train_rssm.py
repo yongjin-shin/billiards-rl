@@ -73,6 +73,7 @@ class TrainConfig:
     data_dir       : Optional[str] = None   # pkl dir from generate_rssm_data.py
     val_data_dir   : Optional[str] = None   # separate val pkl dir; None = on-the-fly
     delta_stats    : Optional[str] = None   # delta_stats.json for per-component scale weights
+    vel_mag_weight : bool = False   # opt-in |gt_delta|-bin inverse-freq weighting (see compute_vel_magnitude_weights)
     # Model
     h_dim          : int   = H_DIM
     hidden         : list  = field(default_factory=lambda: [256, 256])
@@ -154,6 +155,54 @@ def compute_vel_type_weights(
     weights[mask] = weights[mask] / weights[mask].mean()   # normalize over present types
     weights[mask] = weights[mask].clamp(max=max_w)
     return weights.to(device)
+
+
+DEFAULT_MAG_BIN_EDGES = [0.0, 1.0, 3.0, 10.0, 30.0, float("inf")]
+
+
+def compute_vel_magnitude_weights(
+    shots      : list[ShotData],
+    device     : torch.device,
+    bin_edges  : list[float] = DEFAULT_MAG_BIN_EDGES,
+    max_w      : float = 5.0,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Inverse-frequency weights per |gt_delta| magnitude bin, over both
+    ball_i and ball_j deltas across all shots.
+
+    Motivation: `compute_vel_type_weights` only reweights across event
+    *types*, so a within-type imbalance (e.g. type=2/cue_circular is 83.6%
+    near-zero-delta events vs 4.7% large-delta events — see experiments.md
+    "cos(incidence) 재검증") gets averaged away by plain MSE regardless of
+    per-type weighting. This bins directly on |gt_delta| instead.
+
+    Returns (bin_edges, weights) — weights has len(bin_edges)-1 entries.
+    Look up a delta's bin via `torch.bucketize(norm, bin_edges[1:-1])`.
+    """
+    edges  = torch.tensor(bin_edges)
+    counts = torch.zeros(len(bin_edges) - 1)
+    for shot in shots:
+        for gt in list(shot.gt_deltas_i) + [g for g in shot.gt_deltas_j if g is not None]:
+            idx = int(torch.bucketize(torch.norm(gt), edges[1:-1]))
+            counts[idx] += 1
+
+    mask    = counts > 0
+    weights = torch.zeros(len(bin_edges) - 1)
+    weights[mask] = 1.0 / counts[mask]
+    weights[mask] = weights[mask] / weights[mask].mean()   # normalize over present bins
+    weights[mask] = weights[mask].clamp(max=max_w)
+    return edges.to(device), weights.to(device)
+
+
+def _magnitude_weight(
+    gt         : torch.Tensor,
+    mag_edges  : Optional[torch.Tensor],
+    mag_weights: Optional[torch.Tensor],
+) -> torch.Tensor | float:
+    if mag_edges is None or mag_weights is None:
+        return 1.0
+    idx = torch.bucketize(torch.norm(gt).detach(), mag_edges[1:-1])
+    return mag_weights[idx]
 
 
 def load_delta_scale_weights(stats_path: str, device: torch.device) -> torch.Tensor:
@@ -273,18 +322,22 @@ def _vel_loss_term(
     ev_type          : int,
     vel_type_weights : Optional[torch.Tensor],
     delta_scale_w    : Optional[torch.Tensor],
+    mag_edges        : Optional[torch.Tensor] = None,
+    mag_weights      : Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
-    """Scale-weighted + type-freq-weighted velocity MSE for one event."""
-    vw = vel_type_weights[ev_type] if vel_type_weights is not None else 1.0
+    """Scale-weighted + type-freq-weighted + magnitude-bin-weighted velocity MSE for one event."""
+    vw   = vel_type_weights[ev_type] if vel_type_weights is not None else 1.0
+    w_i  = vw * _magnitude_weight(gt_i, mag_edges, mag_weights)
     if delta_scale_w is not None:
-        vel_err = (((delta_i - gt_i) ** 2) * delta_scale_w).mean() * vw
+        vel_err = (((delta_i - gt_i) ** 2) * delta_scale_w).mean() * w_i
     else:
-        vel_err = F.mse_loss(delta_i, gt_i) * vw
+        vel_err = F.mse_loss(delta_i, gt_i) * w_i
     if delta_j is not None and gt_j is not None:
+        w_j = vw * _magnitude_weight(gt_j, mag_edges, mag_weights)
         if delta_scale_w is not None:
-            vel_err = vel_err + (((delta_j - gt_j) ** 2) * delta_scale_w).mean() * vw
+            vel_err = vel_err + (((delta_j - gt_j) ** 2) * delta_scale_w).mean() * w_j
         else:
-            vel_err = vel_err + F.mse_loss(delta_j, gt_j) * vw
+            vel_err = vel_err + F.mse_loss(delta_j, gt_j) * w_j
     return vel_err
 
 
@@ -323,6 +376,8 @@ def compute_shot_ss_loss(
     type_weights      : Optional[torch.Tensor] = None,
     vel_type_weights  : Optional[torch.Tensor] = None,
     delta_scale_w     : Optional[torch.Tensor] = None,
+    mag_edges         : Optional[torch.Tensor] = None,
+    mag_weights       : Optional[torch.Tensor] = None,
     focal_gamma       : float = 0.0,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, int]:
     """
@@ -373,6 +428,7 @@ def compute_shot_ss_loss(
         gt_j = shot.gt_deltas_j[k].to(device) if shot.gt_deltas_j[k] is not None else None
         vel_loss_sum = vel_loss_sum + _vel_loss_term(
             delta_i, gt_i, delta_j, gt_j, ev_type, vel_type_weights, delta_scale_w,
+            mag_edges, mag_weights,
         )
 
         # ── Type loss (focal CE) ───────────────────────────────────────────────
@@ -414,6 +470,8 @@ def compute_batch_ss_loss(
     type_weights      : Optional[torch.Tensor] = None,
     vel_type_weights  : Optional[torch.Tensor] = None,
     delta_scale_w     : Optional[torch.Tensor] = None,
+    mag_edges         : Optional[torch.Tensor] = None,
+    mag_weights       : Optional[torch.Tensor] = None,
     focal_gamma       : float = 0.0,
 ) -> list[tuple[torch.Tensor, torch.Tensor, torch.Tensor, int]]:
     """
@@ -456,6 +514,7 @@ def compute_batch_ss_loss(
                 vel_sum_list, type_sum_list, n_ev_list,
                 ball_ball_items, ss_prob, params, device,
                 type_weights, vel_type_weights, delta_scale_w, focal_gamma,
+                mag_edges, mag_weights,
             )
 
         if single_items:
@@ -464,6 +523,7 @@ def compute_batch_ss_loss(
                 vel_sum_list, type_sum_list, n_ev_list,
                 single_items, ss_prob, params, device,
                 type_weights, vel_type_weights, delta_scale_w, focal_gamma,
+                mag_edges, mag_weights,
             )
 
         # ── Pocket loss: once per active shot in this wavefront ──────────────
@@ -505,6 +565,8 @@ def _run_ball_ball_batch(
     vel_type_weights : Optional[torch.Tensor],
     delta_scale_w    : Optional[torch.Tensor],
     focal_gamma      : float,
+    mag_edges        : Optional[torch.Tensor] = None,
+    mag_weights      : Optional[torch.Tensor] = None,
 ) -> None:
     """Process one wavefront's ball_ball items as a single batched model call."""
     h_i_list, h_j_list = [], []
@@ -546,7 +608,7 @@ def _run_ball_ball_batch(
         gt_j = shot.gt_deltas_j[k].to(device) if shot.gt_deltas_j[k] is not None else None
         vel_sum_list[s] = vel_sum_list[s] + _vel_loss_term(
             delta_i[idx], gt_i, delta_j[idx], gt_j, ev.event_type,
-            vel_type_weights, delta_scale_w,
+            vel_type_weights, delta_scale_w, mag_edges, mag_weights,
         )
         type_sum_list[s] = type_sum_list[s] + _type_loss_term(
             type_i[idx], shot.gt_types_i[k], type_j[idx], shot.gt_types_j[k],
@@ -576,6 +638,8 @@ def _run_single_batch(
     vel_type_weights : Optional[torch.Tensor],
     delta_scale_w    : Optional[torch.Tensor],
     focal_gamma      : float,
+    mag_edges        : Optional[torch.Tensor] = None,
+    mag_weights      : Optional[torch.Tensor] = None,
 ) -> None:
     """Process one wavefront's single-ball items as a single batched model call."""
     h_i_list, node_i_list, normal_list = [], [], []
@@ -607,7 +671,7 @@ def _run_single_batch(
         gt_i = shot.gt_deltas_i[k].to(device)
         vel_sum_list[s] = vel_sum_list[s] + _vel_loss_term(
             delta_i[idx], gt_i, None, None, ev.event_type,
-            vel_type_weights, delta_scale_w,
+            vel_type_weights, delta_scale_w, mag_edges, mag_weights,
         )
         type_sum_list[s] = type_sum_list[s] + _type_loss_term(
             type_i[idx], shot.gt_types_i[k], None, None,
@@ -924,6 +988,14 @@ def train(cfg: TrainConfig) -> None:
     else:
         print("Delta scale weights: none (raw MSE)")
 
+    mag_edges = mag_weights = None
+    if cfg.vel_mag_weight:
+        mag_edges, mag_weights = compute_vel_magnitude_weights(train_shots, device)
+        print(f"Vel magnitude-bin weights: {mag_weights.cpu().numpy().round(4)} "
+              f"(edges={DEFAULT_MAG_BIN_EDGES})")
+    else:
+        print("Vel magnitude-bin weights: none")
+
     # ── Model ─────────────────────────────────────────────────────────────────
     model    = RSSMModel(h_dim=cfg.h_dim, hidden=cfg.hidden).to(device)
     n_params = sum(p.numel() for p in model.parameters())
@@ -992,6 +1064,8 @@ def train(cfg: TrainConfig) -> None:
                 type_weights     = type_weights,
                 vel_type_weights = vel_type_weights,
                 delta_scale_w    = delta_scale_w,
+                mag_edges        = mag_edges,
+                mag_weights      = mag_weights,
                 focal_gamma      = cfg.focal_gamma,
             )
 
@@ -1125,6 +1199,11 @@ def main() -> None:
                    help="separate val pkl dir. If omitted, sliced from --data-dir.")
     p.add_argument("--delta-stats",   default=None,
                    help="delta_stats.json for per-component scale weights in MSE.")
+    p.add_argument("--vel-mag-weight", action="store_true",
+                   help="Opt-in inverse-freq weighting by |gt_delta| magnitude bin "
+                        "(see compute_vel_magnitude_weights) — addresses within-type "
+                        "imbalance that per-type weighting can't (e.g. cue_circular's "
+                        "83.6%% near-zero-delta vs 4.7%% large-delta events).")
     p.add_argument("--focal-gamma",   type=float, default=2.0,
                    help="Focal loss gamma for type CE. 0=standard CE.")
     p.add_argument("--h-dim",         type=int,   default=H_DIM)
@@ -1156,7 +1235,8 @@ def main() -> None:
         n_shots_val   = args.n_shots_val,
         data_dir      = args.data_dir,
         val_data_dir  = args.val_data_dir,
-        delta_stats   = args.delta_stats,
+        delta_stats    = args.delta_stats,
+        vel_mag_weight = args.vel_mag_weight,
         focal_gamma   = args.focal_gamma,
         h_dim         = args.h_dim,
         lr            = args.lr,

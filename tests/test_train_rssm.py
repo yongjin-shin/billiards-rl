@@ -22,6 +22,7 @@ from world_model.train_rssm import (
     TrainConfig, train,
     compute_type_class_weights, evaluate, evaluate_free_running,
     compute_shot_ss_loss, compute_batch_ss_loss,
+    compute_vel_magnitude_weights, _magnitude_weight,
 )
 from world_model.rssm_model import RSSMModel, H_DIM, EventStep, EVENT_BALL_BALL, NODE_DIM, EDGE_DIM
 from world_model.rssm_dataset import ShotData, collect_dataset
@@ -163,6 +164,76 @@ class TestClassWeights:
         shots = collect_dataset(n_shots=10, n_balls=1, seed_start=0)
         w = compute_type_class_weights(shots, torch.device("cpu"))
         assert (w > 0).all(), "all class weights should be positive"
+
+
+# ── TestVelMagnitudeWeights ───────────────────────────────────────────────────
+#
+# compute_vel_type_weights only reweights across event *types*, so a
+# within-type imbalance (e.g. cue_circular's 83.6% near-zero-delta vs 4.7%
+# large-delta events -- see experiments.md "cos(incidence) 재검증") is
+# invisible to it. compute_vel_magnitude_weights bins directly on |gt_delta|
+# instead, independent of event type.
+
+def _shot_with_delta_norm(norm: float) -> ShotData:
+    """Minimal single-event ShotData whose gt_deltas_i has exactly `norm`."""
+    ev = _synth_event(event_type=1, ball_i=0)
+    delta = torch.zeros(5)
+    delta[0] = norm
+    return ShotData(
+        n_balls     = 1,
+        event_steps = [ev],
+        gt_deltas_i = [delta],
+        gt_deltas_j = [None],
+        gt_types_i  = [1],
+        gt_types_j  = [None],
+        raw_rvws_i  = [np.zeros((3, 3))],
+        raw_rvws_j  = [None],
+        dt_to_next  = [0.01],
+    )
+
+
+class TestVelMagnitudeWeights:
+    def test_weights_len_matches_bins(self):
+        shots = [_shot_with_delta_norm(0.5) for _ in range(5)]
+        edges, weights = compute_vel_magnitude_weights(shots, torch.device("cpu"))
+        assert weights.shape[0] == edges.shape[0] - 1
+
+    def test_rare_bin_gets_higher_weight(self):
+        """Fewer events in a bin -> larger inverse-frequency weight."""
+        shots = (
+            [_shot_with_delta_norm(0.5) for _ in range(90)]     # bin [0,1)
+            + [_shot_with_delta_norm(15.0) for _ in range(10)]  # bin [10,30), rarer
+        )
+        edges, weights = compute_vel_magnitude_weights(shots, torch.device("cpu"), max_w=100.0)
+        bin_small = int(torch.bucketize(torch.tensor(0.5), edges[1:-1]))
+        bin_large = int(torch.bucketize(torch.tensor(15.0), edges[1:-1]))
+        assert weights[bin_large] > weights[bin_small]
+
+    def test_absent_bin_gets_zero_not_poisoned_mean(self):
+        """Bins with zero events get weight 0 (not clamped to 1, which would
+        skew the mean normalization for populated bins)."""
+        shots = [_shot_with_delta_norm(0.5) for _ in range(5)]
+        edges, weights = compute_vel_magnitude_weights(shots, torch.device("cpu"))
+        bin_absent = int(torch.bucketize(torch.tensor(50.0), edges[1:-1]))
+        assert weights[bin_absent] == 0.0
+
+    def test_weights_capped_at_max_w(self):
+        shots = [_shot_with_delta_norm(0.5) for _ in range(999)] + [_shot_with_delta_norm(15.0)]
+        edges, weights = compute_vel_magnitude_weights(shots, torch.device("cpu"), max_w=5.0)
+        assert (weights <= 5.0).all()
+
+    def test_magnitude_weight_lookup_picks_correct_bin(self):
+        edges   = torch.tensor([0.0, 1.0, 3.0, 10.0, 30.0, float("inf")])
+        weights = torch.tensor([1.0, 2.0, 3.0, 4.0, 5.0])
+        gt = torch.zeros(5)
+        gt[0] = 2.0   # norm=2.0 -> bin [1,3) -> weight 2.0
+        w = _magnitude_weight(gt, edges, weights)
+        assert float(w) == pytest.approx(2.0)
+
+    def test_magnitude_weight_none_edges_returns_one(self):
+        """No mag weighting configured (default/opt-out) -> neutral weight 1.0."""
+        w = _magnitude_weight(torch.randn(5), None, None)
+        assert w == 1.0
 
 
 # ── TestEvaluate ──────────────────────────────────────────────────────────────
@@ -569,6 +640,20 @@ class TestTrainBatchSize:
             train(cfg)
             result = json.load(open(os.path.join(tmp, "result.json")))
             assert result["best_val_rmse"] < float("inf")
+
+
+# ── TestVelMagWeightIntegration ──────────────────────────────────────────────
+
+class TestVelMagWeightIntegration:
+    def test_train_with_vel_mag_weight_completes(self):
+        """cfg.vel_mag_weight=True must wire through the full train() loop without error."""
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = _tiny_config(tmp)
+            cfg.vel_mag_weight = True
+            train(cfg)
+            result = json.load(open(os.path.join(tmp, "result.json")))
+            assert result["best_val_rmse"] < float("inf")
+            assert result["best_val_rmse"] > 0.0
 
 
 # ── TestSmokePkl ──────────────────────────────────────────────────────────────
