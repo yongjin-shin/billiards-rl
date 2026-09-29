@@ -31,8 +31,8 @@ import pooltool as pt
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from world_model.wm_predictor import TABLE_W, TABLE_H
 
-DT        = 0.05          # seconds
-T_MAX     = 220           # max steps per episode (~11s)
+DT        = 0.05          # seconds  (overridden by --dt arg at runtime)
+T_MAX     = 220           # max steps per episode (~11s)  (overridden by --t-max)
 STATE_DIM = 14
 MAX_SPEED = 12.0          # m/s
 MAX_AVEL  = 300.0         # rad/s
@@ -42,7 +42,19 @@ COLL_STR = {
     "ball_linear_cushion":   1,
     "ball_circular_cushion": 2,
     "ball_pocket":           3,
+    "sliding_rolling":       4,   # sliding→rolling 전환 (감속 모드 변경)
+    "rolling_stationary":    5,   # 공 정지
 }
+
+# coll_ball 비트마스크: bit0=cue, bit1=target
+BALL_IDS = {"cue": 1, "1": 2}
+
+
+def _ball_mask(event) -> int:
+    mask = 0
+    for agent in event.agents:
+        mask |= BALL_IDS.get(agent.id, 0)
+    return mask
 
 
 def normalize_ball(pos, vel, avel) -> np.ndarray:
@@ -66,7 +78,8 @@ def extract_episode(system, obs: np.ndarray, action: np.ndarray):
     Returns dict:
         states      (T, 14)   normalized state at each timestep
         coll_flags  (T,)      bool — collision in [t, t+DT)
-        coll_types  (T,)      int8 — 0..3 or -1
+        coll_types  (T,)      int8 — 0..5 or -1
+        coll_ball   (T,)      int8 — bitmask: 1=cue, 2=target, 3=both, -1=none
         length      int       number of valid steps T
         pocketed    bool
     """
@@ -74,32 +87,28 @@ def extract_episode(system, obs: np.ndarray, action: np.ndarray):
     cue_ball = system.balls["cue"]
     tgt_ball = system.balls["1"]
 
-    # shot 종료 시점 (마지막 이벤트)
     t_end = events[-1].time
 
-    # 타임스탬프 생성
     n_steps = min(int(t_end / DT) + 1, T_MAX - 1)
     timestamps = np.arange(n_steps + 1, dtype=np.float64) * DT
     timestamps = np.clip(timestamps, 0.0, t_end)
 
-    # 공 상태 쿼리
     cue_states = pt.interpolate_ball_states(cue_ball, timestamps, extrapolate=True)
     tgt_states = pt.interpolate_ball_states(tgt_ball, timestamps, extrapolate=True)
 
-    # 충돌 이벤트 목록: (time, type_int)
+    # 충돌 이벤트 목록: (time, type_int, ball_mask)
     coll_events = [
-        (e.time, COLL_STR[str(e.event_type.value)])
+        (e.time, COLL_STR[str(e.event_type.value)], _ball_mask(e))
         for e in events
         if str(e.event_type.value) in COLL_STR
     ]
 
-    # 포켓 여부
-    pocketed = any(ct == 3 for _, ct in coll_events)
+    pocketed = any(ct == 3 for _, ct, _ in coll_events)
 
-    # 스텝별 상태 및 충돌 기록
     states     = np.zeros((n_steps, STATE_DIM), dtype=np.float32)
     coll_flags = np.zeros(n_steps, dtype=bool)
     coll_types = np.full(n_steps, -1, dtype=np.int8)
+    coll_ball  = np.full(n_steps, -1, dtype=np.int8)
 
     for i in range(n_steps):
         t0, t1 = timestamps[i], timestamps[i + 1]
@@ -107,17 +116,19 @@ def extract_episode(system, obs: np.ndarray, action: np.ndarray):
         tgt_vec = ball_state_vec(tgt_states[i])
         states[i] = np.concatenate([cue_vec, tgt_vec])
 
-        # 이 구간 안의 충돌 (여러 개면 첫 번째만 기록)
-        for et, ect in coll_events:
+        # 이 구간의 첫 번째 이벤트만 기록
+        for et, ect, emask in coll_events:
             if t0 <= et < t1:
                 coll_flags[i] = True
                 coll_types[i] = ect
+                coll_ball[i]  = emask
                 break
 
     return {
         "states":      states,
         "coll_flags":  coll_flags,
         "coll_types":  coll_types,
+        "coll_ball":   coll_ball,
         "length":      n_steps,
         "pocketed":    pocketed,
         "obs":         obs,
@@ -132,6 +143,7 @@ def generate(env, policy_fn, n_episodes: int, rng: np.random.Generator,
     buf_states     = np.zeros((n_episodes, T_MAX, STATE_DIM), dtype=np.float32)
     buf_coll_flags = np.zeros((n_episodes, T_MAX), dtype=bool)
     buf_coll_types = np.full((n_episodes, T_MAX), -1, dtype=np.int8)
+    buf_coll_ball  = np.full((n_episodes, T_MAX), -1, dtype=np.int8)
     buf_lengths    = np.zeros(n_episodes, dtype=np.int32)
     buf_pocketed   = np.zeros(n_episodes, dtype=bool)
     buf_obs        = np.zeros((n_episodes, 16), dtype=np.float32)
@@ -141,7 +153,6 @@ def generate(env, policy_fn, n_episodes: int, rng: np.random.Generator,
         obs, _ = env.reset()
         action = policy_fn(obs)
 
-        # pooltool 시뮬레이션
         shot = env.system
         pt.simulate(shot, inplace=True)
         env.step(action)
@@ -152,6 +163,7 @@ def generate(env, policy_fn, n_episodes: int, rng: np.random.Generator,
         buf_states[ep, :T]      = ep_data["states"]
         buf_coll_flags[ep, :T]  = ep_data["coll_flags"]
         buf_coll_types[ep, :T]  = ep_data["coll_types"]
+        buf_coll_ball[ep, :T]   = ep_data["coll_ball"]
         buf_lengths[ep]         = T
         buf_pocketed[ep]        = ep_data["pocketed"]
         buf_obs[ep]             = ep_data["obs"]
@@ -165,6 +177,7 @@ def generate(env, policy_fn, n_episodes: int, rng: np.random.Generator,
         "states":      buf_states,
         "coll_flags":  buf_coll_flags,
         "coll_types":  buf_coll_types,
+        "coll_ball":   buf_coll_ball,
         "lengths":     buf_lengths,
         "pocketed":    buf_pocketed,
         "obs":         buf_obs,
@@ -180,7 +193,15 @@ def main():
     p.add_argument("--sac-model",   default=None)
     p.add_argument("--random",      action="store_true")
     p.add_argument("--seed",        type=int, default=42)
+    p.add_argument("--dt",          type=float, default=None,
+                   help="override DT (e.g. 0.01). T_MAX auto-scaled to keep ~11s coverage.")
     args = p.parse_args()
+
+    # runtime DT override
+    if args.dt is not None:
+        global DT, T_MAX
+        DT    = args.dt
+        T_MAX = int(11.0 / args.dt) + 1
 
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)

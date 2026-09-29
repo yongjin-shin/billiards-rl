@@ -9,17 +9,22 @@ Experiment plans and next directions. For completed experiment results, see [exp
 ```
 [x] Exp-13   Phase 0: proximity reward failed + steps scaling confirmed (1M:50% / 2M:56% / 5M:65.8%)
 [x] Exp-14   gradient_steps=4, 5M → 68.6% (+2.8pp, 2x time) — flat policy ceiling confirmed
-[x] Exp-15   Trajectory VAE exploration — physics latent structure identified, M decoder architecture finalized
-             (VAE itself discarded in final architecture; purpose was decoder architecture and hyperparameter search)
+[x] Exp-15   Trajectory VAE exploration — physics latent structure identified, decoder architecture finalized
 
 [~] Exp-16   World Model Critic — Q(s,a) = q(M(s,a))
-             └─ [x] SSM v16 no-curriculum: err=30.5cm, recall=0.549 (epoch 530)
-             └─ [x] SSM v17 focal fine-tune: pocket recall 0.000→0.250 (episode-level)
-             └─ [x] SSM v18 pure latent (no ar-state): final (epoch 400, err=31.6cm, pocket recall=0.312)
-             └─ [x] SSM v18 scratch (random init): final (epoch 400, err=32.7cm, recall=0.512 — pretraining marginal)
-             └─ [x] GNN 2-ball baseline: final (epoch 400, err=32.4cm, recall=0.560 — beats scratch, -1cm vs no-AR)
-             └─ [~] SPR-MDN (v18 base): MDN K=5 + self-chaining + EMA encoder — idea validation in progress
-             └─ [ ] WM-augmented Q-target integration
+             └─ [x] SSM v10~v18: full-BPTT 버그 수정, collision aux, ar_state 제거 → 31.6cm
+             └─ [x] SSM v18_longrun: SPRDataset 43k + 2000ep → 24.8cm
+             └─ [x] GNN 2-ball: set-based, message passing → 32.4cm
+             └─ [x] SPR-MDN z-space (v17~v26): NLL gradient 불균형 3363x 확인 → L2(28.3cm) 돌파 불가
+             └─ [x] SPR-MDN v26_p1: SPRDataset scratch 1190ep → 25.1cm (현재 최고)
+             └─ [x] SMDN per-step (v28): MDN collapse 확인 → per-step MDN 근본 부적합
+             └─ [x] v28 DT 공정 비교: DT=0.05→16.3cm / DT=0.01→15.4cm (공정 metric, 전수 ep 정규화)
+             └─ [x] v33_segment: segment 단위 4.3cm — chaining covariate shift 미해결
+             └─ [x] R-SSM 피벗 (2026-09-28): 이벤트 경계만 확률적/구간 내부 결정론적 물리 — SMDN 계열(v33 chaining, v34) 폐기
+             └─ [x] R-SSM: pure_physics 물리 엔진 교체 + 배치 forward (1.7~3.7배)
+             └─ [x] R-SSM v5 재학습(val_rmse 1.71900) + free-running eval + magnitude-bin weighting(방향 검증 완료)
+             └─ [ ] v7: magnitude-bin weighting 실제 학습 검증
+             └─ [ ] WM → RL 통합
 [ ] Exp-17   Phase 1 HRL — System 2 (ball selection discrete 3) + System 1 (Phase 1 Exp-10 freeze)
 
 [ ] cushion / bank shots
@@ -213,18 +218,38 @@ Rationale:
 
 ---
 
+### 현재 상태 (2026-09-26)
+
+**최고 성능**: v28_dt01_3s 15.4cm (SMDN K=5, DT=0.01, 공정 metric — 전수 에피소드 길이 정규화)  
+**모든 training 프로세스 종료됨**
+
+### 확정된 결론 요약
+
+| 결론 | 내용 |
+|------|------|
+| full-BPTT 필수 | stop-grad on predictor chain이 encoder gradient 차단 (v9~v16 전부 무효) |
+| SPR bootstrap 기여 7.1cm | lam=0.01 vs lam=0 ablation 확인 |
+| NLL z-space 한계 확정 | gradient 불균형 3363x, GradNorm/Kendall 모두 실패 |
+| direct state 열위 | z-space 대비 8~18cm 나쁨 |
+| per-step MDN collapse | 이벤트 경계가 아닌 per-step은 결정론적 → MDN 분기 인센티브 없음 |
+| DT=0.01 > DT=0.05 | 15.4cm vs 16.3cm — 물리 해상도 우위 확인 |
+| v33 segment 4.3cm | 단일 세그먼트만, chaining covariate shift 미해결 |
+
 ### Plan (in priority order)
+
+**우선순위 변경 (2026-09-28)**: 아래 ①②③(v33 chaining 검증 / v34 event-boundary MDN / v28 기반 WM→RL 통합)을 폐기한다. 셋 다 SMDN/segment 계열(z-space MDN, per-step 또는 세그먼트 단위) 라인의 다음 단계였는데, R-SSM이 이미 "이벤트 경계에서만 확률적, 구간 내부는 결정론적 물리"로 v34가 풀려던 문제(per-step MDN collapse)를 아키텍처 차원에서 해결한 상태다. 두 라인을 병행 유지할 이유가 없으므로 이벤트 드리븐(R-SSM) 하나로 완전히 전환하고, SMDN 계열은 여기서 종료. ④는 R-SSM의 N-ball 일반화 목표와 직결되므로 유지.
 
 | Step | Content | Status |
 |------|---------|--------|
-| **① pocket prediction fix** | v17 focal+weight=20 → recall 0.250; v18 no-ar → 0.234 | [x] Done (accepted as-is) |
-| **① v18 pure latent** | Remove ar_state → self-contained z representation | [x] Done (ep.400, err=31.6cm, recall=0.312) |
-| **① v18 scratch** | Verify pretraining is not essential | [x] Done (ep.400, err=32.7cm — marginal diff) |
-| **② GNN 2-ball baseline** | GNN architecture (set-based, n_balls runtime) — shape verified | [x] Done (ep.400, err=32.4cm, recall=0.560) |
-| **③ SPR-MDN (v18 base)** | MDN K=5 + self-chaining + EMA encoder + L_recon on v18 no-AR; idea validation before GNN | [ ] In progress |
-| **④ 3-ball data + extension** | Generate 3-ball data; extend GNN to N=3 | [ ] Pending |
-| **⑤ Q-target augmentation** | WM(s_1, T=60) → pocket probability → Q-target label | [ ] Pending |
-| ⑥ Reward shaping | WM dense reward → SAC | [ ] Pending |
+| ~~① v33 chaining 검증~~ | ~~연속 세그먼트 rollout 성능 측정~~ | ❌ 폐기 (이벤트 드리븐 전환) |
+| ~~② v34 event-boundary MDN~~ | ~~충돌 순간에만 K=5 MDN~~ | ❌ 폐기 (R-SSM이 이미 이 설계) |
+| ~~③ WM → RL 통합 (v28 기반)~~ | ~~v28_dt01_3s best.pt(15.4cm) 기반 SAC critic 보강~~ | ❌ 폐기 (R-SSM 기반으로 대체) |
+| **④ 3-ball data + GNN extension** | Generate 3-ball data; extend GNN to N=3 | [ ] Pending |
+| **⑤ R-SSM 물리 엔진 pure_physics 교체** | 아래 "R-SSM 물리 엔진" 섹션 참고 | ✅ 핵심 3곳 완료 (벡터화 서브아이템은 저효용으로 보류) |
+| **⑥ R-SSM 배치 forward** | 아래 "R-SSM 배치 forward" 섹션 참고 | ✅ 완료 (Phase 0~3) |
+| **⑦ rssm_v5 재학습** | ⑥의 `batch_size` 옵션으로 재시작 필요 — `results/rssm_v5/best.pt`만 있고 history 없이 중단됨 | ✅ 완료 (val_rmse 1.71900, v4 대비 개선) |
+| **⑧ v6 코드 구현 + v5로 free-running eval** | `ckpt_every`, ss=0 시점부터 fresh `CosineAnnealingLR`, `evaluate_free_running()` 등 v6용 코드는 구현했으나 **v6 학습은 실행한 적 없음** — `results/`에 `rssm_v5`까지만 존재. 아래 분석은 전부 기존 `rssm_v5/best.pt`에 이 신규 eval 코드를 돌려서 나온 결과. per-shot 심화 분석 결과 **샷 길이에 따라 결과가 뒤집힘**: 짧은 샷(3-7 이벤트)은 free-running이 더 낫지만 긴 샷(8+ 이벤트)은 teacher-forced가 더 낫고 격차가 커짐(compounding error) — aggregate(free-running 1.665 vs 1.719 우위)만 보면 이 반전을 놓침. `viz_rssm.py` 3-way 영상 + 이벤트별 추론값 분해로 더 파보니, 진짜 원인은 "매 스텝 조금씩 누적"이 아니라 **특정 이벤트 1~2개의 대형 회귀 오차**(teacher-forcing으로도 못 고침 — compounding 문제가 아님). 다만 이후 코드 재검증 결과 "MSE의 이봉 타깃 회귀 실패"라는 최초 진단은 과잉 일반화였음이 드러남: 문제는 `type=2`(cue_circular) 하나로 국한되고, 그 안에서도 원인은 이봉 분포가 아니라 입사각(incidence angle) 분포 편중 — 1500샷 서브샘플에서는 `cos 0.02~0.15` 전이구간이 "공백"처럼 보였으나, **전체 5만 샷으로 재검증한 결과 공백이 아니라 실제로 존재하는 얇은 소수 구간(type=2의 7.7%, ~1412건)임을 확인** — 거의 접선(`cos<0.02`, 19%)과 거의 정면(`cos>0.5`, 73%) 두 거대 모드 사이에 낀 진짜 이봉형 분포. 모델은 입사각-크기 관계 자체는 잘 배웠지만(corr 0.657 vs GT 0.712) 이 소수 구간에서 옆 모드의 함수형태를 잘못 끌어씀. 로드맵 ③의 60-step rollout 목표와 직결. 상세는 [experiments.md](experiments.md) "v5 eval 심화 분석" / "렌더링한 15개 샷의 이벤트별 추론값 분해" / "위 결론 정정 — 코드/수치로 재검증" / "후속 검증: 전체 5만 샷" 참고 | ✅ 코드+영상+원인분석+정정+전체데이터 재검증 완료. 데이터 커버리지 보강은 근본 해법 아님(실제 물리 기하 구조의 성질)으로 판단해 보류, magnitude-bin weighting(⑨)으로 우선순위 이동 |
+| **⑨ magnitude-bin loss weighting** | `type=2` 내부의 크기별 불균형(근사-제로 다수 vs 대형-delta 소수)은 `compute_vel_type_weights`(type 단위)로 대응 불가 → `compute_vel_magnitude_weights()` 추가, `--vel-mag-weight`로 opt-in. 재학습 없이 v5 체크포인트로 방향 검증: 근사-제로 그룹은 relative error 착시가 아니라 실제 절대오차 실패(mean_abserr=4.1, `\|gt\|<1`인데도)였고, weighting은 이 그룹에 정확히 gradient를 더 실어주는 방향(loss 기여 35%→78%)으로 계산됨을 확인. bin 경계값은 하드코딩(`[0,1,3,10,30,inf]`) 대신 `compute_quantile_bin_edges()`로 데이터에서 자동 파생하도록 리팩터(데이터 분포가 바뀔 때마다 손으로 재조정해야 하는 문제 제거). WM→RL 통합 시 R-SSM이 frozen인지 continual fine-tune인지에 따라 이 자동화가 온라인 재계산으로 확장돼야 할 수 있음 — 아직 미정이라 지금은 보류. 상세는 [experiments.md](experiments.md) "magnitude-bin weighting 방향 검증" / "bin 경계값을 하드코딩 대신 quantile로 자동화" 참고 | ✅ 코드+테스트+방향검증 완료, **v7 학습으로 실제 성능 개선 여부는 미실행** |
 
 ### ③ Q-target Augmentation (WM-augmented critic)
 
@@ -235,6 +260,41 @@ q_target = r + gamma * V(s') + lambda * pocket_prob
 ```
 
 Difference from Dyna: WM provides Q-labels directly rather than generating (s,a,r,s') → **WM-augmented critic**
+
+### R-SSM이 여기 있는 이유 (오늘 pure_physics를 검증한 이유)
+
+Exp-16의 목표는 "큐샷 1회 → multi-step rollout imagining → Q-value MC 추정"(`project_spr_mdn_state.md`). 이 목표가 SSM → SPR-MDN(z-space NLL이 encoder gradient 오염, 문제 7) → SMDN(per-step MDN collapse, 문제 9) 순으로 point-prediction의 한계에 계속 부딪혔고, 그래서 "이벤트 경계에서만 확률적, 구간 내부는 결정론적 물리"로 가는 **R-SSM**으로 피벗했다. R-SSM은 설계 단계부터 `QHead`(attention pool → scalar Q)를 내장하고 있다 (`project_rssm_architecture.md`).
+
+R-SSM이 만드는 rollout은 (1) 이벤트 감지(`event_detector.py`)와 (2) 이벤트 사이 자유운동(`evolve_ball_motion`) 두 개로 이루어진다. 이 substrate가 틀리면 QHead가 아무리 잘 학습돼도 "틀린 rollout에서 뽑은 Q"가 될 뿐이다. 그래서 R-SSM 학습(rssm_v4)을 신뢰하기 전에, long shot에서 오차가 커지는 원인을 추적해 (2) 자유운동 쪽 마찰계수 버그를 잡았고 (`ball_motion.py`, commit 4bbf568), `pure_physics.py`(pooltool-free 재구현체)로 300샷 0.0000cm 일치를 검증했다 — **이게 오늘 pure_physics 작업을 한 이유**. 자세한 내용은 [experiments.md](experiments.md) 참고.
+
+substrate 검증이 끝난 지금, 아래 두 항목이 다음 단계다: QHead 배선 상태 점검, 그리고 substrate 재사용(대체) 검토.
+
+### R-SSM QHead: 배선 완료, 학습 신호 없음
+
+Q-value 추출 목표 대비 현재 위치 점검 (2026-09-27):
+
+- `rssm_model.py:220 aggregate_q(h)` — attention pool(`q_proj`) → `q_head` → scalar Q. `project_rssm_architecture.md` 설계(attention pool, N-independent) 그대로 구현되어 있음
+- `rssm_rollout.py:253 Q = self.model.aggregate_q(h)` → `RolloutResult.Q`로 rollout 끝까지 연결됨 — forward pass 자체는 이미 end-to-end
+- **`train_rssm.py`에 `q_head`/`aggregate_q` 참조 전혀 없음** — Q label도 loss도 없어서, 진행 중인 rssm_v4 학습에서도 QHead는 계산만 되고 학습되지 않는 죽은 출력 상태
+
+**[ ] Pending** — Q label 소스 결정 필요, 후보:
+1. MC return (에피소드 종료 후 실제 reward로 역산)
+2. SAC critic bootstrap
+3. 위 ③ Q-target Augmentation(`pocket_prob` heuristic)과 병행할지, QHead로 대체할지
+
+결정 후 `train_rssm.py`에 Q loss 추가.
+
+**후보 3 관련 경고** — `pocket_prob`(= `predict_pocket` head) 자체를 `eval_pocket_head.py`로 리크 헌팅한 결과(상세: [experiments.md](experiments.md)), AUC=0.919 중 0.827은 물리 시뮬레이션 없는 0-파라미터 기하학 baseline(post-collision 속도 방향 직선 연장)만으로 이미 나오는 값이었다. 즉 이 heuristic이 "학습된 물리 이해"를 반영한다고 보기엔 근거가 약함. QHead도 같은 h를 입력으로 쓰므로, 학습 신호가 생긴 뒤 평가할 때 반드시 같은 방식(trivial/geometric baseline 대비)으로 검증할 것 — 정확도나 AUC 단독 숫자를 그대로 믿지 말 것.
+
+### R-SSM 물리 엔진: pure_physics.py 대체 (완료, 2026-09-28)
+
+교체 대상 3곳(`rssm_rollout.py::advance_balls`, `train_rssm.py::_advance_rvw()`, `viz_rssm.py::_evolve()`) 전부 완료. 벡터화(`evolve_ball_motion_batch()`) 서브 아이템은 저효용으로 판단해 보류. 상세 및 근거는 [experiments.md](experiments.md) 참고.
+
+### R-SSM 배치 forward (완료, 2026-09-28)
+
+`compute_shot_ss_loss`의 shot당 forward(batch_size=1)를 wavefront 기반 배치 forward로 교체 (Phase 0~3). 속도 1.7~3.7배 개선 확인. 상세, 검증 방법, 벤치마크 수치는 [experiments.md](experiments.md) 참고.
+
+rssm_v5 재학습 시 이 `--batch-size` 옵션을 쓸 것. 단, 이 모델 크기(h_dim=32)에서는 MPS 커널 오버헤드가 커서 CPU가 MPS보다 빠르므로 `--device cpu` 권장.
 
 ---
 

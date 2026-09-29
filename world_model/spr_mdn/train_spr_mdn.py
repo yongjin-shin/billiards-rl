@@ -22,9 +22,6 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 from world_model.spr_mdn.spr_mdn_model import (
     SPRMDNModel, spr_rollout_loss, LATENT_DIM, N_COMPONENTS, ACTION_DIM,
     SPRK1Model, sprk1_rollout_loss,
-    KendallHWeights, spr_rollout_loss_kendall_h,
-    spr_rollout_loss_ewta,
-    SPRCatModel, spr_rollout_loss_cat,
 )
 from world_model.spr_mdn.spr_dataset import (
     SPRDataset, SPREpisodeSubset, _CapDataset, make_balanced_val_eps,
@@ -38,7 +35,7 @@ T_MIN = 10
 CLASS_WEIGHTS_DEFAULT = torch.tensor([1.0, 4.1, 4.1, 4.1, 4.1])
 
 
-def _eval_batched(model: nn.Module, episodes: list, device: str,
+def _eval_batched(model: SPRMDNModel, episodes: list, device: str,
                   rollout_steps: int = 60) -> dict:
     model.eval()
     checkpoint_steps = {
@@ -112,13 +109,12 @@ def train(args):
 
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    logger = Logger(out_dir, timestamps=True)
+    logger = Logger(out_dir)
     logger.log(f"Device: {device}")
     K = args.n_components
     ewta_on = args.ewta_decay > 0
     v8_mode = ewta_on and args.lam_pi > 0
     k1_mode = args.k1
-    use_cat = getattr(args, "cat", False) and not k1_mode
     v10_mode = k1_mode and args.no_ema
     v14_mode = k1_mode and getattr(args, "no_encoder_ln", False)
     if v14_mode:
@@ -127,11 +123,9 @@ def train(args):
         mode_str = "SPR-K1-noEMA (v10: pure closed-loop)"
     elif k1_mode:
         mode_str = "SPR-K1 (v9: EMA+sched-sampling)"
-    elif use_cat:
-        mode_str = "SPR-Cat (v24: discrete categorical latent)"
     else:
         mode_str = "SPR-MDN (Laplace)"
-    k_str = "—" if k1_mode else (f"K={getattr(args, 'n_categories', K)}" if use_cat else f"K={K}")
+    k_str = "—" if k1_mode else f"K={K}"
     msg = (
         f"Mode: {mode_str}  {k_str}  EMA_tau={args.ema_tau}"
         f"  T~Uniform({T_MIN},{T_MAX})"
@@ -188,18 +182,6 @@ def train(args):
             use_encoder_ln=not getattr(args, "no_encoder_ln", False),
             full_bptt=getattr(args, "full_bptt", False),
         ).to(device)
-    elif use_cat:
-        model = SPRCatModel(
-            latent_dim=LATENT_DIM,
-            n_categories=getattr(args, "n_categories", N_COMPONENTS),
-            action_dim=ACTION_DIM,
-            ema_tau=args.ema_tau,
-            use_ema=not args.no_ema,
-            alpha=0.01,
-        ).to(device)
-        logger.log(f"SPRCatModel: K={getattr(args, 'n_categories', N_COMPONENTS)}"
-                   f"  lam_kl={getattr(args, 'lam_kl', 1.0)}"
-                   f"  α=0.01 (Unimix)  EMA={not args.no_ema}")
     else:
         model = SPRMDNModel(
             latent_dim=LATENT_DIM,
@@ -207,50 +189,24 @@ def train(args):
             action_dim=ACTION_DIM,
             ema_tau=args.ema_tau,
             asym_init=args.asym_init,
-            use_ema=not args.no_ema,
-            use_encoder_ln=not getattr(args, "no_encoder_ln", False),
         ).to(device)
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     logger.log(f"Parameters (trainable): {n_params:,}")
-
-    # EWTA (v23+): soft/annealed WTA L2 loss
-    use_ewta = getattr(args, "ewta_v23", False) and not k1_mode
-    if use_ewta:
-        tau_init   = getattr(args, "tau_init",   1.0)
-        tau_final  = getattr(args, "tau_final",  0.05)
-        tau_anneal = getattr(args, "tau_anneal_epochs", 200)
-        logger.log(f"EWTA-v23: tau {tau_init}→{tau_final} over {tau_anneal} epochs  "
-                   f"(soft-WTA L2, mean-chaining rollout)")
-
-    # Kendall per-horizon uncertainty weights (v21+)
-    use_kendall_h = getattr(args, "kendall_h", False) and not k1_mode
-    kendall_weights: KendallHWeights | None = None
-    if use_kendall_h:
-        sigma_nll_init   = getattr(args, "sigma_nll_init",   0.0)
-        sigma_recon_init = getattr(args, "sigma_recon_init", 0.0)
-        kendall_weights = KendallHWeights(
-            T_max=T_MAX,
-            sigma_nll_init=sigma_nll_init,
-            sigma_recon_init=sigma_recon_init,
-        ).to(device)
-        logger.log(f"KendallHWeights: T_max={T_MAX}, params={2*T_MAX} (σ_nll + σ_recon)"
-                   f"  init: σ_nll={sigma_nll_init:.3f}  σ_recon={sigma_recon_init:.3f}")
 
     w = CLASS_WEIGHTS_DEFAULT.clone()
     w[4] = args.pocket_weight
     CLASS_WEIGHTS = w.to(device)
     logger.log(f"Class weights: {w.tolist()}")
 
-    # ema_encoder and kendall_weights are both included in trainable params
+    # ema_encoder is excluded from optimizer
     trainable = [p for p in model.parameters() if p.requires_grad]
-    if kendall_weights is not None:
-        trainable += list(kendall_weights.parameters())
     opt   = torch.optim.Adam(trainable, lr=args.lr)
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(
         opt, T_max=args.epochs, eta_min=args.lr * 0.01)
 
     rng_T         = np.random.default_rng(42)
     best_mean_err = float("inf")
+    stall_count   = 0
     rerr = {
         "mean_err": float("nan"), "mean_err_has_bb": float("nan"),
         "mean_err_no_bb": float("nan"), "coll_recall": 0.0,
@@ -262,37 +218,11 @@ def train(args):
         cur_T = int(rng_T.integers(T_MIN, T_MAX + 1))
 
         # Scheduled sampling: p_tf decays from 1→p_min over tf_decay epochs
-        # no_ema (v10 and MDN SimSiam): pure closed-loop, no teacher forcing ever
-        if args.no_ema:
+        # v10 (no-ema): pure closed-loop like v18, no teacher forcing ever
+        if v10_mode:
             p_tf = 0.0
         else:
             p_tf = max(args.tf_pmin, 1.0 - (epoch - 1) / args.tf_decay)
-
-        # v23 EWTA temperature schedule: exponential decay tau_init → tau_final
-        if use_ewta:
-            t_frac = min((epoch - 1) / max(tau_anneal, 1), 1.0)
-            cur_tau = tau_init * (tau_final / tau_init) ** t_frac
-        else:
-            cur_tau = 1.0
-
-        # v24 KL annealing: lam_kl linearly ramps 0 → lam_kl over lam_kl_warmup epochs
-        if use_cat:
-            lam_kl_warmup = getattr(args, "lam_kl_warmup", 0)
-            if lam_kl_warmup > 0:
-                cur_lam_kl = args.lam_kl * min(1.0, (epoch - 1) / lam_kl_warmup)
-            else:
-                cur_lam_kl = args.lam_kl
-
-            # v24 entropy anneal: lam_ent linearly decays lam_ent → 0 over lam_ent_anneal epochs
-            lam_ent_base   = getattr(args, "lam_ent", 0.0)
-            lam_ent_anneal = getattr(args, "lam_ent_anneal", 0)
-            if lam_ent_anneal > 0:
-                cur_lam_ent = lam_ent_base * max(0.0, 1.0 - (epoch - 1) / lam_ent_anneal)
-            else:
-                cur_lam_ent = lam_ent_base
-        else:
-            cur_lam_kl  = getattr(args, "lam_kl", 1.0)
-            cur_lam_ent = getattr(args, "lam_ent", 0.0)
 
         # EWTA schedule
         # v7 mode (lam_pi=0): Phase 1 (κ decays K→1) then Phase 2 (π-only NLL)
@@ -319,7 +249,6 @@ def train(args):
         model.train()
         tr_losses = []
         _z_norm_logged = False
-        _perp_logged = False
         for seq_s, seq_f, seq_t, seq_a in train_loader:
             seq_s_t = seq_s[:, :cur_T + 1].to(device)   # (B, T+1, 14)
             seq_t_t = seq_t[:, :cur_T].to(device)        # (B, T)
@@ -349,55 +278,19 @@ def train(args):
                     lam_l2=args.lam_l2,
                     skip_h0_recon=getattr(args, "skip_h0_recon", False),
                 )
-            elif use_cat:
-                z_pred_list, z_bar_list, prior_probs_list, post_probs_list, s_hat, type_logit = \
-                    model.rollout_train(seq_s_t[:, 0], seq_s_t, seq_a_t, cur_T)
-                loss, detail_cat = spr_rollout_loss_cat(
-                    z_pred_list, z_bar_list, prior_probs_list, post_probs_list,
-                    s_hat, seq_s_t, type_logit, seq_t_t,
-                    lam_kl=cur_lam_kl,
-                    lam_recon=args.lam_recon,
-                    lam_ent=cur_lam_ent,
-                    class_weights=CLASS_WEIGHTS,
-                    focal_gamma=args.focal_gamma,
-                )
-                if epoch == 1 and not _perp_logged:
-                    K_cat = getattr(args, "n_categories", N_COMPONENTS)
-                    logger.log(f"[Smoke v24] prior_perp={detail_cat['prior_perp']:.2f}"
-                               f"  post_perp={detail_cat['post_perp']:.2f}"
-                               f"  (expect ≈{K_cat} at epoch 1)")
-                    _perp_logged = True
             else:
                 s_hat, type_logit, _, pi_list, mu_list, b_list, z_bar_list = \
                     model(seq_s_t[:, 0], seq_s_t, seq_a_t, cur_T, p_tf=p_tf_eff)
-                if use_ewta:
-                    loss, _ = spr_rollout_loss_ewta(
-                        pi_list, mu_list, b_list, z_bar_list,
-                        s_hat, seq_s_t, type_logit, seq_t_t,
-                        tau=cur_tau,
-                        class_weights=CLASS_WEIGHTS,
-                        focal_gamma=args.focal_gamma,
-                        lam_recon=args.lam_recon,
-                    )
-                elif use_kendall_h:
-                    loss, _ = spr_rollout_loss_kendall_h(
-                        pi_list, mu_list, b_list, z_bar_list,
-                        s_hat, seq_s_t, type_logit, seq_t_t,
-                        kendall=kendall_weights,
-                        class_weights=CLASS_WEIGHTS,
-                        focal_gamma=args.focal_gamma,
-                    )
-                else:
-                    loss, _ = spr_rollout_loss(
-                        pi_list, mu_list, b_list, z_bar_list,
-                        s_hat, seq_s_t, type_logit, seq_t_t,
-                        class_weights=CLASS_WEIGHTS,
-                        focal_gamma=args.focal_gamma,
-                        lam_recon=args.lam_recon,
-                        lam_pi=args.lam_pi,
-                        ewta_kappa=kappa if not in_phase2 else 0,
-                        ewta_phase2=in_phase2,
-                    )
+                loss, _ = spr_rollout_loss(
+                    pi_list, mu_list, b_list, z_bar_list,
+                    s_hat, seq_s_t, type_logit, seq_t_t,
+                    class_weights=CLASS_WEIGHTS,
+                    focal_gamma=args.focal_gamma,
+                    lam_recon=args.lam_recon,
+                    lam_pi=args.lam_pi,
+                    ewta_kappa=kappa if not in_phase2 else 0,
+                    ewta_phase2=in_phase2,
+                )
             opt.zero_grad()
             loss.backward()
             nn.utils.clip_grad_norm_(trainable, 1.0)
@@ -431,49 +324,19 @@ def train(args):
                         lam_l2=args.lam_l2,
                         skip_h0_recon=getattr(args, "skip_h0_recon", False),
                     )
-                elif use_cat:
-                    z_pred_list, z_bar_list_val, prior_probs_list, post_probs_list, s_hat, type_logit = \
-                        model.rollout_train(seq_s[:, 0], seq_s, seq_a, val_T)
-                    loss, detail = spr_rollout_loss_cat(
-                        z_pred_list, z_bar_list_val, prior_probs_list, post_probs_list,
-                        s_hat, seq_s, type_logit, seq_t,
-                        lam_kl=cur_lam_kl,
-                        lam_recon=args.lam_recon,
-                        lam_ent=cur_lam_ent,
-                        class_weights=CLASS_WEIGHTS,
-                        focal_gamma=args.focal_gamma,
-                    )
                 else:
                     s_hat, type_logit, _, pi_list, mu_list, b_list, z_bar_list = \
                         model(seq_s[:, 0], seq_s, seq_a, val_T)
-                    if use_ewta:
-                        loss, detail = spr_rollout_loss_ewta(
-                            pi_list, mu_list, b_list, z_bar_list,
-                            s_hat, seq_s, type_logit, seq_t,
-                            tau=cur_tau,
-                            class_weights=CLASS_WEIGHTS,
-                            focal_gamma=args.focal_gamma,
-                            lam_recon=args.lam_recon,
-                        )
-                    elif use_kendall_h:
-                        loss, detail = spr_rollout_loss_kendall_h(
-                            pi_list, mu_list, b_list, z_bar_list,
-                            s_hat, seq_s, type_logit, seq_t,
-                            kendall=kendall_weights,
-                            class_weights=CLASS_WEIGHTS,
-                            focal_gamma=args.focal_gamma,
-                        )
-                    else:
-                        loss, detail = spr_rollout_loss(
-                            pi_list, mu_list, b_list, z_bar_list,
-                            s_hat, seq_s, type_logit, seq_t,
-                            class_weights=CLASS_WEIGHTS,
-                            focal_gamma=args.focal_gamma,
-                            lam_recon=args.lam_recon,
-                            lam_pi=args.lam_pi,
-                            ewta_kappa=kappa if ewta_on and not in_phase2 else 0,
-                            ewta_phase2=in_phase2,
-                        )
+                    loss, detail = spr_rollout_loss(
+                        pi_list, mu_list, b_list, z_bar_list,
+                        s_hat, seq_s, type_logit, seq_t,
+                        class_weights=CLASS_WEIGHTS,
+                        focal_gamma=args.focal_gamma,
+                        lam_recon=args.lam_recon,
+                        lam_pi=args.lam_pi,
+                        ewta_kappa=kappa if ewta_on and not in_phase2 else 0,
+                        ewta_phase2=in_phase2,
+                    )
                 val_losses.append(loss.item())
                 val_details.append(detail)
 
@@ -485,15 +348,17 @@ def train(args):
         d        = {k: np.mean([x[k] for x in val_details]) for k in val_details[0]}
         type_acc = type_correct / type_total if type_total > 0 else 0.0
 
-        # ── z_0 norm tracking (k1 + every eval_every epochs) ────────────────
+        # ── z_0 norm tracking (k1 + every 10 epochs) ─────────────────────
+        # Monitors whether the encoder output drifts during training.
+        # Only meaningful; no grad, uses the last train batch's z_hat_list.
         z0_norm_str = ""
-        if k1_mode and (epoch % args.eval_every == 0 or epoch == 1 or epoch == args.epochs):
+        if k1_mode and (epoch % 10 == 0 or epoch == 1 or epoch == args.epochs):
             with torch.no_grad():
                 n0 = z_hat_list[0].norm(dim=-1).mean().item()   # type: ignore[possibly-undefined]
             z0_norm_str = f"  z0_norm={n0:.2f}"
 
-        # ── Rollout eval (every eval_every epochs) ───────────────────────────
-        if epoch % args.eval_every == 0 or epoch == 1 or epoch == args.epochs:
+        # ── Rollout eval (every 10 epochs) ─────────────────────────────────
+        if epoch % 10 == 0 or epoch == 1 or epoch == args.epochs:
             rerr = _eval_batched(model, balanced_val_eps, device, rollout_steps=60)
 
         mean_err    = rerr["mean_err"]
@@ -517,24 +382,6 @@ def train(args):
         pi_str = f"  L_pi={d['loss_pi']:.4f}" if v8_mode else ""
         if k1_mode:
             latent_str = f"  L_l2={d['loss_l2']:.4f}"
-        elif use_cat:
-            latent_str = (f"  L_l2={d['loss_l2']:.4f}"
-                          f"  L_kl={d['loss_kl']:.4f}"
-                          f"  λ_kl={cur_lam_kl:.3f}"
-                          f"  λ_ent={cur_lam_ent:.3f}"
-                          f"  H_prior={d['H_prior']:.3f}"
-                          f"  prior_perp={d['prior_perp']:.2f}"
-                          f"  post_perp={d['post_perp']:.2f}")
-        elif use_ewta:
-            latent_str = (f"  L_wta={d['loss_wta']:.4f}"
-                          f"  τ={cur_tau:.4f}"
-                          f"  max_π={d['max_pi']:.3f}"
-                          f"  var_μ={d['var_mu']:.4f}")
-        elif use_kendall_h:
-            # NLL here is already ÷LATENT_DIM (per-dim)
-            sigma_str = (f"  σ_nll={d['sigma_nll_mean']:.2f}"
-                         f"  σ_rec={d['sigma_recon_mean']:.2f}")
-            latent_str = f"  L_nll/D={d['loss_nll']:.4f}{sigma_str}"
         else:
             latent_str = f"  L_nll={d['loss_nll']:.4f}{pi_str}"
         ptf_val = p_tf if k1_mode else p_tf_eff
@@ -554,27 +401,32 @@ def train(args):
         log_line += z0_norm_str
         logger.log(log_line)
 
-        if (epoch % 10 == 0 or epoch == 1 or epoch == args.epochs) \
-                and mean_err < best_mean_err:
-            best_mean_err = mean_err
-            ckpt = {
-                "state":      model.state_dict(),
-                "epoch":      epoch,
-                "mean_err":   mean_err,
-                "val_loss":   val_loss,
-                "latent_dim": LATENT_DIM,
-                "action_dim": ACTION_DIM,
-                "ema_tau":    args.ema_tau,
-                "k1_mode":    k1_mode,
-                "use_cat":    use_cat,
-            }
-            if not k1_mode and not use_cat:
-                ckpt["n_components"] = args.n_components
-            if use_cat:
-                ckpt["n_categories"] = getattr(args, "n_categories", N_COMPONENTS)
-            if kendall_weights is not None:
-                ckpt["kendall_state"] = kendall_weights.state_dict()
-            torch.save(ckpt, out_dir / "best.pt")
+        if epoch % 10 == 0 or epoch == 1:
+            if mean_err < best_mean_err - 1e-4:
+                best_mean_err = mean_err
+                stall_count   = 0
+                ckpt = {
+                    "state":      model.state_dict(),
+                    "epoch":      epoch,
+                    "mean_err":   mean_err,
+                    "val_loss":   val_loss,
+                    "latent_dim": LATENT_DIM,
+                    "action_dim": ACTION_DIM,
+                    "ema_tau":    args.ema_tau,
+                    "k1_mode":    k1_mode,
+                }
+                if not k1_mode:
+                    ckpt["n_components"] = args.n_components
+                torch.save(ckpt, out_dir / "best.pt")
+            else:
+                stall_count += 1
+                logger.log(f"  [stall {stall_count}/{args.patience}]")
+            if stall_count >= args.patience:
+                logger.log(
+                    f"\nEarly stop: {args.patience} consecutive evals without improvement."
+                    f"  best_err={best_mean_err:.1f}cm"
+                )
+                break
 
     torch.save({"state": model.state_dict(), "epoch": args.epochs,
                 "latent_dim": LATENT_DIM, "n_components": args.n_components,
@@ -594,7 +446,6 @@ def train(args):
         "k1_mode":          k1_mode,
         "no_ema":           args.no_ema,
         "lam_l2":           args.lam_l2,
-        "kendall_h":        use_kendall_h,
         "best_mean_err_cm": best_mean_err,
     }
     if not k1_mode:
@@ -614,7 +465,8 @@ def main():
     p = argparse.ArgumentParser()
     p.add_argument("--data-dir",        default="world_model/data_fixeddt")
     p.add_argument("--out-dir",         default="world_model/results/spr_mdn_v4")
-    p.add_argument("--epochs",          type=int,   default=400)
+    p.add_argument("--epochs",          type=int,   default=2000)
+    p.add_argument("--patience",        type=int,   default=10)
     p.add_argument("--batch-size",      type=int,   default=512)
     p.add_argument("--lr",              type=float, default=1e-4)
     p.add_argument("--n-components",    type=int,   default=N_COMPONENTS)
@@ -651,34 +503,6 @@ def main():
                    help="v17: remove stop-gradient between rollout steps (full BPTT, matches v18)")
     p.add_argument("--lam-l2",         type=float, default=1.0,
                    help="weight on latent L2 prediction loss (k1 mode only; sweep 1.0→0.1→0.01)")
-    p.add_argument("--eval-every",     type=int,   default=10,
-                   help="run rollout eval every N epochs (default 10; increase to speed up CPU training)")
-    p.add_argument("--ewta-v23",         action="store_true",
-                   help="v23: soft/annealed WTA L2 loss (replaces NLL); mean-chaining rollout unchanged")
-    p.add_argument("--tau-init",         type=float, default=1.0,
-                   help="v23 EWTA: initial softmax temperature (high=soft, default 1.0)")
-    p.add_argument("--tau-final",        type=float, default=0.05,
-                   help="v23 EWTA: final temperature after annealing (default 0.05)")
-    p.add_argument("--tau-anneal-epochs",type=int,   default=200,
-                   help="v23 EWTA: epochs to anneal tau from init to final (default 200)")
-    p.add_argument("--kendall-h",        action="store_true",
-                   help="v21: per-horizon Kendall uncertainty weighting (σ_nll,h + σ_recon,h) with NLL÷D pre-scaling")
-    p.add_argument("--sigma-nll-init",   type=float, default=0.0,
-                   help="warm-start init for log_sigma_nll (e.g. -0.572 = log(mean L_nll/D)); 0.0=cold-start")
-    p.add_argument("--sigma-recon-init", type=float, default=0.0,
-                   help="warm-start init for log_sigma_recon (e.g. -3.219 = log(mean L_recon)); 0.0=cold-start")
-    p.add_argument("--cat",              action="store_true",
-                   help="v24: discrete categorical latent variable model (Prior/Posterior/Branch)")
-    p.add_argument("--n-categories",     type=int,   default=5,
-                   help="v24: number of discrete latent categories (default 5)")
-    p.add_argument("--lam-kl",           type=float, default=1.0,
-                   help="v24: weight on KL(posterior‖prior) loss (default 1.0)")
-    p.add_argument("--lam-kl-warmup",    type=int,   default=0,
-                   help="v24: epochs to linearly anneal lam_kl from 0 → lam_kl (0=no warmup)")
-    p.add_argument("--lam-ent",          type=float, default=0.0,
-                   help="v24: prior entropy bonus weight (>0 prevents mode collapse; try 0.1)")
-    p.add_argument("--lam-ent-anneal",   type=int,   default=0,
-                   help="v24: epochs to linearly decay lam_ent → 0 (0=no decay; try 50)")
     args = p.parse_args()
     train(args)
 

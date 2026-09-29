@@ -99,7 +99,7 @@ class MixtureHead(nn.Module):
         b_raw  = h[:, K + K * D :].view(B, K, D)    # (B, K, D)
 
         pi = F.softmax(log_pi, dim=-1)               # (B, K) — sums to 1
-        b  = F.softplus(b_raw) + 0.01               # (B, K, D) — strictly positive
+        b  = F.softplus(b_raw) + 0.1                # (B, K, D) — b_min=0.1 prevents gradient explosion
 
         return pi, mu, b
 
@@ -195,35 +195,37 @@ class SPRMDNModel(nn.Module):
 
     def __init__(
         self,
-        latent_dim:      int   = LATENT_DIM,
-        n_components:    int   = N_COMPONENTS,
-        action_dim:      int   = ACTION_DIM,
-        ema_tau:         float = EMA_TAU,
-        asym_init:       bool  = False,
-        use_ema:         bool  = True,
-        use_encoder_ln:  bool  = True,
+        latent_dim:     int   = LATENT_DIM,
+        n_components:   int   = N_COMPONENTS,
+        action_dim:     int   = ACTION_DIM,
+        ema_tau:        float = EMA_TAU,
+        asym_init:      bool  = False,
+        use_ema:        bool  = True,
+        use_encoder_ln: bool  = True,
+        full_bptt:      bool  = False,
+        use_action:     bool  = True,
     ):
         super().__init__()
-        self.latent_dim      = latent_dim
-        self.n_components    = n_components
-        self.action_dim      = action_dim
-        self.ema_tau         = ema_tau
-        self.use_ema         = use_ema
-        self.use_encoder_ln  = use_encoder_ln
+        self.latent_dim     = latent_dim
+        self.n_components   = n_components
+        self.action_dim     = action_dim if use_action else 0
+        self.ema_tau        = ema_tau
+        self.use_ema        = use_ema
+        self.use_encoder_ln = use_encoder_ln
+        self.full_bptt      = full_bptt
+        self.use_action     = use_action
 
-        # Trainable modules
-        self.encoder      = EncoderLN(latent_dim) if use_encoder_ln else StateEncoder(latent_dim)
-        self.mixture_head = MixtureHead(latent_dim, n_components, action_dim, asym_init=asym_init)
+        # Encoder: with or without built-in LayerNorm
+        self.encoder = EncoderLN(latent_dim) if use_encoder_ln else StateEncoder(latent_dim)
+        if not use_encoder_ln:
+            # Dedicated transition LN — same role as SPRK1Model.transition_ln
+            self.transition_ln = nn.LayerNorm(latent_dim)
+
+        self.mixture_head = MixtureHead(latent_dim, n_components, self.action_dim, asym_init=asym_init)
         self.cue_head     = CueBallHead(latent_dim)
         self.tgt_head     = TgtBallHead(latent_dim)
         self.type_head    = TypeHead(latent_dim)
 
-        # Dedicated chain LN when use_encoder_ln=False (v18-parity: no encoder LN, separate LN for chain)
-        # When use_encoder_ln=True, encoder.ln is reused (already exists on EncoderLN)
-        if not use_encoder_ln:
-            self.chain_ln = nn.LayerNorm(latent_dim)
-
-        # EMA target encoder — only when use_ema=True; SimSiam uses stopgrad on self.encoder
         if use_ema:
             self.ema_encoder = copy.deepcopy(self.encoder)
             for p in self.ema_encoder.parameters():
@@ -238,15 +240,15 @@ class SPRMDNModel(nn.Module):
                             self.ema_encoder.parameters()):
             p_ema.data.mul_(tau).add_(p.data, alpha=1.0 - tau)
 
+    def _apply_ln(self, z: torch.Tensor) -> torch.Tensor:
+        """Apply the appropriate LayerNorm (encoder.ln or transition_ln)."""
+        if self.use_encoder_ln:
+            return self.encoder.ln(z)  # type: ignore[union-attr]
+        return self.transition_ln(z)
+
     def _decode(self, z: torch.Tensor) -> torch.Tensor:
         """z: (B, D) → s_hat: (B, 14)"""
         return torch.cat([self.cue_head(z), self.tgt_head(z)], dim=-1)
-
-    def _apply_chain_ln(self, z: torch.Tensor) -> torch.Tensor:
-        """Normalize mixture mean before chaining. Mirrors SPRK1Model v14 structure."""
-        if self.use_encoder_ln:
-            return self.encoder.ln(z)   # type: ignore[union-attr]
-        return self.chain_ln(z)
 
     def rollout_train(
         self,
@@ -257,51 +259,64 @@ class SPRMDNModel(nn.Module):
         p_tf:   float = 0.0,    # teacher-forcing probability (scheduled sampling)
     ) -> Tuple[List, List, List, List, List]:
         """
-        Training rollout with mixture mean chaining (v19+).
+        Scheduled-sampling training rollout.
 
-        p_tf=1.0: 완전 teacher forcing
-        p_tf=0.0: 완전 self-chaining (mixture mean, 완전 미분가능)
+        full_bptt=False (default): self-chain via Laplace sample (sg), LN in grad graph.
+        full_bptt=True: self-chain via mixture mean (differentiable), full gradient flow.
 
-        매 스텝 h≥1마다 Bernoulli(p_tf)로 결정:
-          c=1 → z_hat = sg(Enc_phi(s_{t+h}))           (teacher forcing)
-          c=0 → z_hat = encoder.ln(Σ_k π_k · μ_k)     (mixture mean chain, gradient 유지)
-
-        Target: use_ema=True → EMA encoder, use_ema=False → SimSiam (stopgrad via no_grad)
+        use_ema=False: z_bar target = sg(encoder(s_gt)) instead of EMA encoder.
+        use_encoder_ln=False: StateEncoder + transition_ln instead of EncoderLN.
 
         Returns: z_hat_list[T+1], pi_list[T], mu_list[T], b_list[T], z_bar_list[T]
         """
-        B      = s_0.shape[0]
-        device = s_0.device
+        B       = s_0.shape[0]
+        device  = s_0.device
         a_zeros = torch.zeros(B, self.action_dim, device=device)
 
         z_hat = self.encoder(s_0)    # (B, D) — h=0, real encoding
         z_hat_list = [z_hat]
         pi_list, mu_list, b_list, z_bar_list = [], [], [], []
 
-        # 시퀀스 단위로 한 번만 결정 — h마다 재굴리면 GT리셋 효과 생김
+        # Decide once per batch (per-step Bernoulli would reset GT every step)
         use_tf = (p_tf > 0.0 and torch.rand(1).item() < p_tf)
 
         for h in range(T):
-            a_tilde = action if h == 0 else a_zeros
+            a_tilde = (action if h == 0 else a_zeros) if self.use_action else a_zeros
 
             pi, mu, b = self.mixture_head(z_hat, a_tilde)
 
+            # Target z_bar: EMA encoder or stop-grad of online encoder
             with torch.no_grad():
-                target_enc = self.ema_encoder if self.use_ema else self.encoder
-                z_bar = target_enc(seq_s[:, h + 1])
+                if self.use_ema:
+                    z_bar = self.ema_encoder(seq_s[:, h + 1])
+                else:
+                    z_bar = self.encoder(seq_s[:, h + 1])
             z_bar_list.append(z_bar)
 
             pi_list.append(pi)
             mu_list.append(mu)
             b_list.append(b)
 
-            if use_tf:
-                with torch.no_grad():
-                    z_hat = self.encoder(seq_s[:, h + 1])
+            if self.full_bptt and not use_tf:
+                # Differentiable chain: mixture mean, no stop-grad
+                z_mean = (pi.unsqueeze(-1) * mu).sum(dim=1)   # (B, D)
+                z_hat  = self._apply_ln(z_mean)
             else:
-                # Mixture mean chaining — gradient flows through pi and mu
-                z_mean = (pi.unsqueeze(-1) * mu).sum(dim=1)  # (B, D)
-                z_hat = self._apply_chain_ln(z_mean)
+                with torch.no_grad():
+                    if use_tf:
+                        z_hat = self.encoder(seq_s[:, h + 1])
+                        if not self.use_encoder_ln:
+                            z_hat = self.transition_ln(z_hat)
+                    else:
+                        # Laplace sample, stop-grad
+                        k      = torch.multinomial(pi.detach(), 1).squeeze(1)
+                        mu_k   = mu[torch.arange(B), k]
+                        b_k    = b[torch.arange(B), k]
+                        u      = (torch.rand_like(b_k) - 0.5).clamp(-0.4999, 0.4999)
+                        z_hat  = mu_k - b_k * u.sign() * torch.log1p(-2.0 * u.abs())
+                if not use_tf:
+                    # LN outside no_grad so γ,β receive gradient from chain
+                    z_hat = self._apply_ln(z_hat)
 
             z_hat_list.append(z_hat)
 
@@ -327,11 +342,10 @@ class SPRMDNModel(nn.Module):
         type_logit_list = []
 
         for h in range(T):
-            a_tilde = action if (h == 0 and action is not None) else a_zeros
+            a_tilde = (action if (h == 0 and action is not None) else a_zeros) if self.use_action else a_zeros
             pi, mu, b = self.mixture_head(z_hat, a_tilde)
             type_logit_list.append(self.type_head(z_hat))
-            # Mixture mean, reuse encoder's LN for scale consistency
-            z_hat = self._apply_chain_ln((pi.unsqueeze(-1) * mu).sum(dim=1))   # (B, D)
+            z_hat = self._apply_ln((pi.unsqueeze(-1) * mu).sum(dim=1))   # (B, D)
             s_hat_list.append(self._decode(z_hat))
 
         s_hat      = torch.stack(s_hat_list, dim=1)       # (B, T+1, 14)
@@ -383,6 +397,7 @@ def spr_rollout_loss(
     lam_pi:          float = 0.0,   # >0 → v8: simultaneous π training via EWTA winner
     ewta_kappa:      int   = 0,      # >0 → EWTA active; 0 → standard NLL
     ewta_phase2:     bool  = False,  # True → Phase 2 (v7): π-only NLL, sg(μ,b)
+    log_sigma:       "torch.Tensor | None" = None,  # (2,) Kendall [recon, type] — overrides lam_recon
 ) -> Tuple[torch.Tensor, dict]:
     """
     Four modes via (ewta_kappa, lam_pi, ewta_phase2):
@@ -449,7 +464,13 @@ def spr_rollout_loss(
         logits_flat, types_flat, class_weights, focal_gamma, label_smoothing
     ) / math.log(N_COLL_TYPES)
 
-    total = loss_nll + lam_recon * loss_recon + loss_type
+    if log_sigma is not None:
+        # Kendall uncertainty weighting (SSM-style): adaptive balance of recon vs type
+        total = (loss_nll +
+                 torch.exp(-log_sigma[0]) * loss_recon + log_sigma[0] +
+                 torch.exp(-log_sigma[1]) * loss_type  + log_sigma[1])
+    else:
+        total = loss_nll + lam_recon * loss_recon + loss_type
     if lam_pi > 0:
         total = total + lam_pi * loss_pi
 
@@ -460,542 +481,6 @@ def spr_rollout_loss(
         "loss_cue":   loss_cue.item(),
         "loss_tgt":   loss_tgt.item(),
         "loss_type":  loss_type.item(),
-    }
-    return total, detail
-
-
-# ════════════════════════════════════════════════════════════════════════════
-# Kendall per-horizon uncertainty weighting (v21+)
-# ════════════════════════════════════════════════════════════════════════════
-
-class KendallHWeights(nn.Module):
-    """
-    Per-horizon Kendall uncertainty weights for NLL and recon losses.
-
-    Formulation (Kendall & Gal 2018, extended to per-step):
-        L_h = exp(-s_nll_h)  * (L_nll_h  / D) + s_nll_h
-            + exp(-s_recon_h) * L_recon_h       + s_recon_h
-
-    where s_nll_h = log_sigma_nll[h], s_recon_h = log_sigma_recon[h].
-
-    D (LATENT_DIM=128) pre-scaling brings NLL per-dim (~0.77) to the same
-    order as L_recon (~0.038), so Kendall handles the residual 20:1 imbalance
-    rather than the full 3,363x structural imbalance.
-
-    Parameters: 2 × T_max scalars (default T_max=60).
-    Init at 0 → exp(-0)=1, no initial scaling shift.
-    """
-
-    def __init__(self, T_max: int = 60,
-                 sigma_nll_init: float = 0.0,
-                 sigma_recon_init: float = 0.0):
-        super().__init__()
-        self.T_max = T_max
-        self.log_sigma_nll   = nn.Parameter(torch.full((T_max,), float(sigma_nll_init)))
-        self.log_sigma_recon = nn.Parameter(torch.full((T_max,), float(sigma_recon_init)))
-
-    def extra_repr(self) -> str:
-        return f"T_max={self.T_max}"
-
-
-def spr_rollout_loss_kendall_h(
-    pi_list:       List[torch.Tensor],   # [T] each (B, K)
-    mu_list:       List[torch.Tensor],   # [T] each (B, K, D)
-    b_list:        List[torch.Tensor],   # [T] each (B, K, D)
-    z_bar_list:    List[torch.Tensor],   # [T] each (B, D)
-    s_hat:         torch.Tensor,         # (B, T+1, 14)
-    seq_s:         torch.Tensor,         # (B, T+1, 14)
-    type_logit:    torch.Tensor,         # (B, T, 5)
-    seq_types:     torch.Tensor,         # (B, T) int
-    kendall:       KendallHWeights,
-    class_weights: torch.Tensor | None = None,
-    focal_gamma:   float = 2.0,
-    label_smoothing: float = 0.0,
-) -> Tuple[torch.Tensor, dict]:
-    """
-    Kendall-weighted per-horizon loss for SPRMDNModel.
-
-    NLL is pre-scaled by 1/LATENT_DIM before weighting to bring it from
-    ~99 (D-dim sum) to ~0.77 (per-dim), then Kendall handles the residual
-    ~20x imbalance vs L_recon (~0.038).
-
-    h=0 recon (trivial encode-decode) is excluded; only prediction steps
-    h=1..T carry Kendall weights (s_hat[:, h+1, :] vs seq_s[:, h+1, :]).
-    """
-    T    = len(pi_list)
-    zero = pi_list[0].new_zeros(())
-
-    total_weighted = zero
-    nll_raw_sum    = 0.0
-    recon_raw_sum  = 0.0
-
-    for h in range(T):
-        # ── NLL: pre-scale by 1/D ─────────────────────────────────────────
-        nll_h = laplace_nll_mixture(
-            pi_list[h], mu_list[h], b_list[h], z_bar_list[h]
-        ) / LATENT_DIM
-
-        # ── Recon at prediction step h+1 (skip trivial h=0) ──────────────
-        recon_h = (
-            F.mse_loss(s_hat[:, h + 1, :7], seq_s[:, h + 1, :7]) +
-            F.mse_loss(s_hat[:, h + 1, 7:], seq_s[:, h + 1, 7:])
-        )
-
-        s_nll = kendall.log_sigma_nll[h]
-        s_rec = kendall.log_sigma_recon[h]
-
-        total_weighted = (
-            total_weighted
-            + torch.exp(-s_nll) * nll_h + s_nll
-            + torch.exp(-s_rec) * recon_h + s_rec
-        )
-        nll_raw_sum   += nll_h.item()
-        recon_raw_sum += recon_h.item()
-
-    total_weighted = total_weighted / T
-
-    # ── Type loss (unchanged) ─────────────────────────────────────────────
-    B_T         = type_logit.shape[0] * type_logit.shape[1]
-    logits_flat = type_logit.reshape(B_T, N_COLL_TYPES)
-    types_flat  = seq_types.reshape(B_T)
-    loss_type   = _focal_cross_entropy(
-        logits_flat, types_flat, class_weights, focal_gamma, label_smoothing
-    ) / math.log(N_COLL_TYPES)
-
-    total = total_weighted + loss_type
-
-    sigma_nll_vals   = kendall.log_sigma_nll[:T].detach()
-    sigma_recon_vals = kendall.log_sigma_recon[:T].detach()
-
-    detail = {
-        "loss_nll":         nll_raw_sum / T,          # per-dim, per-step average
-        "loss_recon":       recon_raw_sum / T,
-        "loss_type":        loss_type.item(),
-        "sigma_nll_mean":   sigma_nll_vals.mean().item(),
-        "sigma_nll_h1":     sigma_nll_vals[0].item(),
-        "sigma_nll_hT":     sigma_nll_vals[T - 1].item(),
-        "sigma_recon_mean": sigma_recon_vals.mean().item(),
-        "sigma_recon_h1":   sigma_recon_vals[0].item(),
-        "sigma_recon_hT":   sigma_recon_vals[T - 1].item(),
-    }
-    return total, detail
-
-
-# ════════════════════════════════════════════════════════════════════════════
-# EWTA loss (v23+): soft/annealed Winner-Takes-All L2 for explicit component separation
-# ════════════════════════════════════════════════════════════════════════════
-
-def spr_rollout_loss_ewta(
-    pi_list:       List[torch.Tensor],   # [T] each (B, K)
-    mu_list:       List[torch.Tensor],   # [T] each (B, K, D)
-    b_list:        List[torch.Tensor],   # [T] each (B, K, D)  — kept for API, not used in loss
-    z_bar_list:    List[torch.Tensor],   # [T] each (B, D)
-    s_hat:         torch.Tensor,         # (B, T+1, 14)
-    seq_s:         torch.Tensor,         # (B, T+1, 14)
-    type_logit:    torch.Tensor,         # (B, T, 5)
-    seq_types:     torch.Tensor,         # (B, T) int
-    tau:           float = 1.0,          # current temperature (anneal high→low)
-    class_weights: torch.Tensor | None = None,
-    focal_gamma:   float = 2.0,
-    label_smoothing: float = 0.0,
-    lam_recon:     float = 1.0,
-) -> Tuple[torch.Tensor, dict]:
-    """
-    Soft Winner-Takes-All L2 loss for SPRMDNModel (v23+).
-
-    Replaces NLL with:
-        d_k   = ||z_bar − μ_k||² / D          (per-dim MSE, D-normalised)
-        w_k   = softmax(log π_k − d_k / τ)    (soft WTA weight)
-        L_wta = E_w[d_k] = Σ_k w_k × d_k
-
-    At τ→∞: uniform weights → gradient flows to all components (mode-preserving).
-    At τ→0: argmin_k → hard WTA, only winner gets gradient.
-
-    b is not used in this loss (no b-collapse risk). b output from mixture_head
-    remains available for diagnosis / future sampling-based rollout.
-
-    L_recon and L_type are unchanged.
-    """
-    T = len(pi_list)
-    D = mu_list[0].shape[-1]  # LATENT_DIM
-    zero = pi_list[0].new_zeros(())
-
-    total_wta   = zero
-    total_recon = 0.0
-    wta_sum     = 0.0
-
-    for h in range(T):
-        pi   = pi_list[h]        # (B, K)
-        mu   = mu_list[h]        # (B, K, D)
-        zbar = z_bar_list[h]     # (B, D)
-
-        # Per-dim MSE per component: d_k = ||z_bar − μ_k||² / D
-        zbar_exp = zbar.unsqueeze(1).expand_as(mu)   # (B, K, D)
-        d = (zbar_exp - mu).pow(2).sum(dim=-1) / D   # (B, K)
-
-        # Soft-WTA weights: combine predicted π with distance-based winner prob
-        log_w = torch.log(pi.clamp(min=1e-8)) - d / tau   # (B, K)
-        w = torch.softmax(log_w, dim=-1)                   # (B, K)
-
-        # WTA loss: expected distance under soft assignment
-        loss_wta_h = (w * d).sum(dim=-1).mean()   # scalar
-        total_wta  = total_wta + loss_wta_h
-        wta_sum   += loss_wta_h.item()
-
-        # Recon (unchanged from spr_rollout_loss)
-        recon_h = (
-            F.mse_loss(s_hat[:, h + 1, :7], seq_s[:, h + 1, :7]) +
-            F.mse_loss(s_hat[:, h + 1, 7:], seq_s[:, h + 1, 7:])
-        )
-        total_recon += recon_h.item()
-
-    total_wta   = total_wta / T
-    total_recon_t = (
-        sum(
-            F.mse_loss(s_hat[:, h + 1, :7], seq_s[:, h + 1, :7]) +
-            F.mse_loss(s_hat[:, h + 1, 7:], seq_s[:, h + 1, 7:])
-            for h in range(T)
-        ) / T
-    )
-
-    # Type loss
-    B_T         = type_logit.shape[0] * type_logit.shape[1]
-    logits_flat = type_logit.reshape(B_T, N_COLL_TYPES)
-    types_flat  = seq_types.reshape(B_T)
-    loss_type   = _focal_cross_entropy(
-        logits_flat, types_flat, class_weights, focal_gamma, label_smoothing
-    ) / math.log(N_COLL_TYPES)
-
-    total = total_wta + lam_recon * total_recon_t + loss_type
-
-    # Soft assignment entropy (how spread is w — high = soft/uniform, low = hard/collapsed)
-    with torch.no_grad():
-        last_pi  = pi_list[-1]   # (B, K)  last step
-        last_mu  = mu_list[-1]   # (B, K, D)
-        last_z   = z_bar_list[-1]
-        zb_exp   = last_z.unsqueeze(1).expand_as(last_mu)
-        d_last   = (zb_exp - last_mu).pow(2).sum(dim=-1) / D
-        lw_last  = torch.log(last_pi.clamp(min=1e-8)) - d_last / tau
-        w_last   = torch.softmax(lw_last, dim=-1)
-        max_pi_mean = w_last.max(dim=-1).values.mean().item()
-        var_mu_mean = last_mu.var(dim=1).mean().item()
-
-    detail = {
-        "loss_wta":   wta_sum / T,
-        "loss_recon": total_recon / T,
-        "loss_type":  loss_type.item(),
-        "tau":        tau,
-        "max_pi":     max_pi_mean,
-        "var_mu":     var_mu_mean,
-    }
-    return total, detail
-
-
-# ════════════════════════════════════════════════════════════════════════════
-# Categorical Latent Variable Model (v24): DreamerV3-style Prior/Posterior
-# ════════════════════════════════════════════════════════════════════════════
-
-def _unimix(logits: torch.Tensor, alpha: float = 0.01) -> torch.Tensor:
-    """(1−α)·softmax(logits) + α/K  — uniform floor, eliminates τ schedule."""
-    K = logits.shape[-1]
-    return (1.0 - alpha) * torch.softmax(logits, dim=-1) + alpha / K
-
-
-def _st_onehot(probs: torch.Tensor) -> torch.Tensor:
-    """Straight-through: forward=onehot(argmax(probs)), backward through probs."""
-    K    = probs.shape[-1]
-    hard = F.one_hot(probs.argmax(dim=-1), K).to(probs)   # (B, K)
-    return hard - probs.detach() + probs
-
-
-class CatPriorHead(nn.Module):
-    """p(c_h | trunk_out) — K logits, zero-init → perplexity=K at epoch 1."""
-
-    def __init__(self, trunk_dim: int = 256, n_categories: int = N_COMPONENTS):
-        super().__init__()
-        self.fc = nn.Linear(trunk_dim, n_categories)
-        nn.init.zeros_(self.fc.weight)
-        nn.init.zeros_(self.fc.bias)
-
-    def forward(self, trunk_out: torch.Tensor) -> torch.Tensor:
-        return self.fc(trunk_out)   # (B, K)
-
-
-class CatPosteriorHead(nn.Module):
-    """q(c_h | trunk_out, z_target) — zero-init last layer."""
-
-    def __init__(self, latent_dim: int = LATENT_DIM, trunk_dim: int = 256,
-                 n_categories: int = N_COMPONENTS):
-        super().__init__()
-        self.net = nn.Sequential(
-            nn.Linear(trunk_dim + latent_dim, trunk_dim),
-            nn.SiLU(),
-            nn.Linear(trunk_dim, n_categories),
-        )
-        nn.init.zeros_(self.net[-1].weight)
-        nn.init.zeros_(self.net[-1].bias)
-
-    def forward(self, trunk_out: torch.Tensor, z_tgt: torch.Tensor) -> torch.Tensor:
-        return self.net(torch.cat([trunk_out, z_tgt], dim=-1))   # (B, K)
-
-
-class BranchOutputHead(nn.Module):
-    """Residual correction conditioned on c — zero-init last layer → correction=0 at init."""
-
-    def __init__(self, latent_dim: int = LATENT_DIM, n_categories: int = N_COMPONENTS,
-                 trunk_dim: int = 256):
-        super().__init__()
-        self.net = nn.Sequential(
-            nn.Linear(trunk_dim + n_categories, trunk_dim),
-            nn.SiLU(),
-            nn.Linear(trunk_dim, latent_dim),
-        )
-        nn.init.zeros_(self.net[-1].weight)
-        nn.init.zeros_(self.net[-1].bias)
-
-    def forward(self, trunk_out: torch.Tensor, c_onehot: torch.Tensor) -> torch.Tensor:
-        return self.net(torch.cat([trunk_out, c_onehot], dim=-1))   # (B, D)
-
-
-class SPRCatModel(nn.Module):
-    """
-    SPR with discrete categorical latent variable (v24).
-
-    Per-step (training):
-      trunk_out  = trunk([z_chain; a])
-      prior_probs  = unimix(prior_head(trunk_out))
-      post_probs   = unimix(post_head([trunk_out; z_tgt]))
-      c_onehot     = ST(post_probs)
-      z_chain      = chain_ln(z_chain + branch_head([trunk_out; c_onehot]))
-
-    Per-step (eval):
-      c_onehot = onehot(argmax(prior_probs))   or   sample(prior_probs)
-    """
-
-    def __init__(
-        self,
-        latent_dim:   int   = LATENT_DIM,
-        n_categories: int   = N_COMPONENTS,
-        action_dim:   int   = ACTION_DIM,
-        ema_tau:      float = EMA_TAU,
-        use_ema:      bool  = True,
-        alpha:        float = 0.01,
-    ):
-        super().__init__()
-        self.latent_dim   = latent_dim
-        self.n_categories = n_categories
-        self.action_dim   = action_dim
-        self.ema_tau      = ema_tau
-        self.use_ema      = use_ema
-        self.alpha        = alpha
-
-        trunk_dim = 256
-        self.encoder = EncoderLN(latent_dim)
-        self.trunk   = nn.Sequential(
-            nn.Linear(latent_dim + action_dim, trunk_dim),
-            nn.SiLU(),
-            nn.Linear(trunk_dim, trunk_dim),
-            nn.SiLU(),
-        )
-        self.prior_head     = CatPriorHead(trunk_dim, n_categories)
-        self.posterior_head = CatPosteriorHead(latent_dim, trunk_dim, n_categories)
-        self.branch_head    = BranchOutputHead(latent_dim, n_categories, trunk_dim)
-        self.chain_ln       = nn.LayerNorm(latent_dim)
-
-        self.cue_head  = CueBallHead(latent_dim)
-        self.tgt_head  = TgtBallHead(latent_dim)
-        self.type_head = TypeHead(latent_dim)
-
-        if use_ema:
-            self.ema_encoder = copy.deepcopy(self.encoder)
-            for p in self.ema_encoder.parameters():
-                p.requires_grad_(False)
-
-    @torch.no_grad()
-    def update_ema(self) -> None:
-        if not self.use_ema:
-            return
-        tau = self.ema_tau
-        for p, p_ema in zip(self.encoder.parameters(),
-                            self.ema_encoder.parameters()):
-            p_ema.data.mul_(tau).add_(p.data, alpha=1.0 - tau)
-
-    def _decode(self, z: torch.Tensor) -> torch.Tensor:
-        return torch.cat([self.cue_head(z), self.tgt_head(z)], dim=-1)
-
-    def rollout_train(
-        self,
-        s_0:    torch.Tensor,   # (B, 14)
-        seq_s:  torch.Tensor,   # (B, T+1, 14)
-        action: torch.Tensor,   # (B, m)
-        T:      int,
-    ) -> Tuple[List, List, List, List, torch.Tensor, torch.Tensor]:
-        """
-        c ~ Posterior (straight-through) → chain z_pred.
-        Returns: z_pred_list, z_bar_list, prior_probs_list, post_probs_list, s_hat, type_logit
-        """
-        B       = s_0.shape[0]
-        device  = s_0.device
-        a_zeros = torch.zeros(B, self.action_dim, device=device)
-
-        z_chain = self.encoder(s_0)
-        s_hat_list      = [self._decode(z_chain)]
-        type_logit_list = []
-        z_pred_list, z_bar_list           = [], []
-        prior_probs_list, post_probs_list = [], []
-
-        for h in range(T):
-            a_tilde   = action if h == 0 else a_zeros
-            trunk_out = self.trunk(torch.cat([z_chain, a_tilde], dim=-1))  # (B, 256)
-
-            prior_probs = _unimix(self.prior_head(trunk_out), self.alpha)
-            prior_probs_list.append(prior_probs)
-
-            with torch.no_grad():
-                target_enc = self.ema_encoder if self.use_ema else self.encoder
-                z_bar = target_enc(seq_s[:, h + 1])
-            z_bar_list.append(z_bar)
-
-            post_probs = _unimix(self.posterior_head(trunk_out, z_bar), self.alpha)
-            post_probs_list.append(post_probs)
-
-            c_onehot   = _st_onehot(post_probs)
-            correction = self.branch_head(trunk_out, c_onehot)
-            z_chain    = self.chain_ln(z_chain + correction)
-
-            z_pred_list.append(z_chain)
-            type_logit_list.append(self.type_head(z_chain))
-            s_hat_list.append(self._decode(z_chain))
-
-        s_hat      = torch.stack(s_hat_list, dim=1)       # (B, T+1, 14)
-        type_logit = torch.stack(type_logit_list, dim=1)  # (B, T, 5)
-        return z_pred_list, z_bar_list, prior_probs_list, post_probs_list, s_hat, type_logit
-
-    @torch.no_grad()
-    def rollout_eval(
-        self,
-        s_0:        torch.Tensor,
-        T:          int,
-        action:     torch.Tensor | None = None,
-        use_sample: bool = False,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """
-        Default (use_sample=False): expected correction Σ_k p_k * branch_k(trunk, e_k).
-        use_sample=True: single categorical sample instead.
-        Returns: s_hat (B, T+1, 14), type_logit (B, T, 5)
-        """
-        B       = s_0.shape[0]
-        device  = s_0.device
-        a_zeros = torch.zeros(B, self.action_dim, device=device)
-        K       = self.n_categories
-        eye     = torch.eye(K, device=device, dtype=s_0.dtype)  # (K, K)
-
-        z_chain         = self.encoder(s_0)
-        s_hat_list      = [self._decode(z_chain)]
-        type_logit_list = []
-
-        for h in range(T):
-            a_tilde   = action if (h == 0 and action is not None) else a_zeros
-            trunk_out = self.trunk(torch.cat([z_chain, a_tilde], dim=-1))
-
-            prior_probs = _unimix(self.prior_head(trunk_out), self.alpha)  # (B, K)
-
-            if use_sample:
-                c_idx    = torch.multinomial(prior_probs, 1).squeeze(-1)
-                c_onehot = F.one_hot(c_idx, K).to(z_chain)
-                correction = self.branch_head(trunk_out, c_onehot)
-            else:
-                # Expected correction: Σ_k p_k * branch_k(trunk_out, e_k)
-                trunk_exp = trunk_out.unsqueeze(1).expand(-1, K, -1).reshape(B * K, -1)
-                eye_exp   = eye.unsqueeze(0).expand(B, -1, -1).reshape(B * K, K)
-                corr_all  = self.branch_head(trunk_exp, eye_exp).view(B, K, -1)  # (B, K, D)
-                correction = (prior_probs.unsqueeze(-1) * corr_all).sum(1)       # (B, D)
-
-            type_logit_list.append(self.type_head(z_chain))
-            z_chain    = self.chain_ln(z_chain + correction)
-            s_hat_list.append(self._decode(z_chain))
-
-        s_hat      = torch.stack(s_hat_list, dim=1)
-        type_logit = torch.stack(type_logit_list, dim=1)
-        return s_hat, type_logit
-
-
-def spr_rollout_loss_cat(
-    z_pred_list:      List[torch.Tensor],   # [T] (B, D)
-    z_bar_list:       List[torch.Tensor],   # [T] (B, D) — stop-grad targets
-    prior_probs_list: List[torch.Tensor],   # [T] (B, K)
-    post_probs_list:  List[torch.Tensor],   # [T] (B, K)
-    s_hat:            torch.Tensor,         # (B, T+1, 14)
-    seq_s:            torch.Tensor,         # (B, T+1, 14)
-    type_logit:       torch.Tensor,         # (B, T, 5)
-    seq_types:        torch.Tensor,         # (B, T) int
-    lam_kl:           float = 1.0,
-    lam_recon:        float = 1.0,
-    lam_ent:          float = 0.0,   # >0: prior entropy bonus — penalises mode collapse
-    class_weights:    torch.Tensor | None = None,
-    focal_gamma:      float = 2.0,
-    label_smoothing:  float = 0.0,
-) -> Tuple[torch.Tensor, dict]:
-    """
-    v24 loss: L2 + lam_kl·KL(post‖prior) + lam_recon·recon + type − lam_ent·H(prior).
-
-    lam_ent > 0 adds an entropy bonus on the prior: maximises H(prior) to prevent
-    mode collapse (all probability mass on 1-2 categories).
-    Unimix ensures probs > 0 → log always finite.
-    """
-    T    = len(z_pred_list)
-    zero = z_pred_list[0].new_zeros(())
-
-    total_l2  = zero
-    total_kl  = zero
-    total_ent = zero   # mean prior entropy (positive scalar)
-
-    for h in range(T):
-        total_l2 = total_l2 + F.mse_loss(z_pred_list[h], z_bar_list[h])
-        qp = post_probs_list[h]
-        pp = prior_probs_list[h]
-        total_kl  = total_kl  + (qp * (torch.log(qp) - torch.log(pp))).sum(-1).mean()
-        total_ent = total_ent + (-(pp * torch.log(pp.clamp(1e-8))).sum(-1).mean())
-
-    total_l2  = total_l2  / T
-    total_kl  = total_kl  / T
-    total_ent = total_ent / T   # H(prior), positive; max = log(K)
-
-    total_recon = sum(
-        F.mse_loss(s_hat[:, h + 1, :7], seq_s[:, h + 1, :7]) +
-        F.mse_loss(s_hat[:, h + 1, 7:], seq_s[:, h + 1, 7:])
-        for h in range(T)
-    ) / T
-
-    B_T         = type_logit.shape[0] * type_logit.shape[1]
-    logits_flat = type_logit.reshape(B_T, N_COLL_TYPES)
-    types_flat  = seq_types.reshape(B_T)
-    loss_type   = _focal_cross_entropy(
-        logits_flat, types_flat, class_weights, focal_gamma, label_smoothing
-    ) / math.log(N_COLL_TYPES)
-
-    # Subtract entropy bonus: minimising total → maximising H(prior)
-    total = total_l2 + lam_kl * total_kl + lam_recon * total_recon + loss_type \
-            - lam_ent * total_ent
-
-    with torch.no_grad():
-        last_prior = prior_probs_list[-1]
-        last_post  = post_probs_list[-1]
-        prior_perp = torch.exp(
-            -(last_prior * torch.log(last_prior.clamp(1e-8))).sum(-1).mean()
-        ).item()
-        post_perp = torch.exp(
-            -(last_post * torch.log(last_post.clamp(1e-8))).sum(-1).mean()
-        ).item()
-
-    detail = {
-        "loss_l2":    total_l2.item(),
-        "loss_kl":    total_kl.item(),
-        "loss_recon": total_recon.item(),
-        "loss_type":  loss_type.item(),
-        "H_prior":    total_ent.item(),
-        "prior_perp": prior_perp,
-        "post_perp":  post_perp,
     }
     return total, detail
 

@@ -37,8 +37,8 @@ from world_model.fixeddt_model import StateEncoder
 LATENT_DIM   = 128
 CUE_DIM      = 7     # state dims 0:7  (xy, vxvy, wxwywz)
 TGT_DIM      = 7     # state dims 7:14 (xy, vxvy, wxwywz)
-N_COLL_TYPES = 5     # 0=no_coll, 1=ball_ball, 2=linear, 3=circular, 4=pocket
-AR_DIM       = 19    # ar state: [g_cue(7); g_tgt(7); softmax_type(5)]
+N_COLL_TYPES = 7     # 0=no_coll, 1=bb, 2=lin, 3=circ, 4=pocket, 5=slide_roll, 6=roll_stop
+AR_DIM       = 21    # ar state: [g_cue(7); g_tgt(7); softmax_type(7)]
 
 
 class ResTransition(nn.Module):
