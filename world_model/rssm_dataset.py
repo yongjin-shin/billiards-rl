@@ -64,6 +64,10 @@ class ShotData:
             if ev.event_type == 3:   # EVENT_POCKET
                 self.will_pocket[ev.ball_i] = True
 
+    def n_pocketed_targets(self) -> int:
+        """Number of pocketed target balls (excludes ball_idx=0, the cue/scratch)."""
+        return sum(1 for i in range(1, self.n_balls) if self.will_pocket.get(i, False))
+
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
