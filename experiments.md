@@ -2094,3 +2094,9 @@ Pairwise rescue: baseline이 잘못 순서를 매긴 쌍 2,866,568개(전체 쌍
 - 테스트: `tests/test_generate_rssm_data.py` — quota 초과 안 하는지, 도달 불가능한 버킷(quota가 매우 큰데 n_balls=1이라 2-포켓 자체가 불가능한 경우)에서 `max_attempts`로 정상 종료하는지 확인.
 
 **다음**: 실제 quota를 정해 balanced 데이터셋을 생성 실행(2-포켓 quota가 클수록 시간이 오래 걸림 — 위 측정 기준 quota=1000이면 약 25분 추정). roadmap ④ 상태 업데이트는 실제 생성 완료 후 진행.
+
+**실행 결과 (2026-09-29)**: `--balanced --quota0 1000 --quota1 1000 --quota2 1000 --n-balls 2 --policy random --seed 42`로 백그라운드 실행. 812,540 에피소드 시도 끝에 세 버킷(0/1/2-포켓) 모두 1000개씩 채워 총 3,000 샷 확보, 소요 27.4분. `world_model/data_rssm_3ball/`에 chunk 2개(pkl) + `metadata.json` 저장.
+
+- 사전 측정 추정(quota=1000 → ~25분, ~751,000 에피소드)과 실측(27.4분, 812,540 에피소드)이 거의 일치 — 확률 추정이 신뢰할 만함을 확인.
+- 버그 발견 및 수정: `generate_balanced()`가 `list[ShotData]`만 반환해서, `main()`의 통계/메타데이터 출력이 실제 시도 횟수(812,540) 대신 미사용 CLI 기본값(`--n-episodes` 기본 50,000)을 그대로 찍고 있었음 — `n_episodes` 필드가 완전히 틀린 값이었음. `generate_balanced()`가 `(shots, total_attempts)` 튜플을 반환하도록 수정하고, `main()`/metadata에 실제 시도 횟수를 쓰도록 고침. 이미 저장된 `metadata.json`의 `n_episodes` 값도 812540으로 수동 정정.
+- 이 데이터셋은 `n_balls=2`(cue+target 2개) 기준이며, roadmap ④의 GNN N=3 확장 작업에서 학습 데이터로 사용 예정.

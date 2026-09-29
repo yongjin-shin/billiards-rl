@@ -128,13 +128,17 @@ def generate_balanced(
     seed_start  : int = 0,
     max_attempts: int = 2_000_000,
     report_every: int = 5_000,
-) -> list[ShotData]:
+) -> tuple[list[ShotData], int]:
     """Rejection-sample episodes into buckets keyed by n_pocketed_targets().
 
     Keeps generating episodes until every bucket in `quotas` reaches its
     target count (or `max_attempts` episodes have been tried). Shots whose
     bucket is already full are discarded so rare buckets (e.g. 2-pocket)
     don't get drowned out by the dominant 0-pocket bucket.
+
+    Returns (shots, total_attempts) — attempts is the actual number of
+    episodes tried, which can be far larger than len(shots) since rare
+    buckets require many discarded episodes.
     """
     from simulator import BilliardsEnv
 
@@ -182,7 +186,7 @@ def generate_balanced(
     shots: list[ShotData] = []
     for k in sorted(buckets):
         shots.extend(buckets[k])
-    return shots
+    return shots, total_attempts
 
 
 def save_chunks(shots: list[ShotData], out_dir: Path, tag: str, chunk_size: int):
@@ -227,12 +231,13 @@ def main():
 
     ts  = datetime.now().strftime("%Y%m%d_%H%M%S")
 
+    n_attempts = None
     if args.balanced:
         quotas = {0: args.quota0, 1: args.quota1, 2: args.quota2}
         tag = f"{policy_tag}_balanced_q{args.quota0}-{args.quota1}-{args.quota2}_s{args.seed}_{ts}"
         print(f"Generating balanced dataset  quotas={quotas}  policy={policy_tag}  n_balls={args.n_balls}")
         t0    = time.time()
-        shots = generate_balanced(
+        shots, n_attempts = generate_balanced(
             quotas       = quotas,
             policy_fn    = policy_fn,
             n_balls      = args.n_balls,
@@ -253,6 +258,7 @@ def main():
             report_every = args.report_every,
         )
         elapsed = time.time() - t0
+        n_attempts = args.n_episodes
 
     # Stats
     n_pocket = sum(
@@ -261,7 +267,7 @@ def main():
     )
     total_ev = sum(len(s.event_steps) for s in shots)
     print(f"\nDone in {elapsed/60:.1f}min")
-    print(f"  Valid shots : {len(shots):,} / {args.n_episodes:,}")
+    print(f"  Valid shots : {len(shots):,} / {n_attempts:,}")
     print(f"  Pocketed    : {n_pocket:,} ({100*n_pocket/len(shots):.1f}%)")
     print(f"  Total events: {total_ev:,}  avg={total_ev/len(shots):.1f}/shot")
 
@@ -275,7 +281,8 @@ def main():
         "tag"          : tag,
         "policy"       : policy_tag,
         "sac_model"    : args.sac_model,
-        "n_episodes"   : args.n_episodes,
+        "balanced"     : args.balanced,
+        "n_episodes"   : n_attempts,
         "n_valid_shots": len(shots),
         "n_pocketed"   : n_pocket,
         "pocketed_pct" : round(100 * n_pocket / len(shots), 2),

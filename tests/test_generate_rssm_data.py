@@ -29,7 +29,7 @@ class TestGenerateBalanced:
         policy_fn, env = _random_policy_fn()
         try:
             quotas = {0: 3, 1: 1}
-            shots = generate_balanced(
+            shots, n_attempts = generate_balanced(
                 quotas       = quotas,
                 policy_fn    = policy_fn,
                 n_balls      = 1,
@@ -40,6 +40,7 @@ class TestGenerateBalanced:
         finally:
             env.close()
 
+        assert n_attempts > 0
         counts = {k: 0 for k in quotas}
         for s in shots:
             assert isinstance(s, ShotData)
@@ -54,7 +55,7 @@ class TestGenerateBalanced:
         policy_fn, env = _random_policy_fn()
         try:
             quotas = {0: 1, 1: 1, 2: 5_000}
-            shots = generate_balanced(
+            shots, n_attempts = generate_balanced(
                 quotas       = quotas,
                 policy_fn    = policy_fn,
                 n_balls      = 1,
@@ -65,5 +66,6 @@ class TestGenerateBalanced:
         finally:
             env.close()
 
+        assert n_attempts <= 200, "max_attempts safety cap must be respected"
         assert all(s.n_pocketed_targets() != 2 for s in shots), \
             "n_balls=1 has only one target ball; n_pocketed_targets==2 is impossible"
