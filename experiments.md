@@ -2100,3 +2100,33 @@ Pairwise rescue: baseline이 잘못 순서를 매긴 쌍 2,866,568개(전체 쌍
 - 사전 측정 추정(quota=1000 → ~25분, ~751,000 에피소드)과 실측(27.4분, 812,540 에피소드)이 거의 일치 — 확률 추정이 신뢰할 만함을 확인.
 - 버그 발견 및 수정: `generate_balanced()`가 `list[ShotData]`만 반환해서, `main()`의 통계/메타데이터 출력이 실제 시도 횟수(812,540) 대신 미사용 CLI 기본값(`--n-episodes` 기본 50,000)을 그대로 찍고 있었음 — `n_episodes` 필드가 완전히 틀린 값이었음. `generate_balanced()`가 `(shots, total_attempts)` 튜플을 반환하도록 수정하고, `main()`/metadata에 실제 시도 횟수를 쓰도록 고침. 이미 저장된 `metadata.json`의 `n_episodes` 값도 812540으로 수동 정정.
 - 이 데이터셋은 `n_balls=2`(cue+target 2개) 기준이며, roadmap ④의 GNN N=3 확장 작업에서 학습 데이터로 사용 예정.
+
+### "어느 공이 포켓될지" 예측 검증 계획 (2026-09-29)
+
+**배경**: 사용자 질문 — 지금 R-SSM이 "포켓이 일어날지"뿐 아니라 "어느 공이 포켓될지"도 예측할 수 있는가? 코드 확인 결과 `RSSMModel.predict_pocket(h)`(`rssm_model.py:259-273`)는 공 전체를 뭉뚱그리지 않고 **공마다 자기 latent `h[i]`를 받아 독립적인 시그모이드 확률을 출력**한다 — 구조적으로는 이미 공별 예측이 가능하다. `init_hidden(n_balls)`도 공 개수에 가변적이라 모델 자체는 N-ball 공유 가중치 구조(공 개수와 무관하게 동일 MLP 재사용).
+
+**문제**: 지금까지 학습된 체크포인트(`rssm_v4`, `rssm_v5`)는 전부 `n_balls=1`(큐+타깃 1개) 데이터로만 학습됨 — 타깃이 하나뿐이라 "포켓될 확률"과 "어느 공이 포켓될지"가 사실상 동일한 질문이었다. 여러 타깃 중 어느 것이 포켓될지 구별하는 능력은 한 번도 검증된 적이 없다. 방금 만든 3-ball 데이터셋(`world_model/data_rssm_3ball/`, n_pocketed 버킷별 1000샷)이 이걸 검증할 첫 기회.
+
+**추가 발견**: 기존 진단 스크립트 `world_model/eval_pocket_head.py`가 `ev.node_i`/`ev.node_j`/`ev.edge`를 pkl에서 바로 읽어 쓰는데, 이 필드들은 이전 세션의 pkl 용량 최적화로 항상 `None`으로 저장되도록 바뀌었다(`train_rssm.py`는 `make_node`/`make_edge`로 재구성하는 패턴으로 이미 대응했지만 `eval_pocket_head.py`는 그때 안 고쳐짐) — 지금 그대로 돌리면 `NoneType.to()` 에러로 즉시 크래시하는 stale 버그. 이번 작업의 선행 조건으로 수정 필요.
+
+**계획**:
+1. `eval_pocket_head.py`의 `collect_pocket_preds`/`collect_pocket_preds_all_touches`를 `make_node`/`make_edge` 재구성 패턴으로 수정 (train_rssm.py:754-761과 동일 패턴).
+2. 같은 샷 안에서 공끼리 비교하는 "which-ball" 판별력 지표 추가 — 기존 AUC는 서로 다른 샷의 공들을 전부 풀에 섞어서 비교하므로 "이 샷에서 어느 공이 포켓될지" 질문과는 다르다. 정확히 타깃 1개만 포켓되는 샷에서, 포켓된 타깃의 `predict_pocket` 확률이 포켓 안 된 타깃보다 높은 비율(same-shot pairwise accuracy)을 측정.
+3. 기존 `rssm_v5/best.pt`(n_balls=1로만 학습된 체크포인트)를 3-ball 데이터에 **재학습 없이 zero-shot으로** 돌려 1차 진단 — 공유 가중치 구조라 코드 변경 없이 돌아갈 것으로 예상되지만, 멀티볼 충돌 동역학은 학습한 적이 없어 성능은 낮을 가능성 있음. 이 결과를 보고 재학습 필요 여부 결정.
+
+**실행 결과** (`rssm_v5/best.pt`를 `world_model/data_rssm_3ball` 전체 3000샷에 zero-shot 평가, `--n-shots-train 0 --n-shots-val 3000`):
+
+| 지표 | n_balls=1 데이터 (기존, 참고) | n_balls=2 데이터 (zero-shot) |
+|------|------|------|
+| First-touch AUC (genuine) | 0.923 | **0.487** (거의 chance, geometric baseline 0.622보다도 낮음) |
+| Last real touch AUC | (미기록) | 0.882 |
+| Which-ball top-1 accuracy | N/A (타깃 1개뿐) | **0.795** (chance=0.5) |
+| Which-ball pairwise accuracy | N/A | **0.795** |
+
+**결론 — 사용자 질문("어느 공이 포켓될지 예측 가능한가")에 대한 직접 답변**: **가능하다, 그것도 재학습 없이 zero-shot으로.** 정확히 타깃 1개만 포켓되는 1000개 샷에서, 두 타깃의 first-touch `h`를 같은 샷 안에서 비교했을 때 실제로 포켓된 쪽을 79.5% 확률로 더 높게 평가한다 — 동전 던지기(50%)보다 확연히 위, 그리고 `rssm_v4`/`v5`는 애초에 타깃이 1개뿐인 데이터로만 학습되어 2-타깃 상황을 한 번도 본 적이 없다는 점을 감안하면 의미 있는 일반화.
+
+**단, 중요한 비대칭 발견**: 같은 first-touch `h`인데도 **풀링된(pooled) AUC는 0.487로 사실상 랜덤**이면서 **같은 샷 내부 상대 비교(which-ball)는 0.795로 강한 신호**를 보인다. 즉 모델은 "이 공이 절대적으로 포켓될 확률"을 서로 다른 샷 사이에서 비교 가능하게 캘리브레이션하는 데는 실패했지만(아마 n_balls=1→2 전환으로 입력 분포가 달라져 절대 확률 스케일이 틀어짐), "같은 샷 안에서 어느 쪽이 더 유력한가"라는 상대적 랭킹 정보는 latent에 살아있다. 이건 실전에서 유용한 형태이기도 하다 — 실제로 필요한 건 "이 샷에서 어느 공을 노려야 하는가"라는 상대 비교지, 샷을 넘나드는 절대 확률 비교가 아니기 때문.
+
+부가 관찰: last-real-touch AUC(0.882)가 first-touch AUC(0.487)보다 훨씬 높다 — 샷이 진행되며(공끼리 부딪히고 방향이 정해지며) 예측이 크게 개선된다는 뜻으로, n_balls=1 결과에서 봤던 패턴과 일치.
+
+**다음 결정 필요 사항**: 이 zero-shot 결과만으로 which-ball 능력이 "충분하다"고 볼지, 아니면 3-ball 데이터로 재학습해 절대 확률 캘리브레이션(pooled AUC)까지 회복시킬지는 아직 미정. 재학습 없이도 which-ball 랭킹은 이미 쓸 만한 수준.
