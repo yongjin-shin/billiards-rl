@@ -144,9 +144,12 @@ class TestRolloutEngineUnit:
         assert result.Q.shape == torch.Size([])
 
     def test_run_h_final_shape(self):
+        """h_final is a list of per-ball (H_DIM,) tensors, not a stacked tensor."""
         engine = _engine([_mock_result(EVENT_BALL_BALL, ["cue", "1"])])
         result = engine.run(_balls_dict())
-        assert result.h_final.shape == (2, H_DIM)
+        assert isinstance(result.h_final, list)
+        assert len(result.h_final) == 2
+        assert all(h.shape == (H_DIM,) for h in result.h_final)
 
 
 # ── TestRolloutEngineIntegration ──────────────────────────────────────────────
@@ -193,6 +196,8 @@ class TestRolloutEngineIntegration:
 
         assert len(result.event_steps) >= 1,       "should have at least one event"
         assert result.Q.shape == torch.Size([]),   "Q should be scalar"
-        assert result.h_final.shape == (2, H_DIM), "h_final wrong shape"
+        assert isinstance(result.h_final, list) and len(result.h_final) == 2, \
+            "h_final should be a list of 2 per-ball tensors"
+        assert all(h.shape == (H_DIM,) for h in result.h_final), "h_final wrong shape"
 
         env.close()
