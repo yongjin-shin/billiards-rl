@@ -2152,3 +2152,19 @@ Pairwise rescue: baseline이 잘못 순서를 매긴 쌍 2,866,568개(전체 쌍
 **데이터 순서 이슈 발견**: `generate_balanced()`가 저장한 pkl은 포켓 개수 버킷(0/1/2) 순서로 쭉 이어붙여 저장됨(0-포켓 1000개 → 1-포켓 1000개 → 2-포켓 1000개). `train_rssm.py`의 train/val 분리는 앞쪽 N개를 train, 그 다음 M개를 val로 단순 슬라이싱하는 방식이라, 이 순서 그대로 쓰면 val이 특정 버킷(예: 2-포켓)에만 쏠리는 non-stratified split이 됨. `train_rssm.py` 코드를 건드리지 않고, 로드 후 seed 42로 셔플한 사본을 `world_model/data_rssm_3ball_shuffled/`에 새로 저장해서 우회.
 
 **설정**: `--n-balls 2 --data-dir world_model/data_rssm_3ball_shuffled --n-shots-train 2400 --n-shots-val 600 --out-dir world_model/results/rssm_v7_3ball`. 처음부터 새로 학습(fine-tune 아님 — `train_rssm.py`에 체크포인트에서 이어 학습하는 기능이 없음).
+
+**학습 결과**: 500 epoch 전부 완료. `best_val_rmse=6.044`(epoch 450), val loss 21.07→6.05로 하락. `type_acc`는 epoch 90-140 부근 0.66-0.67로 정점을 찍은 뒤 500epoch 시점 0.593까지 완만히 하락 — 동시에 magnitude class weight(`kw`)가 [0.14, 20.12]까지 커짐. 희귀 속도-구간 가중치가 후반부에 과도해져 type loss와 밸런스가 흔들렸을 가능성이 있음(원인 미확정, 후속 조사 필요).
+
+**검증 결과 — n_balls=1 학습 모델(zero-shot) vs 3-ball 재학습 모델, 동일 3-ball held-out val(600샷)로 비교**:
+
+| 지표 | zero-shot (rssm_v5) | 3-ball 재학습 (rssm_v7_3ball) |
+|---|---|---|
+| Pooled AUC (포켓될 확률, 볼 풀링) | 0.487 | 0.894 |
+| Which-ball top-1/pairwise acc | 0.795 | 0.818 |
+| 개수 예측 정확도 (exact match) | 0.419 | 0.757 |
+| 근시간 예측 label_now AUC | 0.655 | 0.811 |
+| 근시간 예측 label_w2 AUC | 0.612 | 0.837 |
+
+가설 확인됨: 절대 기준 판정 실패는 구조 문제가 아니라 데이터 커버리지 문제였음. 3-ball 데이터로 재학습하자 모든 절대-기준 지표(pooled AUC, 개수, 근시간)가 큰 폭으로 회복. Which-ball은 zero-shot에서도 이미 강했던 만큼 소폭 개선에 그침 — 예상과 일치.
+
+**남은 과제**: 개수 예측은 75.7%로 개선됐지만 여전히 완벽하지 않음 — confusion을 보면 실제 1개 포켓 상황을 2개로 과대 예측하는 오류(72/203)가 주된 오차원. `type_acc` 후반부 하락 원인 조사는 다음 실험으로 이월.
