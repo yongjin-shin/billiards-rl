@@ -286,6 +286,16 @@ Q-value 추출 목표 대비 현재 위치 점검 (2026-09-27):
 
 **후보 3 관련 경고** — `pocket_prob`(= `predict_pocket` head) 자체를 `eval_pocket_head.py`로 리크 헌팅한 결과(상세: [experiments.md](experiments.md)), AUC=0.919 중 0.827은 물리 시뮬레이션 없는 0-파라미터 기하학 baseline(post-collision 속도 방향 직선 연장)만으로 이미 나오는 값이었다. 즉 이 heuristic이 "학습된 물리 이해"를 반영한다고 보기엔 근거가 약함. QHead도 같은 h를 입력으로 쓰므로, 학습 신호가 생긴 뒤 평가할 때 반드시 같은 방식(trivial/geometric baseline 대비)으로 검증할 것 — 정확도나 AUC 단독 숫자를 그대로 믿지 말 것.
 
+### pocket head 캘리브레이션 진단 (2026-09-30) — QHead/critic 통합 전 선결 과제
+
+`rssm_v7_3ball`(3-ball 재학습, ④ 참고)로 절대 기준 판정(pooled AUC, 개수, 근시간)은 회복됐지만, 이벤트별 확률 궤적을 직접 추적해보니 **h가 새 증거를 제대로 반영해서 갱신되지 않는 문제**가 남아있음을 확인:
+
+- `type_acc` 후반부 하락(epoch150 0.665 → epoch400 0.587)의 원인은 Kendall uncertainty weighting의 `log_var` clamp 포화가 아니라, epoch 350 이후 train/val loss가 갈라지는 **순수 overfitting**. `best.pt`는 val_rmse 최소(epoch450) 기준으로 저장되는데 이 지점은 이미 type_acc 정점보다 낮은 상태 — 체크포인트 선택 기준이 val_rmse 단일값이라 이런 트레이드오프를 못 잡음.
+- 틀린 예측(FP/FN)의 패턴: FP는 쿠션 횟수가 많을수록 과대평가, FN은 총 터치수가 많을수록 과소평가. 쿠션 횟수별 accuracy는 3회에서 절벽처럼 떨어짐(0.856→0.690).
+- 쿠션 단위로 끊어서 시간순으로 보면 확률이 **직전 값에 눌어붙어서 새 이벤트가 들어와도 잘 안 바뀜** — prior를 posterior로 갱신하는 게 아니라 이전 판단을 우려먹는 것처럼 보임.
+
+**다음 방향**: `h → MLP → 확률`을 매번 새로 계산하는 대신, "직전 확률(prior) + 이번 이벤트 증거(likelihood) → 갱신된 확률(posterior)"를 log-odds 누적 형태로 명시적으로 학습시키는 prior-posterior 구조 제안. 아직 설계 전, 다음 실험 후보. **이 진단을 하는 이유는 QHead/critic이 같은 h를 입력으로 쓰기 때문** — h의 갱신 신뢰도가 낮으면 Q-value 추정도 노이즈가 됨. RL 통합(위 "[ ] Pending" 항목들) 전에 먼저 해결해야 할 선결 과제로 판단. 상세는 [experiments.md](experiments.md) "이벤트별 포켓 확률 궤적 분석" 참고.
+
 ### R-SSM 물리 엔진: pure_physics.py 대체 (완료, 2026-09-28)
 
 교체 대상 3곳(`rssm_rollout.py::advance_balls`, `train_rssm.py::_advance_rvw()`, `viz_rssm.py::_evolve()`) 전부 완료. 벡터화(`evolve_ball_motion_batch()`) 서브 아이템은 저효용으로 판단해 보류. 상세 및 근거는 [experiments.md](experiments.md) 참고.
