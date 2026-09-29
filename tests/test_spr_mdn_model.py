@@ -6,7 +6,7 @@ import torch
 import pytest
 from world_model.spr_mdn.spr_mdn_model import (
     MixtureHead, SPRMDNModel, laplace_nll_mixture, spr_rollout_loss,
-    LATENT_DIM, N_COMPONENTS, ACTION_DIM,
+    LATENT_DIM, N_COMPONENTS, ACTION_DIM, N_COLL_TYPES,
 )
 
 
@@ -76,7 +76,7 @@ def test_forward_shapes():
         model(s_0, seq_s, action, T)
 
     assert s_hat.shape      == (B, T + 1, 14), f"s_hat: {s_hat.shape}"
-    assert type_logit.shape == (B, T, 5),       f"type_logit: {type_logit.shape}"
+    assert type_logit.shape == (B, T, N_COLL_TYPES), f"type_logit: {type_logit.shape}"
     assert len(z_hat_list)  == T + 1,           f"z_hat_list len: {len(z_hat_list)}"
     assert len(pi_list)     == T,               f"pi_list len: {len(pi_list)}"
     assert len(b_list)      == T,               f"b_list len: {len(b_list)}"
@@ -92,7 +92,7 @@ def test_rollout_eval_shapes():
     s_hat, type_logit = model.rollout_eval(s_0, T, action=action)
 
     assert s_hat.shape      == (B, T + 1, 14), f"s_hat: {s_hat.shape}"
-    assert type_logit.shape == (B, T, 5),       f"type_logit: {type_logit.shape}"
+    assert type_logit.shape == (B, T, N_COLL_TYPES), f"type_logit: {type_logit.shape}"
 
 
 def test_ema_update():

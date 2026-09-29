@@ -16,6 +16,7 @@ from world_model.rssm_model import N_TYPE, NODE_DIM
 from world_model.rssm_dataset import (
     ShotData, RSSMDataset, generate_shot_data, collect_dataset,
 )
+from world_model.rssm_rollout import make_node
 
 
 # ── Shared fixture ────────────────────────────────────────────────────────────
@@ -41,15 +42,26 @@ class TestGenerateShotData:
                 if d is not None:
                     assert d.shape == (5,), f"gt_deltas_j shape: expected (5,), got {d.shape}"
 
-    def test_event_steps_node_shape(self):
+    def test_event_steps_node_is_none(self):
+        """node_i/node_j are not stored in the pkl (recomputed at training time from raw_rvws)."""
         shots = _get_shots(5)
         for shot in shots:
             for ev in shot.event_steps:
-                assert ev.node_i.shape == (NODE_DIM,), \
-                    f"node_i shape wrong: {ev.node_i.shape}"
-                if ev.node_j is not None:
-                    assert ev.node_j.shape == (NODE_DIM,), \
-                        f"node_j shape wrong: {ev.node_j.shape}"
+                assert ev.node_i is None
+                assert ev.node_j is None
+
+    def test_event_steps_node_recompute_shape(self):
+        """make_node(raw_rvws, event_type) is the actual path used to rebuild nodes at train time."""
+        shots = _get_shots(5)
+        for shot in shots:
+            for ev, raw_i, raw_j in zip(shot.event_steps, shot.raw_rvws_i, shot.raw_rvws_j):
+                node_i = make_node(raw_i, ev.event_type)
+                assert node_i.shape == (NODE_DIM,), \
+                    f"node_i shape wrong: {node_i.shape}"
+                if raw_j is not None:
+                    node_j = make_node(raw_j, ev.event_type)
+                    assert node_j.shape == (NODE_DIM,), \
+                        f"node_j shape wrong: {node_j.shape}"
 
     def test_gt_types_range(self):
         shots = _get_shots(5)

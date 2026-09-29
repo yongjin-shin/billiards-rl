@@ -26,7 +26,7 @@ from world_model.ssm_model import CueBallHead, TgtBallHead, TypeHead, _focal_cro
 
 LATENT_DIM    = 128
 N_COMPONENTS  = 5
-N_COLL_TYPES  = 5
+N_COLL_TYPES  = 7
 ACTION_DIM    = 2
 EMA_TAU       = 0.99
 
