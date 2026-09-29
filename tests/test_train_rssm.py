@@ -22,7 +22,7 @@ from world_model.train_rssm import (
     TrainConfig, train,
     compute_type_class_weights, evaluate, evaluate_free_running,
     compute_shot_ss_loss, compute_batch_ss_loss,
-    compute_vel_magnitude_weights, _magnitude_weight,
+    compute_vel_magnitude_weights, _magnitude_weight, compute_quantile_bin_edges,
 )
 from world_model.rssm_model import RSSMModel, H_DIM, EventStep, EVENT_BALL_BALL, NODE_DIM, EDGE_DIM
 from world_model.rssm_dataset import ShotData, collect_dataset
@@ -190,6 +190,38 @@ def _shot_with_delta_norm(norm: float) -> ShotData:
         raw_rvws_j  = [None],
         dt_to_next  = [0.01],
     )
+
+
+class TestQuantileBinEdges:
+    def test_returns_n_bins_plus_one_edges(self):
+        shots = [_shot_with_delta_norm(float(i)) for i in range(1, 21)]
+        edges = compute_quantile_bin_edges(shots, n_bins=5)
+        assert len(edges) == 6
+
+    def test_first_edge_zero_last_edge_inf(self):
+        shots = [_shot_with_delta_norm(float(i)) for i in range(1, 21)]
+        edges = compute_quantile_bin_edges(shots, n_bins=5)
+        assert edges[0] == 0.0
+        assert edges[-1] == float("inf")
+
+    def test_adapts_to_distribution_scale(self):
+        """Edges should track the actual data scale, not a fixed threshold --
+        e.g. a dataset where everything is <1 still gets bins that separate
+        its own small/large values, instead of collapsing into one bin."""
+        small_shots = [_shot_with_delta_norm(0.01 * i) for i in range(1, 21)]
+        large_shots = [_shot_with_delta_norm(100.0 * i) for i in range(1, 21)]
+        edges_small = compute_quantile_bin_edges(small_shots, n_bins=5)
+        edges_large = compute_quantile_bin_edges(large_shots, n_bins=5)
+        # middle edges (excluding the forced 0.0/inf) should differ by ~4 orders
+        # of magnitude, matching the underlying data scale
+        assert edges_large[2] > edges_small[2] * 1000
+
+    def test_roughly_equal_counts_per_bin(self):
+        """Quantile split -> each bin gets ~n/n_bins samples, unlike a fixed
+        threshold which can dump most samples into one bin."""
+        shots = [_shot_with_delta_norm(float(i)) for i in range(1, 101)]  # 1..100, evenly spread
+        edges, weights = compute_vel_magnitude_weights(shots, torch.device("cpu"), n_bins=5)
+        assert (weights[weights > 0] < 2.0).all(), "roughly-equal bins should need little reweighting"
 
 
 class TestVelMagnitudeWeights:

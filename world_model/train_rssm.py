@@ -157,13 +157,36 @@ def compute_vel_type_weights(
     return weights.to(device)
 
 
-DEFAULT_MAG_BIN_EDGES = [0.0, 1.0, 3.0, 10.0, 30.0, float("inf")]
+def _pooled_delta_norms(shots: list[ShotData]) -> list[float]:
+    return [
+        float(torch.norm(gt))
+        for shot in shots
+        for gt in list(shot.gt_deltas_i) + [g for g in shot.gt_deltas_j if g is not None]
+    ]
+
+
+def compute_quantile_bin_edges(shots: list[ShotData], n_bins: int = 5) -> list[float]:
+    """
+    Data-driven bin edges for compute_vel_magnitude_weights, derived from
+    quantiles of |gt_delta| pooled across all events (both ball_i and
+    ball_j). Self-adapts to whatever `shots` looks like instead of a fixed,
+    dataset-specific magnitude threshold that would need re-tuning by hand
+    whenever the data distribution changes (see experiments.md "quantile
+    기반 자동 bin").
+    """
+    norms = torch.tensor(_pooled_delta_norms(shots))
+    qs    = torch.linspace(0.0, 1.0, n_bins + 1)
+    edges = torch.quantile(norms, qs).tolist()
+    edges[0]  = 0.0
+    edges[-1] = float("inf")
+    return edges
 
 
 def compute_vel_magnitude_weights(
     shots      : list[ShotData],
     device     : torch.device,
-    bin_edges  : list[float] = DEFAULT_MAG_BIN_EDGES,
+    bin_edges  : Optional[list[float]] = None,
+    n_bins     : int = 5,
     max_w      : float = 5.0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
@@ -176,9 +199,16 @@ def compute_vel_magnitude_weights(
     "cos(incidence) 재검증") gets averaged away by plain MSE regardless of
     per-type weighting. This bins directly on |gt_delta| instead.
 
+    bin_edges=None (default) derives edges from `shots` via quantiles
+    (compute_quantile_bin_edges) instead of a hardcoded threshold, so the
+    binning stays valid if the data distribution shifts (e.g. different
+    physics params, more shots).
+
     Returns (bin_edges, weights) — weights has len(bin_edges)-1 entries.
     Look up a delta's bin via `torch.bucketize(norm, bin_edges[1:-1])`.
     """
+    if bin_edges is None:
+        bin_edges = compute_quantile_bin_edges(shots, n_bins=n_bins)
     edges  = torch.tensor(bin_edges)
     counts = torch.zeros(len(bin_edges) - 1)
     for shot in shots:
@@ -992,7 +1022,7 @@ def train(cfg: TrainConfig) -> None:
     if cfg.vel_mag_weight:
         mag_edges, mag_weights = compute_vel_magnitude_weights(train_shots, device)
         print(f"Vel magnitude-bin weights: {mag_weights.cpu().numpy().round(4)} "
-              f"(edges={DEFAULT_MAG_BIN_EDGES})")
+              f"(edges={mag_edges.cpu().numpy().round(4)}, quantile-derived from train_shots)")
     else:
         print("Vel magnitude-bin weights: none")
 
