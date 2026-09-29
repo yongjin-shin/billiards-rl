@@ -29,6 +29,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from world_model.rssm_model import RSSMModel
 from world_model.rssm_dataset import load_dataset
+from world_model.rssm_rollout import make_node, make_edge
 
 
 EVENT_POCKET = 3
@@ -84,9 +85,19 @@ def collect_pocket_preds(
             first_touch_posvel: dict[int, tuple]        = {}
 
             for k, ev in enumerate(shot.event_steps):
-                node_i = ev.node_i.to(device)
-                node_j = ev.node_j.to(device) if ev.node_j is not None else None
-                edge   = ev.edge.to(device)   if ev.edge   is not None else None
+                # node/edge may be None in new pkl data — recompute from raw_rvws
+                rvw_i  = shot.raw_rvws_i[k]
+                node_i = (ev.node_i if ev.node_i is not None
+                          else make_node(rvw_i, ev.event_type)).to(device)
+                rvw_j  = shot.raw_rvws_j[k]
+                if rvw_j is not None:
+                    node_j = (ev.node_j if ev.node_j is not None
+                              else make_node(rvw_j, ev.event_type)).to(device)
+                    edge   = (ev.edge if ev.edge is not None
+                              else make_edge(rvw_i, rvw_j, ev.normal.numpy())).to(device)
+                else:
+                    node_j = None
+                    edge   = None
 
                 if ev.event_type == 0 and ev.ball_j is not None:  # EVENT_BALL_BALL
                     h, _, _, _, _ = model.step_ball_ball(
@@ -123,6 +134,123 @@ def collect_pocket_preds(
                 baseline.append(geometric_baseline_score(pos, vel))
 
     return np.array(probs), np.array(labels), np.array(tauto), np.array(baseline)
+
+
+def collect_which_ball_preds(
+    model: RSSMModel,
+    shots: list,
+    device: torch.device,
+) -> list[dict]:
+    """
+    For shots with exactly ONE pocketed target ball, collect every target
+    ball's first-touch predict_pocket probability within that same shot.
+
+    The AUC numbers elsewhere in this file pool balls across DIFFERENT shots,
+    which answers "does this ball look pocket-prone in general" — not the
+    sharper question "given THIS shot's evidence, which of its target balls
+    will actually go in". This does the latter: same-shot, head-to-head.
+
+    Target balls never touched in the shot keep h at zero-init (no evidence
+    seen) — intentional, not a bug: that's the correct "no signal yet" prior.
+    """
+    records: list[dict] = []
+
+    model.eval()
+    with torch.no_grad():
+        for shot in shots:
+            if shot.n_pocketed_targets() != 1:
+                continue
+
+            h = model.init_hidden(shot.n_balls, device)
+            first_touch_h: dict[int, torch.Tensor] = {}
+
+            for k, ev in enumerate(shot.event_steps):
+                rvw_i  = shot.raw_rvws_i[k]
+                node_i = (ev.node_i if ev.node_i is not None
+                          else make_node(rvw_i, ev.event_type)).to(device)
+                rvw_j  = shot.raw_rvws_j[k]
+                if rvw_j is not None:
+                    node_j = (ev.node_j if ev.node_j is not None
+                              else make_node(rvw_j, ev.event_type)).to(device)
+                    edge   = (ev.edge if ev.edge is not None
+                              else make_edge(rvw_i, rvw_j, ev.normal.numpy())).to(device)
+                else:
+                    node_j = None
+                    edge   = None
+
+                if ev.event_type == 0 and ev.ball_j is not None:  # EVENT_BALL_BALL
+                    h, _, _, _, _ = model.step_ball_ball(
+                        h, ev.ball_i, ev.ball_j, node_i, node_j, edge,
+                    )
+                else:
+                    h, _, _ = model.step_single(
+                        h, ev.ball_i, node_i, ev.normal.to(device),
+                    )
+
+                if ev.ball_i not in first_touch_h:
+                    first_touch_h[ev.ball_i] = h[ev.ball_i].clone()
+                if ev.ball_j is not None and ev.ball_j not in first_touch_h:
+                    first_touch_h[ev.ball_j] = h[ev.ball_j].clone()
+
+            target_idxs  = list(range(1, shot.n_balls))
+            pocketed_idx = next(i for i in target_idxs if shot.will_pocket.get(i, False))
+
+            probs = {}
+            for bi in target_idxs:
+                h_bi = first_touch_h.get(bi, h[bi])   # zero-init if never touched
+                probs[bi] = model.predict_pocket(h_bi.unsqueeze(0)).item()
+
+            records.append({"pocketed_idx": pocketed_idx, "probs": probs})
+
+    return records
+
+
+def compute_which_ball_metrics(records: list[dict]) -> dict:
+    """
+    Top-1 and pairwise accuracy for "does the model rank the actually-
+    pocketed target above the other target(s) in the same shot".
+
+    Returns a dict with n, n_targets, top1_acc, n_pairs, pairwise_acc
+    (pairwise_acc is None if n_pairs == 0, e.g. only 1 target ball total).
+    """
+    n = len(records)
+    if n == 0:
+        return {"n": 0, "n_targets": 0, "top1_acc": None, "n_pairs": 0, "pairwise_acc": None}
+
+    n_top1  = 0
+    n_pairs = 0
+    n_pcorr = 0
+    for r in records:
+        probs, pocketed = r["probs"], r["pocketed_idx"]
+        if max(probs, key=probs.get) == pocketed:
+            n_top1 += 1
+        for bi, p in probs.items():
+            if bi == pocketed:
+                continue
+            n_pairs += 1
+            n_pcorr += int(probs[pocketed] > p)
+
+    return {
+        "n"           : n,
+        "n_targets"   : len(next(iter(records))["probs"]),
+        "top1_acc"    : n_top1 / n,
+        "n_pairs"     : n_pairs,
+        "pairwise_acc": (n_pcorr / n_pairs) if n_pairs else None,
+    }
+
+
+def report_which_ball(records: list[dict]) -> None:
+    """Of shots with exactly one pocketed target, does the model rank it highest?"""
+    m = compute_which_ball_metrics(records)
+    print(f"N shots (exactly 1 target pocketed) = {m['n']}")
+    if m["n"] == 0:
+        print("  (no qualifying shots — need n_balls >= 2 targets with exactly 1 pocketed)")
+        return
+
+    print(f"  Top-1 accuracy (pocketed target ranked highest)          = {m['top1_acc']:.3f}  "
+          f"(chance = {1/m['n_targets']:.3f} with {m['n_targets']} targets)")
+    if m["pairwise_acc"] is not None:
+        print(f"  Pairwise accuracy (pocketed prob > other target's prob)  = {m['pairwise_acc']:.3f}  (0.5 = chance)")
 
 
 def collect_pocket_preds_all_touches(
@@ -162,9 +290,19 @@ def collect_pocket_preds_all_touches(
                     total_touches[ev.ball_j] = total_touches.get(ev.ball_j, 0) + 1
 
             for k, ev in enumerate(shot.event_steps):
-                node_i = ev.node_i.to(device)
-                node_j = ev.node_j.to(device) if ev.node_j is not None else None
-                edge   = ev.edge.to(device)   if ev.edge   is not None else None
+                # node/edge may be None in new pkl data — recompute from raw_rvws
+                rvw_i  = shot.raw_rvws_i[k]
+                node_i = (ev.node_i if ev.node_i is not None
+                          else make_node(rvw_i, ev.event_type)).to(device)
+                rvw_j  = shot.raw_rvws_j[k]
+                if rvw_j is not None:
+                    node_j = (ev.node_j if ev.node_j is not None
+                              else make_node(rvw_j, ev.event_type)).to(device)
+                    edge   = (ev.edge if ev.edge is not None
+                              else make_edge(rvw_i, rvw_j, ev.normal.numpy())).to(device)
+                else:
+                    node_j = None
+                    edge   = None
 
                 if ev.event_type == 0 and ev.ball_j is not None:  # EVENT_BALL_BALL
                     h, _, _, _, _ = model.step_ball_ball(
@@ -400,6 +538,13 @@ def main() -> None:
     print()
     print("=== Pairwise rescue: of the pairs geometry gets WRONG, does the model fix them? ===")
     pairwise_rescue(records)
+
+    print()
+    print("=== Which-ball: for shots with multiple targets, does it pick the RIGHT one? ===")
+    print("(same-shot comparison — different question from the global AUC above, which")
+    print(" pools balls across different shots)")
+    which_ball_records = collect_which_ball_preds(model, val_shots, device)
+    report_which_ball(which_ball_records)
 
 
 if __name__ == "__main__":
