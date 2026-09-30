@@ -2275,6 +2275,27 @@ has_tgt`였는데, N-ball에서 has_tgt는 항상 참이므로 불필요).
 **범위**: `EventDetector`만 수정. `RolloutEngine`/`rssm_dataset.py`는 이미 대응됐거나 이번 작업
 대상 아님. SAC critic 연결(Option A/B/C)은 이 작업 이후 별도 범위.
 
-**결론**: 데이터 버그가 실제로 존재했고, target-target 이벤트 및 which-ball 판별력에 측정
-가능한 부정적 영향을 주고 있었음을 확인. `rssm_v8_3ball`을 새 기준 체크포인트로 채택.
-SAC/MBPO 통합(EventDetector N-ball 일반화 포함)은 이 작업 완료 후 별도 브랜치에서 재개.
+**구현 결과**: 계획대로 `_ball_sort_key()` + `_classify_event()` 헬퍼로 리팩터링 완료
+(`feature/wm-eventdetector-nball` 브랜치, `world_model/event_detector.py`). `next_event()`와
+`full_event_sequence()` 둘 다 `_classify_event()`를 통해 같은 분류 로직을 공유하도록 통일했고,
+`full_event_sequence()`의 "이벤트 참여 볼이 아직 테이블에 있는지" 체크도 단일 타깃 전용에서
+`ball_ids.issubset(system.balls.keys())`로 일반화(포켓된 볼은 시뮬레이션 종료 시점에
+`system.balls`에서 제거되므로).
+
+**테스트**: `tests/test_event_detector.py`에 `TestEventDetectorNBall` 추가.
+- `test_target_target_normal_not_placeholder`: n_targets=3, 60개 시드로 스캔해서 타깃-타깃
+  ball_ball 충돌을 최소 1개 찾고, 그 normal이 예전 placeholder `[1.0, 0.0]`이 아니라 실제
+  unit-length 벡터인지 확인. (n_targets=2로는 60시드 스캔해도 타깃-타깃 충돌이 0건이라 비현실적
+  — 3-ball에서야 관측 빈도가 충분해서 n_targets=3으로 전환.)
+- `test_ball_sort_key_orders_cue_first_then_numeric`: `_ball_sort_key`가 cue를 항상 먼저, 나머지는
+  숫자 순(문자열 순 아님, "2" < "10")으로 정렬하는지 직접 검증.
+- `test_cushion_reclassification_applies_to_any_target`: TGT_LINEAR/TGT_CIRCULAR 재분류가 예전엔
+  볼 "1"에만 하드코딩돼 있었는데, 볼 "2"에서도 발생하는지 확인.
+- 기존 11개 2-ball 테스트 전부 회귀 없이 통과. `pytest tests/ -v` 전체 204 passed, 1 failed
+  (`TestClassWeights::test_weights_positive` — 이번 변경과 무관한 기존 flaky 테스트, `n_shots=10`
+  샘플에서 특정 이벤트 타입이 0건이 되는 경우가 있어 발생, 이전부터 알려진 이슈).
+
+**결론**: `EventDetector`가 이제 N-ball(cue + 임의 개수 타깃)을 완전히 지원한다. 이로써
+`RolloutEngine`을 n_balls≥2에서 쓸 수 있는 마지막 선결 조건이 해소됐다. 다음 단계는 SAC critic에
+R-SSM 상상 롤아웃을 연결하는 실제 통합(Option A/B/C, [[project_rssm_rl_integration_open_question]]
+참고 — WM frozen vs continual fine-tune 결정 필요)이며, 별도 브랜치에서 진행한다.

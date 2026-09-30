@@ -309,6 +309,20 @@ which-ball top-1 0.818→0.862로 개선 확인 — `rssm_v8_3ball`을 새 기�
 normal" 참고. SAC/MBPO 통합(EventDetector N-ball 일반화 포함)은 이 작업 완료 후 별도 브랜치에서
 재개 예정.
 
+### EventDetector N-ball 일반화 (완료, 2026-09-30)
+
+위 데이터 버그 수정과 같은 근본 원인(ball_ball 충돌 중 하나가 반드시 cue라는 가정)이
+`world_model/event_detector.py::EventDetector`에도 있어서, `RolloutEngine`을 n_balls≥2에 쓸 수
+없는 상태였다(`RolloutEngine` 자체는 이미 N-ball 일반적으로 구현되어 있었음, 확인 완료).
+`_ball_sort_key()`(cue 우선, 나머지 숫자 순) + `_classify_event()` 공통 헬퍼로 리팩터링해서
+`next_event()`/`full_event_sequence()`가 동일 로직을 공유하도록 수정 — 이전 버그처럼 한쪽만
+고치고 한쪽을 놓치는 걸 구조적으로 방지. `TestEventDetectorNBall` 3개 테스트 추가, 기존 2-ball
+테스트 전부 회귀 없음. 이제 `RolloutEngine`을 SAC/MBPO 통합에 쓸 수 있는 마지막 선결 조건이
+해소됐다. `feature/wm-eventdetector-nball` 브랜치, `dev` 머지 완료. 상세는
+[experiments.md](experiments.md) "EventDetector N-ball 일반화" 참고. 다음 단계는 SAC critic에
+R-SSM 상상 롤아웃을 연결하는 실제 통합(Option A/B/C) — WM frozen vs continual fine-tune 결정이
+아직 미정.
+
 ### R-SSM 물리 엔진: pure_physics.py 대체 (완료, 2026-09-28)
 
 교체 대상 3곳(`rssm_rollout.py::advance_balls`, `train_rssm.py::_advance_rvw()`, `viz_rssm.py::_evolve()`) 전부 완료. 벡터화(`evolve_ball_motion_batch()`) 서브 아이템은 저효용으로 판단해 보류. 상세 및 근거는 [experiments.md](experiments.md) 참고.
