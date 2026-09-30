@@ -2299,3 +2299,81 @@ has_tgt`였는데, N-ball에서 has_tgt는 항상 참이므로 불필요).
 `RolloutEngine`을 n_balls≥2에서 쓸 수 있는 마지막 선결 조건이 해소됐다. 다음 단계는 SAC critic에
 R-SSM 상상 롤아웃을 연결하는 실제 통합(Option A/B/C, [[project_rssm_rl_integration_open_question]]
 참고 — WM frozen vs continual fine-tune 결정 필요)이며, 별도 브랜치에서 진행한다.
+
+### pocket head 포화(saturation) 진단 + 최소 개입 비교 실험 계획 (2026-10-01)
+
+**배경**: "pocket head 캘리브레이션 진단"(위 2026-09-30 항목)에서 확률이 새 증거에도 안 바뀌는
+현상을 발견했었다. `rssm_v8_3ball`의 주기적 체크포인트(50 epoch 간격)를 가지고 값싼 추가 진단을
+세 가지 해봤다(재학습 없이 기존 체크포인트만으로):
+
+1. **epoch150(peak type_acc≈0.665) vs best.pt(epoch460, val_rmse 최소지만 type_acc는 0.584로
+   하락) 반응성 비교**: 이벤트 간 확률 변화 `|Δp|`의 median이 epoch150=0.026, best.pt=0.005로
+   후반부가 더 심하게 얼어붙음(거의 안 움직이는 비율 35%→56%). 즉 문제가 학습 초반부터 고정된
+   게 아니라 **학습이 진행될수록(특히 오버피팅 구간에서) 악화**된다.
+2. **h 자체의 변화량(‖Δh‖) vs 확률 변화량(|Δp|) 분리**: 두 체크포인트 모두 `corr(|Δp|, ‖Δh‖)
+   ≈ 0`(-0.045, -0.016)이고, 확률이 "얼어있을 때"와 "움직일 때"의 평균 ‖Δh‖가 거의 동일
+   (0.972 vs 1.015 / 0.979 vs 1.026). 즉 **h는 매 이벤트마다 정상적으로 갱신되고 있고, 문제는
+   `predict_pocket` head의 출력 단에 있다** — RolloutEngine/R-SSM 몸통(GNN+SSM 갱신 구조) 자체는
+   문제가 아닐 가능성이 높다.
+3. **직전 확률의 극단성(|p-0.5|)별 stuck 비율**: 확률이 아직 0.5 근처(미결정)일 때는 stuck
+   비율이 1~4%로 낮지만, 이미 0/1 근처(확신)로 가 있으면 47~65%로 급증하고 이 경향은 학습이
+   진행될수록(best.pt) 더 심해진다. 이는 **sigmoid 포화**의 전형적 서명이다.
+
+**원인 가설**: `pocket_mlp`(h_dim→h_dim//2→1, `rssm_model.py:115`)는 표준 BCE
+(`F.binary_cross_entropy`, `train_rssm.py:477`/`572`)로 0/1 하드 라벨을 맞히도록 학습된다.
+BCE+하드라벨 조합은 이미 맞힌 샘플도 계속 더 확신하도록 무한히 gradient를 미는 성질이 있어서
+(loss가 0에 완전히 수렴하지 않는 한), 500 epoch처럼 오래 학습하면 logit이 계속 커지다가
+sigmoid가 포화된다 — 확인해보니 전역 `weight_decay=1e-4`(AdamW, 전체 파라미터 공통,
+`train_rssm.py:82,1040`)가 이미 걸려있는데도 이 정도로는 억제가 안 된 것으로 보인다.
+
+**계획 — 최소 개입 2개만 비교 (그리드 서치 안 함)**: 몸통을 갈아엎는 prior-posterior 재설계는
+비용이 크므로, head 출력단만 건드리는 두 가지 표준 처방을 하이퍼파라미터 하나씩만 정해서
+(문헌 기본값 그대로, 탐색 없이) 시험한다.
+
+1. **Label smoothing (`rssm_v9_ls01_3ball`)**: pocket BCE 타깃을 `y' = y·(1-ε) + (1-y)·ε`로 완화.
+   `ε=0.1`(Szegedy et al. 2016 표준 기본값) 단일값만 시험 — "확률이 0.9/0.1에 도달하면 이미
+   목표 달성"이 되어 그 이상 확신을 밀어붙일 gradient가 사라지는 원리.
+2. **Head 전용 weight decay (`rssm_v9_headwd1e2_3ball`)**: `pocket_mlp` 파라미터만 별도
+   optimizer param group으로 분리해서 나머지 모델과 다른(더 큰) weight_decay를 준다. 전역
+   1e-4가 이미 걸려있는데도 불충분했으므로, 두 자릿수 위인 `1e-2` 단일값만 시험 — head 가중치가
+   커지는 것 자체를 억제해서 logit 폭주를 막는 원리. (그래도 안 잡히면 다음 후보는 1e-1이지만,
+   이번 라운드에서는 시도하지 않는다.)
+
+각 실험은 값 하나씩만 시험하고, 두 개입을 합치는 실험(`ls+headwd`)은 각각 단독으로 먼저 효과가
+있는지 확인한 뒤 필요하면 추가한다. 나머지 설정(데이터, epoch 수, LR 스케줄 등)은 `rssm_v8_3ball`과
+완전히 동일하게 유지해 다른 변수를 섞지 않는다.
+
+**평가 기준**: 위 진단에서 쓴 것과 같은 3가지 값싼 지표(반응성 median |Δp|, stuck 비율, 극단
+구간별 stuck 비율)를 새 체크포인트에 다시 돌려서 개선 여부 확인. 부작용 체크로 `type_acc`,
+pooled pocket AUC, which-ball top-1도 `rssm_v8_3ball` 대비 퇴보하지 않는지 같이 본다.
+
+**결과 (2026-10-01)**: `rssm_v8_3ball`과 동일 설정(`--n-balls 2 --data-dir
+world_model/data_rssm_3ball_v2_shuffled --n-shots-train 2400 --n-shots-val 600`, 500 epoch)으로
+두 실험 모두 처음부터 재학습 완료. `best.pt` 기준(각각 val_rmse 최소 epoch: v8=460, v9_ls01=440,
+v9_headwd1e2=480) 진단 스크립트 3종 + `eval_pocket_head.py`를 동일 600샷 held-out val에 재실행:
+
+| 지표 | v8 (기준) | v9_ls01 (label smoothing ε=0.1) | v9_headwd1e2 (head weight_decay=1e-2) |
+|---|---|---|---|
+| stuck 비율 (전체, \|Δp\|<0.01) | 55.6% | **12.7%** | 53.8% |
+| median \|Δp\| | 0.0054 | **0.0473** | 0.0068 |
+| stuck 비율 (직전 확률이 0/1 근처 "확신" 구간) | 64.5% | **19.2%** | 62.1% |
+| pocket AUC (genuine, first-touch) | 0.906 | 0.903 | 0.888 |
+| which-ball top-1 | 0.862 | **0.882** | 0.847 |
+| type_acc (val) | 0.583 | 0.591 | 0.587 |
+| pock_acc (val, @0.5) | 0.847 | 0.862 | 0.852 |
+| best val_rmse | 4.841 | 4.953 (+2.3%) | 4.934 (+1.9%) |
+
+**결론**: **Label smoothing이 확실한 승자.** 포화 지표(확신 구간 stuck 비율)가 64.5%→19.2%로
+거의 3.4배 개선되었고, 부작용 지표(AUC/which-ball/type_acc/pock_acc)는 전혀 퇴보하지 않았으며
+오히려 which-ball top-1(+0.02)과 type_acc(+0.008)가 미세하게 더 좋아졌다. val_rmse 손실은
++2.3%로 감내 가능한 수준. 반면 **head 전용 weight_decay=1e-2는 사실상 효과가 없었다**(stuck
+비율 64.5%→62.1%, 거의 그대로) — 전역 weight_decay(1e-4)를 이미 훨씬 웃도는 값인데도 로짓
+폭주를 억제하지 못했다는 뜻이므로, 계획에서 언급한 다음 후보(1e-1)로도 개선폭이 클 것으로
+기대하기 어렵다고 판단해 추가 시도하지 않기로 함. 원인 가설과 일치하는 결과: **BCE+하드라벨의
+"과확신을 향한 무한 gradient" 문제는 타깃 쪽을 누그러뜨리는 label smoothing으로 직접 없애는
+것이 맞고, weight decay 같은 파라미터 크기 억제는 간접적이라 효과가 약했다.**
+
+**결정**: `pocket_label_smoothing=0.1`을 앞으로 R-SSM pocket head 학습의 기본값으로 채택.
+`rssm_v9_ls01_3ball`을 pocket head 신뢰도가 중요한 후속 작업(SAC critic 통합 등)의 새 기준
+체크포인트로 삼는다. 비용이 큰 prior-posterior 재설계는 이번 라운드에서는 불필요 — head 레벨
+개입만으로 포화 문제의 대부분이 해소됨을 확인했다.

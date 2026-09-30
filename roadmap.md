@@ -296,6 +296,26 @@ Q-value 추출 목표 대비 현재 위치 점검 (2026-09-27):
 
 **다음 방향**: `h → MLP → 확률`을 매번 새로 계산하는 대신, "직전 확률(prior) + 이번 이벤트 증거(likelihood) → 갱신된 확률(posterior)"를 log-odds 누적 형태로 명시적으로 학습시키는 prior-posterior 구조 제안. 아직 설계 전, 다음 실험 후보. **이 진단을 하는 이유는 QHead/critic이 같은 h를 입력으로 쓰기 때문** — h의 갱신 신뢰도가 낮으면 Q-value 추정도 노이즈가 됨. RL 통합(위 "[ ] Pending" 항목들) 전에 먼저 해결해야 할 선결 과제로 판단. 상세는 [experiments.md](experiments.md) "이벤트별 포켓 확률 궤적 분석" 참고.
 
+**→ 2026-10-01 후속 진단**: `rssm_v8_3ball`의 주기적 체크포인트로 값싸게 더 파본 결과, `h`의
+변화량(‖Δh‖)은 확률이 멈춰있을 때나 움직일 때나 거의 동일(corr≈0)해서 **h 자체는 정상 갱신되고
+있고, 문제는 `predict_pocket` head 출력단의 sigmoid 포화**로 좁혀졌다. 확신(0/1 근처) 구간에서만
+stuck 비율이 급증하고 학습이 진행될수록 심해지는 패턴이 이를 뒷받침. 그래서 몸통을 갈아엎는
+prior-posterior 재설계보다 먼저, head 출력단만 건드리는 싼 개입(label smoothing / head 전용
+weight decay) 2개를 비교하는 실험을 설계함 — 상세는 [experiments.md](experiments.md) "pocket
+head 포화 진단 + 최소 개입 비교 실험 계획" 참고. 이 시도로 안 잡히면 그때 prior-posterior
+재설계로 넘어간다.
+
+**→ 2026-10-01 실험 결과 및 결정**: `rssm_v9_ls01_3ball`(label smoothing ε=0.1)과
+`rssm_v9_headwd1e2_3ball`(head 전용 weight_decay=1e-2)을 `rssm_v8_3ball`과 동일 설정으로
+재학습해 비교. **Label smoothing이 확실한 승자** — 확신 구간 stuck 비율 64.5%→19.2%로 개선,
+side-effect 지표(AUC/which-ball/type_acc/pock_acc)는 퇴보 없이 오히려 소폭 개선. **head 전용
+weight decay는 사실상 무효**(stuck 비율 64.5%→62.1%, 거의 그대로) — BCE+하드라벨의 과확신
+문제는 타깃 자체를 누그러뜨려야 직접 해소되고, 파라미터 크기 억제는 간접적이라 효과가 약함을
+확인. **결정**: `pocket_label_smoothing=0.1`을 R-SSM pocket head 학습 기본값으로 채택,
+`rssm_v9_ls01_3ball`을 새 기준 체크포인트로 삼는다. prior-posterior 재설계는 불필요 —
+head 레벨 개입만으로 포화 문제 대부분 해소 확인. 상세 수치는
+[experiments.md](experiments.md) 참고.
+
 ### 학습 데이터 버그 수정: target-target ball_ball normal + rssm_v8_3ball (완료, 2026-09-30)
 
 SAC+R-SSM 통합(MBPO식 롤아웃)을 설계하던 중 `rssm_dataset.py::_get_raw_type_and_normal`이

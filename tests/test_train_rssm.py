@@ -23,6 +23,7 @@ from world_model.train_rssm import (
     compute_type_class_weights, evaluate, evaluate_free_running,
     compute_shot_ss_loss, compute_batch_ss_loss,
     compute_vel_magnitude_weights, _magnitude_weight, compute_quantile_bin_edges,
+    _smooth_pocket_targets,
 )
 from world_model.rssm_model import RSSMModel, H_DIM, EventStep, EVENT_BALL_BALL, NODE_DIM, EDGE_DIM
 from world_model.rssm_dataset import ShotData, collect_dataset
@@ -384,6 +385,77 @@ class TestShotSSLoss:
         loss.backward()
         grads = [p.grad for p in model.parameters() if p.grad is not None]
         assert len(grads) > 0, "no gradients were computed"
+
+
+# ── TestPocketLabelSmoothing ──────────────────────────────────────────────────
+
+class TestPocketLabelSmoothing:
+    def test_smooth_pocket_targets_eps_zero_is_noop(self):
+        targets = torch.tensor([0.0, 1.0, 0.0, 1.0])
+        out = _smooth_pocket_targets(targets, 0.0)
+        assert torch.equal(out, targets)
+
+    def test_smooth_pocket_targets_eps_moves_toward_center(self):
+        targets = torch.tensor([0.0, 1.0])
+        out = _smooth_pocket_targets(targets, 0.1)
+        assert out[0].item() == pytest.approx(0.1)
+        assert out[1].item() == pytest.approx(0.9)
+
+    def test_shot_ss_loss_smoothing_changes_pocket_loss(self):
+        """Same model/shot, only pocket_label_smoothing differs → pocket loss must differ."""
+        shot  = collect_dataset(n_shots=5, n_balls=1, seed_start=0)[0]
+        model = RSSMModel(h_dim=32, hidden=[64, 64])
+        torch.manual_seed(0)
+        _, _, pk_off, _ = compute_shot_ss_loss(
+            model, shot, ss_prob=1.0, params=DEFAULT_FRICTION,
+            device=torch.device("cpu"), pocket_label_smoothing=0.0,
+        )
+        torch.manual_seed(0)
+        _, _, pk_on, _ = compute_shot_ss_loss(
+            model, shot, ss_prob=1.0, params=DEFAULT_FRICTION,
+            device=torch.device("cpu"), pocket_label_smoothing=0.1,
+        )
+        assert pk_off.item() != pytest.approx(pk_on.item())
+
+    def test_batch_ss_loss_smoothing_matches_shot_ss_loss(self):
+        """Batch path (size=1) must reduce exactly to the shot path, smoothing included."""
+        shot  = collect_dataset(n_shots=5, n_balls=1, seed_start=0)[0]
+        model = RSSMModel(h_dim=32, hidden=[64, 64])
+        torch.manual_seed(1)
+        _, _, pk_shot, _ = compute_shot_ss_loss(
+            model, shot, ss_prob=1.0, params=DEFAULT_FRICTION,
+            device=torch.device("cpu"), pocket_label_smoothing=0.1,
+        )
+        torch.manual_seed(1)
+        [(_, _, pk_batch, _)] = compute_batch_ss_loss(
+            model, [shot], ss_prob=1.0, params=DEFAULT_FRICTION,
+            device=torch.device("cpu"), pocket_label_smoothing=0.1,
+        )
+        assert pk_shot.item() == pytest.approx(pk_batch.item())
+
+
+# ── TestPocketHeadWeightDecay ─────────────────────────────────────────────────
+
+class TestPocketHeadWeightDecay:
+    def test_train_completes_with_separate_pocket_head_weight_decay(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = _tiny_config(tmp)
+            cfg.pocket_head_weight_decay = 1e-2
+            train(cfg)
+            assert os.path.exists(os.path.join(tmp, "result.json"))
+
+    def test_pocket_head_gets_distinct_weight_decay_param_group(self):
+        model = RSSMModel(h_dim=32, hidden=[64, 64])
+        pocket_head_params = list(model.pocket_mlp.parameters())
+        pocket_head_ids    = {id(p) for p in pocket_head_params}
+        other_params = [p for p in model.parameters() if id(p) not in pocket_head_ids]
+        opt = torch.optim.AdamW([
+            {"params": other_params,       "weight_decay": 1e-4},
+            {"params": pocket_head_params, "weight_decay": 1e-2},
+        ], lr=1e-3)
+        assert opt.param_groups[0]["weight_decay"] == pytest.approx(1e-4)
+        assert opt.param_groups[1]["weight_decay"] == pytest.approx(1e-2)
+        assert len(opt.param_groups[1]["params"]) == len(pocket_head_params)
 
 
 # ── TestBatchSSLoss ───────────────────────────────────────────────────────────
