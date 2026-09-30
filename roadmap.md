@@ -244,7 +244,7 @@ Rationale:
 | ~~① v33 chaining 검증~~ | ~~연속 세그먼트 rollout 성능 측정~~ | ❌ 폐기 (이벤트 드리븐 전환) |
 | ~~② v34 event-boundary MDN~~ | ~~충돌 순간에만 K=5 MDN~~ | ❌ 폐기 (R-SSM이 이미 이 설계) |
 | ~~③ WM → RL 통합 (v28 기반)~~ | ~~v28_dt01_3s best.pt(15.4cm) 기반 SAC critic 보강~~ | ❌ 폐기 (R-SSM 기반으로 대체) |
-| **④ 3-ball data + GNN extension** | Generate 3-ball data; extend GNN to N=3 | ✅ 완료 — balanced 3-ball 데이터(3000샷)로 처음부터 재학습(`rssm_v7_3ball`, best_val_rmse=6.044). zero-shot에서 무너졌던 절대 기준 판정이 재학습 후 모두 회복: pooled AUC 0.487→0.894, 개수 판정 41.9%→75.7%, 근시간 예측 AUC 0.61~0.66→0.81~0.84. which-ball(상대 비교)은 zero-shot에서도 강했던 만큼 0.795→0.818 소폭 개선. 가설(구조 문제 아닌 데이터 커버리지 문제) 확인됨. 남은 이슈: 개수 예측 잔여 오차(1개 포켓을 2개로 과대예측), `type_acc` 후반부 하락(0.66→0.59, kw 극값과 연관 추정, 미조사). 상세는 [experiments.md](experiments.md) "3-ball 데이터로 재학습" 참고 |
+| **④ 3-ball data + GNN extension** | Generate 3-ball data; extend GNN to N=3 | ✅ 완료 — balanced 3-ball 데이터(3000샷)로 처음부터 재학습(`rssm_v7_3ball`, best_val_rmse=6.044). zero-shot에서 무너졌던 절대 기준 판정이 재학습 후 모두 회복: pooled AUC 0.487→0.894, 개수 판정 41.9%→75.7%, 근시간 예측 AUC 0.61~0.66→0.81~0.84. which-ball(상대 비교)은 zero-shot에서도 강했던 만큼 0.795→0.818 소폭 개선. 가설(구조 문제 아닌 데이터 커버리지 문제) 확인됨. 남은 이슈: 개수 예측 잔여 오차(1개 포켓을 2개로 과대예측), `type_acc` 후반부 하락(0.66→0.59, kw 극값과 연관 추정, 미조사). **→ 2026-09-30: `rssm_v7_3ball` 데이터에 target-target ball_ball normal 버그(17% 이벤트가 placeholder) 발견, 수정 후 `rssm_v8_3ball`로 재학습 — pooled AUC 0.894→0.906, which-ball top-1 0.818→0.862, target-target 이벤트 delta RMSE 14% 개선. `rssm_v8_3ball`이 새 기준 체크포인트.** 상세는 [experiments.md](experiments.md) "3-ball 데이터로 재학습" / "학습 데이터 버그 발견: target-target ball_ball collision normal" 참고 |
 | **⑤ R-SSM 물리 엔진 pure_physics 교체** | 아래 "R-SSM 물리 엔진" 섹션 참고 | ✅ 핵심 3곳 완료 (벡터화 서브아이템은 저효용으로 보류) |
 | **⑥ R-SSM 배치 forward** | 아래 "R-SSM 배치 forward" 섹션 참고 | ✅ 완료 (Phase 0~3) |
 | **⑦ rssm_v5 재학습** | ⑥의 `batch_size` 옵션으로 재시작 필요 — `results/rssm_v5/best.pt`만 있고 history 없이 중단됨 | ✅ 완료 (val_rmse 1.71900, v4 대비 개선) |
@@ -295,6 +295,19 @@ Q-value 추출 목표 대비 현재 위치 점검 (2026-09-27):
 - 쿠션 단위로 끊어서 시간순으로 보면 확률이 **직전 값에 눌어붙어서 새 이벤트가 들어와도 잘 안 바뀜** — prior를 posterior로 갱신하는 게 아니라 이전 판단을 우려먹는 것처럼 보임.
 
 **다음 방향**: `h → MLP → 확률`을 매번 새로 계산하는 대신, "직전 확률(prior) + 이번 이벤트 증거(likelihood) → 갱신된 확률(posterior)"를 log-odds 누적 형태로 명시적으로 학습시키는 prior-posterior 구조 제안. 아직 설계 전, 다음 실험 후보. **이 진단을 하는 이유는 QHead/critic이 같은 h를 입력으로 쓰기 때문** — h의 갱신 신뢰도가 낮으면 Q-value 추정도 노이즈가 됨. RL 통합(위 "[ ] Pending" 항목들) 전에 먼저 해결해야 할 선결 과제로 판단. 상세는 [experiments.md](experiments.md) "이벤트별 포켓 확률 궤적 분석" 참고.
+
+### 학습 데이터 버그 수정: target-target ball_ball normal + rssm_v8_3ball (완료, 2026-09-30)
+
+SAC+R-SSM 통합(MBPO식 롤아웃)을 설계하던 중 `rssm_dataset.py::_get_raw_type_and_normal`이
+ball_ball 충돌 중 하나가 반드시 cue라고 가정하고 있어서, 타깃-타깃 충돌(cue 비개입, n_balls≥2에서
+흔함)의 contact normal이 자리표시자 `[1.0, 0.0]`으로 고정되던 버그를 발견. `rssm_v7_3ball` 학습
+데이터의 ball_ball 이벤트 중 16.9%(711/4210)가 이 버그의 영향을 받았음. 두 충돌 볼을 정렬 키로
+뽑는 방식으로 일반화 수정 후 데이터 재생성(`data_rssm_3ball_v2`) + 동일 설정으로 재학습
+(`rssm_v8_3ball`). target-target 이벤트에서 delta RMSE 14% 개선, pooled pocket AUC 0.894→0.906,
+which-ball top-1 0.818→0.862로 개선 확인 — `rssm_v8_3ball`을 새 기준 체크포인트로 채택.
+상세는 [experiments.md](experiments.md) "학습 데이터 버그 발견: target-target ball_ball collision
+normal" 참고. SAC/MBPO 통합(EventDetector N-ball 일반화 포함)은 이 작업 완료 후 별도 브랜치에서
+재개 예정.
 
 ### R-SSM 물리 엔진: pure_physics.py 대체 (완료, 2026-09-28)
 
