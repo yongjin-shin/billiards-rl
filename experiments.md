@@ -2255,3 +2255,26 @@ edge의 틀린 신호가 GNN의 공유 표현(shared hidden state)을 오염시�
 **결론**: 데이터 버그가 실제로 존재했고, target-target 이벤트 및 which-ball 판별력에 측정
 가능한 부정적 영향을 주고 있었음을 확인. `rssm_v8_3ball`을 새 기준 체크포인트로 채택.
 SAC/MBPO 통합(EventDetector N-ball 일반화 포함)은 이 작업 완료 후 별도 브랜치에서 재개.
+
+### EventDetector N-ball 일반화 (SAC/MBPO 통합 선결 작업, 2026-09-30)
+
+**계획**: `world_model/event_detector.py::EventDetector`가 cue+타깃1(2공) 전용으로 하드코딩되어
+있어(`has_cue`/`has_tgt = "1" in ball_ids`, `system.balls["cue"]`/`system.balls["1"]` 직접 참조),
+`RolloutEngine`(`world_model/rssm_rollout.py`)을 n_balls≥2에 쓸 수 없다. `RolloutEngine` 자체는
+이미 `ball_ids`/`id_to_idx` 기반으로 N-ball 일반적으로 짜여 있어(확인 완료), `EventDetector`만
+고치면 파이프라인 전체가 N-ball을 지원하게 된다.
+
+**수정 방향**: `rssm_dataset.py` 버그 수정 때 쓴 것과 동일한 정렬 키 패턴(`(0,"") if id=="cue"
+else (1,int(id))`)을 적용. `next_event()`/`full_event_sequence()`에 중복 구현된 이벤트 분류
+로직(ball_ball normal 계산, cushion/pocket normal 계산, TGT_LINEAR/TGT_CIRCULAR 재분류)을
+`_classify_event()` 헬퍼로 통합해서 두 메서드가 같은 코드 경로를 쓰게 한다 — 이전에 `rssm_dataset.py`
+버그처럼 한쪽만 고치고 다른 쪽을 놓치는 걸 구조적으로 방지하기 위함. cushion/pocket 등 단일-볼
+이벤트의 `has_cue`/`has_tgt` 재분류 조건도 `not has_cue`만으로 일반화(기존엔 `not has_cue and
+has_tgt`였는데, N-ball에서 has_tgt는 항상 참이므로 불필요).
+
+**범위**: `EventDetector`만 수정. `RolloutEngine`/`rssm_dataset.py`는 이미 대응됐거나 이번 작업
+대상 아님. SAC critic 연결(Option A/B/C)은 이 작업 이후 별도 범위.
+
+**결론**: 데이터 버그가 실제로 존재했고, target-target 이벤트 및 which-ball 판별력에 측정
+가능한 부정적 영향을 주고 있었음을 확인. `rssm_v8_3ball`을 새 기준 체크포인트로 채택.
+SAC/MBPO 통합(EventDetector N-ball 일반화 포함)은 이 작업 완료 후 별도 브랜치에서 재개.
