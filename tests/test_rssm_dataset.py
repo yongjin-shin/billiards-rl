@@ -12,7 +12,7 @@ import numpy as np
 import pytest
 import torch
 
-from world_model.rssm_model import N_TYPE, NODE_DIM
+from world_model.rssm_model import N_TYPE, NODE_DIM, EVENT_BALL_BALL
 from world_model.rssm_dataset import (
     ShotData, RSSMDataset, generate_shot_data, collect_dataset,
 )
@@ -76,6 +76,57 @@ class TestGenerateShotData:
         shots = _get_shots(10)
         has_none = any(t is None for shot in shots for t in shot.gt_types_i)
         assert has_none, "at least some gt_types_i should be None (terminal events)"
+
+
+# ── TestBallBallNormal ────────────────────────────────────────────────────────
+# Regression tests for the target-target contact-normal bug: _get_raw_type_and_
+# normal() used to only compute a real normal when one of the two colliding
+# balls was "cue", leaving target-vs-target ball_ball events stuck at the
+# [1.0, 0.0] placeholder (confirmed in data_rssm_3ball_shuffled: 711/4210
+# ball_ball events, all target-target, all placeholder).
+
+from world_model.event_detector import _contact_normal_ball_ball
+
+_PLACEHOLDER_NORMAL = np.array([1.0, 0.0], dtype=np.float32)
+
+
+class TestBallBallNormal:
+    def _ball_ball_events(self, n_shots: int, n_balls: int):
+        shots = collect_dataset(n_shots=n_shots, n_balls=n_balls, seed_start=0)
+        events = []
+        for shot in shots:
+            for ev, rvw_i, rvw_j in zip(shot.event_steps, shot.raw_rvws_i, shot.raw_rvws_j):
+                if ev.event_type == EVENT_BALL_BALL and rvw_j is not None:
+                    events.append((ev, rvw_i, rvw_j))
+        return events
+
+    def test_target_target_normal_not_placeholder(self):
+        """3-ball shots must contain at least one target-vs-target collision
+        (cue not involved), and its normal must not be the [1,0] placeholder."""
+        events = self._ball_ball_events(n_shots=30, n_balls=3)
+        target_target = [(ev, ri, rj) for ev, ri, rj in events
+                          if ev.ball_i != 0 and ev.ball_j != 0]
+        assert len(target_target) > 0, \
+            "expected at least one target-target ball_ball event in 30 3-ball shots"
+
+        for ev, rvw_i, rvw_j in target_target:
+            assert not np.allclose(ev.normal.numpy(), _PLACEHOLDER_NORMAL, atol=1e-6), \
+                "target-target normal must not be the placeholder [1.0, 0.0]"
+            # ball_i always has the lower index (sorted in generate_shot_data),
+            # so the expected direction is i→j, matching cue→target convention.
+            expected = _contact_normal_ball_ball(rvw_i[0], rvw_j[0])
+            assert np.allclose(ev.normal.numpy(), expected, atol=1e-5)
+
+    def test_cue_target_normal_unchanged(self):
+        """Cue-vs-target normal direction (cue→target) must be preserved by
+        the generalized sort-based fix."""
+        events = self._ball_ball_events(n_shots=15, n_balls=1)
+        cue_target = [(ev, ri, rj) for ev, ri, rj in events if ev.ball_i == 0]
+        assert len(cue_target) > 0, "expected at least one cue-target collision"
+
+        for ev, rvw_i, rvw_j in cue_target:
+            expected = _contact_normal_ball_ball(rvw_i[0], rvw_j[0])  # cue → target
+            assert np.allclose(ev.normal.numpy(), expected, atol=1e-5)
 
 
 # ── TestCollectDataset ────────────────────────────────────────────────────────

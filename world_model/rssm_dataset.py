@@ -84,14 +84,18 @@ def _get_raw_type_and_normal(ev, table) -> tuple[int, np.ndarray]:
     has_cue = any(a.id == "cue" for a in ball_agents)
     normal  = np.array([1.0, 0.0], dtype=np.float32)
 
-    if et == "ball_ball":
-        cue_a = next((a for a in ball_agents if a.id == "cue"), None)
-        obj_a = next((a for a in ball_agents if a.id != "cue"), None)
-        if cue_a is not None and obj_a is not None:
-            normal = _contact_normal_ball_ball(
-                cue_a.initial.state.rvw[0],
-                obj_a.initial.state.rvw[0],
-            )
+    if et == "ball_ball" and len(ball_agents) >= 2:
+        # cue is always sorted first (matches _contact_normal_ball_ball's
+        # historical cue→target direction); target-target pairs sort by
+        # numeric id. Previously this only handled cue-vs-target and left
+        # target-vs-target normals at the placeholder default.
+        def _sort_key(a):
+            return (0, "") if a.id == "cue" else (1, int(a.id))
+        a_lo, a_hi = sorted(ball_agents, key=_sort_key)[:2]
+        normal = _contact_normal_ball_ball(
+            a_lo.initial.state.rvw[0],
+            a_hi.initial.state.rvw[0],
+        )
 
     elif et == "ball_linear_cushion":
         for atype, aid in other_agents:
