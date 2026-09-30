@@ -2191,3 +2191,67 @@ FP는 쿠션 횟수가 전체 그룹 중 최다(2.48회) — 기하학적으로�
 **다음 방향 제안 — prior-posterior 구조**: 지금은 매 이벤트마다 `h → MLP → 확률`로 처음부터 다시 계산하는 구조라, 이전 판단을 새 증거로 갱신하는 메커니즘이 없음. "직전 확률(prior) + 이번 이벤트 증거(likelihood) → 갱신된 확률(posterior)"를 log-odds 덧셈 형태로 명시적으로 학습시키면 이벤트마다 일관되게 업데이트되도록 강제할 수 있을 것으로 기대. 단, 헤드 구조 자체를 재설계하고 재학습해야 해서 작업량이 큼 — 아직 설계 전, 다음 실험 후보.
 
 **이 작업 전체의 동기**: pocket head를 이렇게 깊게 파는 이유는 최종적으로 **SAC critic의 Q-value 추정에 이 world model을 쓰기 위함**(exp16 wm-critic). 포켓 확률이 이벤트마다 제대로 갱신되지 않으면 critic이 받는 상태 표현(h) 자체의 신뢰도가 낮아지므로, RL 통합 전에 이 캘리브레이션 문제를 먼저 해결할 필요가 있음.
+
+### 학습 데이터 버그 발견: target-target ball_ball collision normal 자리표시자 고정 → 수정 + 재학습 (rssm_v8_3ball, 2026-09-30)
+
+**발견 경위**: SAC+R-SSM 통합(exp16 wm-critic, MBPO식 짧은 상상 롤아웃)을 설계하던 중, 그 전제인
+`RolloutEngine`의 물리 엔진(`event_detector.py`)이 cue+타깃1(2공) 전용으로 하드코딩되어 있어
+N-ball 일반화가 먼저 필요하다는 걸 확인했다. 이 조사 과정에서 실제 **학습 데이터 생성 경로**
+(`rssm_dataset.py::_get_raw_type_and_normal`)에도 동일한 가정(ball_ball 충돌 중 하나는 반드시
+cue)이 박혀 있는 걸 추가로 발견했다.
+
+**원인**: `_get_raw_type_and_normal()`의 `ball_ball` 분기가 `cue_a = next(a.id=="cue")`,
+`obj_a = next(a.id!="cue")`로 두 충돌 볼을 찾은 뒤 `cue_a is not None`일 때만 실제 contact
+normal(`_contact_normal_ball_ball`)을 계산했다. 타깃-타깃 충돌(둘 다 non-cue, n_balls≥2에서는
+흔함)은 이 조건을 만족하지 못해 `normal`이 함수 상단 기본값 `[1.0, 0.0]`(자리표시자)으로 남았다.
+`data_rssm_3ball_shuffled`(rssm_v7_3ball의 실제 학습 데이터)를 직접 세어보니 전체 ball_ball
+이벤트 4210개 중 711개(16.9%)가 타깃-타깃이었고, **711개 전부** normal이 `[1.0, 0.0]`으로
+고정되어 있었다. 이 normal은 GNN의 edge feature로 직접 들어가므로, `rssm_v7_3ball`은 3-ball
+데이터의 ball_ball 이벤트 중 약 17%를 물리적으로 틀린 edge 신호로 학습한 셈.
+
+**수정**: 두 충돌 볼을 "cue vs non-cue"가 아니라 정렬 키(`(0,"") if id=="cue" else (1,int(id))`)로
+뽑아 동일한 코드 경로에서 normal을 계산하도록 일반화. cue는 항상 낮은 정렬 키를 가지므로
+기존 cue→target 방향 컨벤션은 그대로 유지되고, target-target 쌍도 같은 경로로 올바른 normal을
+얻는다. 회귀 테스트(`tests/test_rssm_dataset.py::TestBallBallNormal`) 2개 추가: 타깃-타깃 normal이
+더 이상 placeholder가 아님을 확인하는 테스트, cue-타깃 normal이 수정 전후 동일함을 확인하는
+테스트. 전체 `pytest tests/ -v` 201 passed(기존에도 있던 시드 의존 flaky 테스트 1개는 무관,
+`git stash`로 수정 전 코드에서도 동일하게 실패함을 확인).
+
+**재생성 + 재학습**: 기존 `data_rssm_3ball`과 동일 설정(`--balanced --quota0 1000 --quota1 1000
+--quota2 1000 --n-balls 2 --policy random --seed 42`)으로 `data_rssm_3ball_v2` 재생성
+(819,520 attempts, 28.0분 — 원본 812,540/27.4분과 거의 동일, 설정이 정확히 재현됐음을 확인),
+seed 42로 셔플한 사본(`data_rssm_3ball_v2_shuffled`)을 만들어 확인해보니 target-target
+ball_ball 이벤트 720개 전부 더 이상 placeholder normal이 아님을 재확인. `rssm_v7_3ball`과
+동일한 하이퍼파라미터(`--n-balls 2 --n-shots-train 2400 --n-shots-val 600`, 500 epoch)로
+`rssm_v8_3ball`을 처음부터 재학습(파라미터 수 595,919로 v7과 동일, fine-tune 아님).
+
+**v7 vs v8 비교 결과** (동일 600샷 held-out val, `eval_pocket_head.py` + target-target 전용 별도 스크립트):
+
+| 지표 | v7 (버그 데이터) | v8 (수정 데이터) |
+|---|---|---|
+| 최종 val loss (epoch 500) | 6.052 | 4.834 |
+| ball_ball 서브로스 | 2.048 | 2.059 |
+| type_acc (전체) | 0.593 | 0.584 |
+| pock_acc (전체) | 0.843 | 0.848 |
+| Pooled pocket AUC | 0.894 | 0.906 |
+| Which-ball top-1/pairwise acc | 0.818 | 0.862 |
+| Pairwise rescue rate | 90.6% | 91.1% |
+| **target-target ball_ball만: type_acc** | 0.447 (n=228) | 0.464 (n=261) |
+| **target-target ball_ball만: delta RMSE** | 3.026 | 2.601 |
+
+**해석**: 버그의 영향을 가장 직접적으로 받는 target-target ball_ball 이벤트에서 delta RMSE가
+14% 개선(3.026→2.601)됐고 type_acc도 소폭 개선(0.447→0.464) — 버그 수정이 해당 이벤트에
+실제로 도움이 됐다는 직접 증거. 흥미로운 건 **전체 val loss도 6.05→4.83으로 20% 가까이
+줄었는데(cue_circ 13.40→10.85, cue_linear 6.95→5.87, pocket 9.07→6.88, tgt_circ 13.35→9.44,
+tgt_linear 10.63→7.22 등 ball_ball 이외의 거의 모든 서브로스가 함께 개선)**, 이건 target-target
+edge의 틀린 신호가 GNN의 공유 표현(shared hidden state)을 오염시켜 ball_ball과 무관한 다른
+이벤트 타입 예측에도 전반적으로 영향을 줬을 가능성을 시사한다. Which-ball 판별력(top-1
+0.818→0.862)도 개선폭이 커서, 3-ball 이상에서 "어느 공이 포켓될지" 판별이 이 버그로 인해
+저평가되고 있었을 수 있다. 반면 전체 pooled `type_acc`(0.593→0.584)는 오히려 소폭 하락했는데,
+이는 이전 실험에서 이미 진단된 "후반부 순수 overfitting + Kendall weighting이 `kw_t`를 clamp
+상한까지 밀어올리는" 현상(§ 위 "`type_acc` 후반부 하락 원인 조사 결과")과 별개 이슈로, 이번
+버그 수정과는 직접 관련 없는 것으로 판단.
+
+**결론**: 데이터 버그가 실제로 존재했고, target-target 이벤트 및 which-ball 판별력에 측정
+가능한 부정적 영향을 주고 있었음을 확인. `rssm_v8_3ball`을 새 기준 체크포인트로 채택.
+SAC/MBPO 통합(EventDetector N-ball 일반화 포함)은 이 작업 완료 후 별도 브랜치에서 재개.
