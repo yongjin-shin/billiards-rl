@@ -100,6 +100,8 @@ class TrainConfig:
     lam_pocket     : float = 0.5     # weight for per-ball pocket BCE loss
     use_kendall    : bool  = True
     focal_gamma    : float = 2.0     # focal loss gamma for type CE (0 = standard CE)
+    pocket_label_smoothing  : float = 0.0   # y' = y*(1-eps) + (1-y)*eps, 0 = off
+    pocket_head_weight_decay: Optional[float] = None  # separate AdamW param group for pocket_mlp; None = use `weight_decay`
     # Bengio Scheduled Sampling
     ss_start       : float = 1.0
     ss_end         : float = 0.0
@@ -397,6 +399,13 @@ def _type_loss_term(
     return loss
 
 
+def _smooth_pocket_targets(targets: torch.Tensor, eps: float) -> torch.Tensor:
+    """Label smoothing for pocket BCE targets: y' = y*(1-eps) + (1-y)*eps."""
+    if eps <= 0.0:
+        return targets
+    return targets * (1.0 - eps) + (1.0 - targets) * eps
+
+
 def compute_shot_ss_loss(
     model             : RSSMModel,
     shot              : ShotData,
@@ -409,6 +418,7 @@ def compute_shot_ss_loss(
     mag_edges         : Optional[torch.Tensor] = None,
     mag_weights       : Optional[torch.Tensor] = None,
     focal_gamma       : float = 0.0,
+    pocket_label_smoothing: float = 0.0,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, int]:
     """
     Single-shot loss with Bengio Scheduled Sampling on node features.
@@ -474,6 +484,7 @@ def compute_shot_ss_loss(
             [float(shot.will_pocket.get(bi, False)) for bi in range(shot.n_balls)],
             device=device,
         )
+        pocket_targets = _smooth_pocket_targets(pocket_targets, pocket_label_smoothing)
         pocket_loss_sum = pocket_loss_sum + F.binary_cross_entropy(
             pocket_probs, pocket_targets, reduction="sum"
         )
@@ -503,6 +514,7 @@ def compute_batch_ss_loss(
     mag_edges         : Optional[torch.Tensor] = None,
     mag_weights       : Optional[torch.Tensor] = None,
     focal_gamma       : float = 0.0,
+    pocket_label_smoothing: float = 0.0,
 ) -> list[tuple[torch.Tensor, torch.Tensor, torch.Tensor, int]]:
     """
     Batched version of compute_shot_ss_loss: runs multiple shots' event
@@ -569,6 +581,7 @@ def compute_batch_ss_loss(
                 [float(shots[s].will_pocket.get(bi, False)) for bi in range(n_balls)],
                 device=device,
             )
+            pocket_targets = _smooth_pocket_targets(pocket_targets, pocket_label_smoothing)
             pocket_sum_list[s] = pocket_sum_list[s] + F.binary_cross_entropy(
                 pocket_probs[row], pocket_targets, reduction="sum"
             )
@@ -1033,11 +1046,19 @@ def train(cfg: TrainConfig) -> None:
 
     log_var_vel  = nn.Parameter(torch.zeros(1, device=device))
     log_var_type = nn.Parameter(torch.zeros(1, device=device))
-    all_params   = list(model.parameters()) + (
-        [log_var_vel, log_var_type] if cfg.use_kendall else []
-    )
+    extra_params = [log_var_vel, log_var_type] if cfg.use_kendall else []
+    all_params   = list(model.parameters()) + extra_params
 
-    opt = torch.optim.AdamW(all_params, lr=cfg.lr, weight_decay=cfg.weight_decay)
+    if cfg.pocket_head_weight_decay is not None:
+        pocket_head_params = list(model.pocket_mlp.parameters())
+        pocket_head_ids    = {id(p) for p in pocket_head_params}
+        other_params       = [p for p in model.parameters() if id(p) not in pocket_head_ids] + extra_params
+        opt = torch.optim.AdamW([
+            {"params": other_params,      "weight_decay": cfg.weight_decay},
+            {"params": pocket_head_params, "weight_decay": cfg.pocket_head_weight_decay},
+        ], lr=cfg.lr)
+    else:
+        opt = torch.optim.AdamW(all_params, lr=cfg.lr, weight_decay=cfg.weight_decay)
     # LR held constant at cfg.lr while scheduled sampling anneals; a fresh
     # CosineAnnealingLR cycle starts exactly when ss_prob first reaches
     # ss_end (see epoch loop below), spanning the remaining epochs.
@@ -1097,6 +1118,7 @@ def train(cfg: TrainConfig) -> None:
                 mag_edges        = mag_edges,
                 mag_weights      = mag_weights,
                 focal_gamma      = cfg.focal_gamma,
+                pocket_label_smoothing = cfg.pocket_label_smoothing,
             )
 
             # "샷별 정규화 평균의 평균" (design principle 2) — batch_size=1
@@ -1236,6 +1258,11 @@ def main() -> None:
                         "83.6%% near-zero-delta vs 4.7%% large-delta events).")
     p.add_argument("--focal-gamma",   type=float, default=2.0,
                    help="Focal loss gamma for type CE. 0=standard CE.")
+    p.add_argument("--pocket-label-smoothing", type=float, default=0.0,
+                   help="Label smoothing eps for pocket BCE targets. 0=off.")
+    p.add_argument("--pocket-head-weight-decay", type=float, default=None,
+                   help="Separate AdamW weight_decay for pocket_mlp only. "
+                        "None=use --weight-decay for all params (default).")
     p.add_argument("--h-dim",         type=int,   default=H_DIM)
     p.add_argument("--lr",            type=float, default=3e-4)
     p.add_argument("--weight-decay",  type=float, default=1e-4)
@@ -1268,6 +1295,8 @@ def main() -> None:
         delta_stats    = args.delta_stats,
         vel_mag_weight = args.vel_mag_weight,
         focal_gamma   = args.focal_gamma,
+        pocket_label_smoothing   = args.pocket_label_smoothing,
+        pocket_head_weight_decay = args.pocket_head_weight_decay,
         h_dim         = args.h_dim,
         lr            = args.lr,
         weight_decay  = args.weight_decay,
