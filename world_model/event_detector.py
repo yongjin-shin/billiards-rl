@@ -67,6 +67,13 @@ def _contact_normal_ball_ball(pos_cue: np.ndarray, pos_tgt: np.ndarray) -> np.nd
     return (d / norm).astype(np.float32) if norm > 1e-9 else np.array([1.0, 0.0], dtype=np.float32)
 
 
+def _ball_sort_key(ball_id: str):
+    """cue always sorts first; other balls sort by numeric id. Keeps the
+    historical cue->target normal direction for cue-target collisions while
+    giving target-target pairs a well-defined (lower id -> higher id) order."""
+    return (0, "") if ball_id == "cue" else (1, int(ball_id))
+
+
 def _ball_pos_at(ball: pt.Ball, t: float, params: "FrictionParams") -> np.ndarray:
     """Ball center 3-D position at time t using our friction params."""
     import pooltool.physics as ph
@@ -171,6 +178,66 @@ class EventDetector:
             max_transitions=max_transitions,
         )
 
+    def _classify_event(self, ev, pos_fn) -> tuple[int, np.ndarray]:
+        """
+        Shared classification logic for next_event() / full_event_sequence().
+
+        pos_fn(ball_id) -> (3,) rvw-style position array at collision time.
+        Returns (raw_type, contact_normal). Assumes `ev` is already known to
+        be a real collision (caller has filtered out transition events).
+
+        N-ball generalization: ball_ball events sort their two participants
+        with cue first (else by numeric id) so the same code path handles
+        cue-target AND target-target collisions with the correct normal.
+        Single-ball events (cushion/pocket) key off "is this the cue or some
+        target ball" — with N>1 targets there's no single "the target", so
+        the TGT_LINEAR/TGT_CIRCULAR reclassification only needs `not has_cue`.
+        """
+        et = str(ev.event_type)
+        raw_type = COLL_TYPE[et]
+
+        ball_ids  = {a.id for a in ev.agents if getattr(a, "agent_type", "") == "ball"}
+        other_ids = {(getattr(a, "agent_type", ""), a.id)
+                     for a in ev.agents if getattr(a, "agent_type", "") != "ball"}
+
+        normal = np.array([1.0, 0.0], dtype=np.float32)
+
+        if et == "ball_ball":
+            id_lo, id_hi = sorted(ball_ids, key=_ball_sort_key)
+            normal = _contact_normal_ball_ball(pos_fn(id_lo), pos_fn(id_hi))
+            return raw_type, normal
+
+        main_id  = next(iter(ball_ids))
+        has_cue  = main_id == "cue"
+        main_pos = pos_fn(main_id)
+
+        if et == "ball_linear_cushion":
+            for atype, aid in other_ids:
+                if atype == "linear_cushion_segment":
+                    cush = self.table.cushion_segments.linear[aid]
+                    normal = _contact_normal_lcushion(cush.lx, cush.ly)
+                    break
+            if not has_cue:
+                raw_type = TGT_LINEAR
+
+        elif et == "ball_circular_cushion":
+            for atype, aid in other_ids:
+                if atype == "circular_cushion_segment":
+                    cush = self.table.cushion_segments.circular[aid]
+                    normal = _contact_normal_ccushion(cush.a, cush.b, main_pos)
+                    break
+            if not has_cue:
+                raw_type = TGT_CIRCULAR
+
+        elif et == "ball_pocket":
+            for atype, aid in other_ids:
+                if atype == "pocket":
+                    pock = self.table.pockets[aid]
+                    normal = _contact_normal_pocket(pock.a, pock.b, main_pos)
+                    break
+
+        return raw_type, normal
+
     def next_event(
         self,
         balls: dict[str, tuple[np.ndarray, int]],
@@ -194,53 +261,10 @@ class EventDetector:
         if et not in COLL_TYPE or COLL_TYPE[et] == -1:
             return EventResult(-1, ev.time, np.array([0.0, 0.0], dtype=np.float32), ev)
 
-        raw_type = COLL_TYPE[et]
+        def pos_fn(bid: str) -> np.ndarray:
+            return _ball_pos_at(system.balls[bid], ev.time, self.params)
 
-        # IDs of involved entities (agents populated at prediction-time, initial=None)
-        ball_ids  = {a.id for a in ev.agents if getattr(a, "agent_type", "") == "ball"}
-        other_ids = {(getattr(a, "agent_type", ""), a.id)
-                     for a in ev.agents if getattr(a, "agent_type", "") != "ball"}
-
-        has_cue = "cue" in ball_ids
-        has_tgt = "1"   in ball_ids
-        main_ball = system.balls.get("cue") or system.balls.get("1")
-
-        # Ball position at collision time (for circular/pocket normal)
-        main_id = "cue" if has_cue else "1"
-        main_pos = _ball_pos_at(system.balls[main_id], ev.time, self.params)
-
-        normal = np.array([1.0, 0.0], dtype=np.float32)
-
-        if et == "ball_ball":
-            cue_pos = _ball_pos_at(system.balls["cue"], ev.time, self.params)
-            tgt_pos = _ball_pos_at(system.balls["1"],   ev.time, self.params)
-            normal  = _contact_normal_ball_ball(cue_pos, tgt_pos)
-
-        elif et == "ball_linear_cushion":
-            for atype, aid in other_ids:
-                if atype == "linear_cushion_segment":
-                    cush = self.table.cushion_segments.linear[aid]
-                    normal = _contact_normal_lcushion(cush.lx, cush.ly)
-                    break
-            if not has_cue and has_tgt:
-                raw_type = TGT_LINEAR
-
-        elif et == "ball_circular_cushion":
-            for atype, aid in other_ids:
-                if atype == "circular_cushion_segment":
-                    cush = self.table.cushion_segments.circular[aid]
-                    normal = _contact_normal_ccushion(cush.a, cush.b, main_pos)
-                    break
-            if not has_cue and has_tgt:
-                raw_type = TGT_CIRCULAR
-
-        elif et == "ball_pocket":
-            for atype, aid in other_ids:
-                if atype == "pocket":
-                    pock = self.table.pockets[aid]
-                    normal = _contact_normal_pocket(pock.a, pock.b, main_pos)
-                    break
-
+        raw_type, normal = self._classify_event(ev, pos_fn)
         return EventResult(raw_type, ev.time, normal, ev)
 
     # ------------------------------------------------------------------
@@ -269,48 +293,16 @@ class EventDetector:
             if et not in COLL_TYPE or COLL_TYPE[et] == -1:
                 continue
 
-            raw_type = COLL_TYPE[et]
-            ball_ids  = {a.id for a in ev.agents if getattr(a, "agent_type", "") == "ball"}
-            other_ids = {(getattr(a, "agent_type", ""), a.id)
-                         for a in ev.agents if getattr(a, "agent_type", "") != "ball"}
-
-            has_cue = "cue" in ball_ids
-            has_tgt = "1"   in ball_ids
-            main_id = "cue" if has_cue else "1"
-
-            if main_id not in system.balls:
+            ball_ids = {a.id for a in ev.agents if getattr(a, "agent_type", "") == "ball"}
+            # A pocketed ball is removed from system.balls by the time the
+            # full sim finishes, so its post-hoc position is unavailable.
+            if not ball_ids.issubset(system.balls.keys()):
                 continue
 
-            main_pos = system.balls[main_id].state.rvw[0]
-            normal   = np.array([1.0, 0.0], dtype=np.float32)
+            def pos_fn(bid: str) -> np.ndarray:
+                return system.balls[bid].state.rvw[0]
 
-            if et == "ball_ball":
-                cue_pos = system.balls["cue"].state.rvw[0]
-                tgt_pos = system.balls["1"].state.rvw[0]
-                normal  = _contact_normal_ball_ball(cue_pos, tgt_pos)
-            elif et == "ball_linear_cushion":
-                for atype, aid in other_ids:
-                    if atype == "linear_cushion_segment":
-                        cush = self.table.cushion_segments.linear[aid]
-                        normal = _contact_normal_lcushion(cush.lx, cush.ly)
-                        break
-                if not has_cue and has_tgt:
-                    raw_type = TGT_LINEAR
-            elif et == "ball_circular_cushion":
-                for atype, aid in other_ids:
-                    if atype == "circular_cushion_segment":
-                        cush = self.table.cushion_segments.circular[aid]
-                        normal = _contact_normal_ccushion(cush.a, cush.b, main_pos)
-                        break
-                if not has_cue and has_tgt:
-                    raw_type = TGT_CIRCULAR
-            elif et == "ball_pocket":
-                for atype, aid in other_ids:
-                    if atype == "pocket":
-                        pock = self.table.pockets[aid]
-                        normal = _contact_normal_pocket(pock.a, pock.b, main_pos)
-                        break
-
+            raw_type, normal = self._classify_event(ev, pos_fn)
             results.append(EventResult(raw_type, ev.time, normal, ev))
 
         return results
