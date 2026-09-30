@@ -2346,3 +2346,34 @@ sigmoid가 포화된다 — 확인해보니 전역 `weight_decay=1e-4`(AdamW, �
 **평가 기준**: 위 진단에서 쓴 것과 같은 3가지 값싼 지표(반응성 median |Δp|, stuck 비율, 극단
 구간별 stuck 비율)를 새 체크포인트에 다시 돌려서 개선 여부 확인. 부작용 체크로 `type_acc`,
 pooled pocket AUC, which-ball top-1도 `rssm_v8_3ball` 대비 퇴보하지 않는지 같이 본다.
+
+**결과 (2026-10-01)**: `rssm_v8_3ball`과 동일 설정(`--n-balls 2 --data-dir
+world_model/data_rssm_3ball_v2_shuffled --n-shots-train 2400 --n-shots-val 600`, 500 epoch)으로
+두 실험 모두 처음부터 재학습 완료. `best.pt` 기준(각각 val_rmse 최소 epoch: v8=460, v9_ls01=440,
+v9_headwd1e2=480) 진단 스크립트 3종 + `eval_pocket_head.py`를 동일 600샷 held-out val에 재실행:
+
+| 지표 | v8 (기준) | v9_ls01 (label smoothing ε=0.1) | v9_headwd1e2 (head weight_decay=1e-2) |
+|---|---|---|---|
+| stuck 비율 (전체, \|Δp\|<0.01) | 55.6% | **12.7%** | 53.8% |
+| median \|Δp\| | 0.0054 | **0.0473** | 0.0068 |
+| stuck 비율 (직전 확률이 0/1 근처 "확신" 구간) | 64.5% | **19.2%** | 62.1% |
+| pocket AUC (genuine, first-touch) | 0.906 | 0.903 | 0.888 |
+| which-ball top-1 | 0.862 | **0.882** | 0.847 |
+| type_acc (val) | 0.583 | 0.591 | 0.587 |
+| pock_acc (val, @0.5) | 0.847 | 0.862 | 0.852 |
+| best val_rmse | 4.841 | 4.953 (+2.3%) | 4.934 (+1.9%) |
+
+**결론**: **Label smoothing이 확실한 승자.** 포화 지표(확신 구간 stuck 비율)가 64.5%→19.2%로
+거의 3.4배 개선되었고, 부작용 지표(AUC/which-ball/type_acc/pock_acc)는 전혀 퇴보하지 않았으며
+오히려 which-ball top-1(+0.02)과 type_acc(+0.008)가 미세하게 더 좋아졌다. val_rmse 손실은
++2.3%로 감내 가능한 수준. 반면 **head 전용 weight_decay=1e-2는 사실상 효과가 없었다**(stuck
+비율 64.5%→62.1%, 거의 그대로) — 전역 weight_decay(1e-4)를 이미 훨씬 웃도는 값인데도 로짓
+폭주를 억제하지 못했다는 뜻이므로, 계획에서 언급한 다음 후보(1e-1)로도 개선폭이 클 것으로
+기대하기 어렵다고 판단해 추가 시도하지 않기로 함. 원인 가설과 일치하는 결과: **BCE+하드라벨의
+"과확신을 향한 무한 gradient" 문제는 타깃 쪽을 누그러뜨리는 label smoothing으로 직접 없애는
+것이 맞고, weight decay 같은 파라미터 크기 억제는 간접적이라 효과가 약했다.**
+
+**결정**: `pocket_label_smoothing=0.1`을 앞으로 R-SSM pocket head 학습의 기본값으로 채택.
+`rssm_v9_ls01_3ball`을 pocket head 신뢰도가 중요한 후속 작업(SAC critic 통합 등)의 새 기준
+체크포인트로 삼는다. 비용이 큰 prior-posterior 재설계는 이번 라운드에서는 불필요 — head 레벨
+개입만으로 포화 문제의 대부분이 해소됨을 확인했다.
