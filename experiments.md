@@ -2438,3 +2438,20 @@ pass에 직접 쓰이지 않는다. 즉 `RolloutEngine`(Option B, EventDetector 
 **범위**: 이번 PR은 "꽂아서 학습이 도는지" 스모크 테스트까지. `wm_target=rssm`과 기존
 `wm_target=traj`의 본격적인 pocket-rate 성능 비교 학습은 다음 세션으로 분리한다.
 브랜치 `feature/wm-rssm-critic-latent`, `dev`로만 머지.
+
+**결과**: 설계대로 구현 완료.
+- `world_model/rssm_encode.py` + `tests/test_rssm_encode.py`(7개 — happy path shape/finite,
+  무이벤트 샷 zero latent, frozen 결정성, `requires_grad=False` 확인, `simulator.py`의
+  `wm_target=rssm/traj/none` 세 경로 info 내용 확인) 전부 통과.
+- `simulator.py`: `trajectory_in_info` → `wm_target` 교체, `rssm_checkpoint` 생성자 인자 추가
+  (기본값 `world_model/results/rssm_v9_ls01_3ball/best.pt`), 모듈 레벨 `_RSSM_MODEL_CACHE`로
+  env 인스턴스 간 체크포인트 공유.
+- `exp16_wm/train.py`: `--wm-target {traj,rssm}` 추가, `wm_dims()` 헬퍼로 `WMSAC`/
+  `TrajectoryReplayBuffer` 생성 시 차원 전환.
+- 스모크런(`--agent wm --n-balls 3 --n-envs 2 --total-steps 2000`) 두 경로(`traj`/`rssm`)
+  모두 에러/NaN 없이 완주, `critic_loss`가 유한값으로 수렴 추세 확인(rssm: 0.74→0.62,
+  traj: 0.31→0.19 — 스텝 수가 매우 적어 절대값 비교는 무의미, "도는지"만 확인).
+- `pytest tests/ -v` 217 passed, 1 failed(`TestClassWeights::test_weights_positive`) —
+  이번 변경과 무관한 파일(`test_train_rssm.py`)의 기존 seed-순서-의존 flaky 테스트로 확인
+  (격리 실행 시 통과/실패 들쭉날쭉, 이번 커밋들이 건드린 적 없는 코드).
+- 본격적인 `traj` vs `rssm` pocket-rate 비교 학습(수십만 step)은 다음 세션으로 유보.

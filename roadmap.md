@@ -295,6 +295,15 @@ R-SSM과 무관한 blind-MLP 버전)을 발견했고, 이 구조를 그대로 �
 in-place 변형하지 않기 위해). 상세 설계와 기각된 대안(Option B 진짜 MBPO 상상 롤아웃,
 Option C `pocket_prob` 증강)은 [experiments.md](experiments.md) "MBPO Option A" 항목 참고.
 
+**→ 2026-10-01 구현 완료**: `world_model/rssm_encode.py`(인코더) + `simulator.py`의
+`wm_target` 리팩터 + `exp16_wm/train.py --wm-target {traj,rssm}` 전부 구현, 테스트
+(7개) 통과, `--wm-target rssm`/`traj` 양쪽 스모크런(2k step) 에러 없이 완주 확인.
+QHead는 여전히 R-SSM 자체 학습 신호는 없는 채로 남지만(`exp16_wm`에 별도 q head를
+두는 방식으로 우회), "R-SSM latent가 critic에 실제로 쓸모있는지"를 검증할 수 있는
+최소 경로가 이제 존재한다. 본격적인 `traj` vs `rssm` pocket-rate 비교 학습은 다음
+세션 과제. `feature/wm-rssm-critic-latent` → `dev` 머지 완료. 상세는
+[experiments.md](experiments.md) "MBPO Option A" 항목의 "결과" 참고.
+
 ### pocket head 캘리브레이션 진단 (2026-09-30) — QHead/critic 통합 전 선결 과제
 
 `rssm_v7_3ball`(3-ball 재학습, ④ 참고)로 절대 기준 판정(pooled AUC, 개수, 근시간)은 회복됐지만, 이벤트별 확률 궤적을 직접 추적해보니 **h가 새 증거를 제대로 반영해서 갱신되지 않는 문제**가 남아있음을 확인:
