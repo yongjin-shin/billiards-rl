@@ -2455,3 +2455,51 @@ pass에 직접 쓰이지 않는다. 즉 `RolloutEngine`(Option B, EventDetector 
   이번 변경과 무관한 파일(`test_train_rssm.py`)의 기존 seed-순서-의존 flaky 테스트로 확인
   (격리 실행 시 통과/실패 들쭉날쭉, 이번 커밋들이 건드린 적 없는 코드).
 - 본격적인 `traj` vs `rssm` pocket-rate 비교 학습(수십만 step)은 다음 세션으로 유보.
+
+### `wm_target=traj` vs `wm_target=rssm` 본격 학습 비교 (2026-10-01)
+
+**가설**: frozen R-SSM latent(`h_final`)를 `WMSAC`의 `h_real` 타깃으로 쓰면(= `rssm`),
+blind (x,y,event_type) flat 인코딩(= `traj`) 대비 critic이 더 유용한 supervision을 받아
+pocket rate/clear rate가 더 높아질 것이다.
+
+**설정**: 기존 `exp16_vanilla_multi3_ms5_s0_2026-03-28@1656` 기준 설정(이미 established
+baseline)과 동일하게 맞춰 3-way 비교 가능하도록 함 — `n_balls=3 max_steps=5
+step_penalty=0.1 trunc_penalty=1.0 total_steps=2,000,000 n_envs=10 learning_starts=5000
+eval_freq=1000 eval_episodes=50 seed=0`. 이 baseline의 결과: `random_pocket_rate=13.93%,
+trained_pocket_rate=65.87%, clear_rate=32.2%` (vanilla SAC, world model 없음).
+
+`--agent wm --wm-target traj --seed 0`과 `--agent wm --wm-target rssm --seed 0`을
+동일 설정으로 순차 실행(CPU 10코어 환경이라 동시 실행 시 자원 경합으로 둘 다 느려지는 걸
+피하기 위해 순차 실행 선택). 각 실행 예상 소요: vanilla 2M step 기준 69분(482 fps) 참고,
+wm 쪽은 critic이 추가 forward를 돌지만 env step 자체는 동일해 비슷한 자릿수로 예상.
+
+**비교 축**: `trained_pocket_rate`, `clear_rate`, `best_mean_reward` (vanilla 대비, 그리고
+traj 대비 rssm). `critic_loss`/`wm_loss`/`bellman_loss` 수렴 추이도 wandb run으로 비교.
+
+**범위**: 이번 실행은 seed=0 1개 시드만 — 노이즈 가능성이 있어 결론은 "경향 확인" 수준,
+여러 시드 반복은 결과가 유의미해 보일 때 후속 작업으로. 브랜치
+`feature/wm-traj-vs-rssm-run`, `dev`로만 머지.
+
+**결과**:
+
+| | pocket rate | clear rate | best_mean_reward | training_time | exp_dir |
+|---|---|---|---|---|---|
+| vanilla (baseline) | 65.87% | 32.2% | 0.934 | 69 min | `exp16_vanilla_multi3_ms5_s0_2026-03-28@1656` |
+| wm, `traj` | 58.87% | 27.8% | 0.878 | 112.2 min | `exp16_wm_multi3_ms5_s0_2026-10-01@1845` |
+| wm, `rssm` | 62.2% | 31.4% | 0.986 | 116.4 min | `exp16_wm_multi3_ms5_s0_2026-10-01@2037` |
+
+- **가설 지지**: `rssm`이 `traj` 대비 pocket +3.3pp, clear +3.6pp, best_mean_reward +0.108
+  (0.878→0.986) 모두 우세. frozen R-SSM latent가 blind (x,y,event_type) flat 인코딩보다
+  critic에 더 유용한 supervision을 준다는 가설과 방향이 일치한다.
+- **그러나 둘 다 vanilla보다 낮음**: pocket rate 기준 vanilla(65.87%)가 wm/rssm(62.2%)보다도
+  높다. 이번 설정에서는 world model critic을 추가하는 것 자체가 순수 SAC 대비 손해였다 —
+  WMSAC의 추가 학습 목표(M의 supervised loss)가 critic 학습을 방해했을 가능성, 또는
+  critic이 추가 forward/파라미터로 인해 같은 2M step 내에 덜 수렴했을 가능성. 학습 시간도
+  wm 쪽이 vanilla의 ~1.6~1.7배(112~116분 vs 69분) — 추가 forward 비용이 실제로 큼.
+- **노이즈 주의**: seed=0 단일 시드. `rssm` > `traj` 격차(3~4pp)는 여러 시드로 재확인 전엔
+  "경향 확인" 수준. `wm` < `vanilla` 격차(3~7pp)는 더 크고 두 wm 런 모두에서 일관되게
+  나타나 상대적으로 신뢰도가 높다.
+- **결론/다음 질문**: R-SSM latent가 blind encoding보다는 낫다는 것은 확인됐지만, "WMSAC
+  구조 자체가 이 task에 맞는가"는 별개 문제로 남는다. 여러 시드 반복은 보류 — 먼저
+  WMSAC가 vanilla보다 떨어지는 원인(critic/actor loss가 학습 후반 계속 증가하는 경향이
+  관찰됨, 수렴 전 종료 가능성)을 진단하는 게 우선순위로 보인다.
