@@ -99,3 +99,47 @@ class TestEncodeShotToLatent:
     def test_frozen_params_require_no_grad(self, frozen_model):
         assert all(not p.requires_grad for p in frozen_model.parameters())
         assert not frozen_model.training
+
+
+# ── TestSimulatorWmTargetRssm ────────────────────────────────────────────────
+
+class TestSimulatorWmTargetRssm:
+    def test_info_h_real_shape_and_finite(self):
+        if not os.path.exists(CHECKPOINT):
+            pytest.skip(f"checkpoint not found: {CHECKPOINT}")
+
+        n_balls = 3
+        env = BilliardsEnv(n_balls=n_balls, rssm_checkpoint=CHECKPOINT)
+        env.wm_target = "rssm"
+        try:
+            env.reset(seed=0)
+            _, _, _, _, info = env.step(env.action_space.sample())
+        finally:
+            env.close()
+
+        assert info["h_real"].shape == (n_balls + 1, H_DIM)
+        assert info["traj_len"] == n_balls + 1
+        assert np.isfinite(info["h_real"]).all()
+
+    def test_wm_target_none_by_default_omits_h_real(self):
+        env = BilliardsEnv(n_balls=3)
+        try:
+            env.reset(seed=0)
+            _, _, _, _, info = env.step(env.action_space.sample())
+        finally:
+            env.close()
+
+        assert "h_real" not in info
+
+    def test_wm_target_traj_unaffected_by_refactor(self):
+        env = BilliardsEnv(n_balls=3)
+        env.wm_target = "traj"
+        try:
+            env.reset(seed=0)
+            _, _, _, _, info = env.step(env.action_space.sample())
+        finally:
+            env.close()
+
+        from simulator import TRAJ_MAX_EVENTS, TRAJ_EVENT_DIM
+        assert info["h_real"].shape == (TRAJ_MAX_EVENTS, TRAJ_EVENT_DIM)
+        assert isinstance(info["traj_len"], int)
