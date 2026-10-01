@@ -2377,3 +2377,64 @@ v9_headwd1e2=480) 진단 스크립트 3종 + `eval_pocket_head.py`를 동일 600
 `rssm_v9_ls01_3ball`을 pocket head 신뢰도가 중요한 후속 작업(SAC critic 통합 등)의 새 기준
 체크포인트로 삼는다. 비용이 큰 prior-posterior 재설계는 이번 라운드에서는 불필요 — head 레벨
 개입만으로 포화 문제의 대부분이 해소됨을 확인했다.
+
+### MBPO Option A: 실제 관측 샷을 frozen R-SSM으로 인코딩해 SAC critic에 연결 (2026-10-01)
+
+**배경**: `world_model/rssm_model.py`의 QHead(`aggregate_q`, attention-pool → scalar Q)는
+forward pass는 완전히 배선되어 있지만(`rssm_rollout.py:252`) 학습 신호가 전혀 없다
+(`train_rssm.py`에 `q_head`/`aggregate_q` 참조 전무). Q-label 소스 후보 3개(MC return / SAC
+critic bootstrap / `pocket_prob` 휴리스틱) 중, `pocket_prob`은 AUC 0.919 중 0.827이 0-파라미터
+geometric baseline으로 설명되는 leak이 위("AUC=0.919 Too good to be true?" 항목)에 문서화돼
+있어 신뢰하기 어렵다.
+
+한편 `exp16_wm/`에는 이미 **다른 형태의** world-model critic(`WMSAC`, `exp16_wm/sac.py`)이
+동작 중이었다 — R-SSM과 무관한, 이번 조사로 처음 확인된 기존 자산이다: `WorldModelCritic`은
+blind MLP `M(obs,action)→ĥ`가 실제 관측된 샷 궤적(`h_real`, pooltool 이벤트 로그에서 추출한
+flat (x,y,event_type) 배열, `simulator.py::_extract_trajectory`)을 지도학습으로 맞추고
+(`wm_loss`), `q(ĥ)→Q`는 Bellman loss로 학습된다.
+
+**선택한 방향(Option A)**: 매 실제 env step 후 "방금 일어난 진짜 이벤트 시퀀스"를
+frozen·pretrained R-SSM(`rssm_v9_ls01_3ball`)에 통과시켜 얻은 per-ball latent(`h_final`,
+shape `(n_balls_total, H_DIM=64)`)를, 기존 WMSAC의 `h_real` 타깃 자리에 그대로 꽂아 넣는다.
+R-SSM 백본은 freeze, `WorldModelCritic`의 M(blind MLP)과 q(Bellman)만 학습한다. 검토한 대안:
+
+- **Option B (진짜 MBPO 상상 롤아웃)**: 매 transition마다 `RolloutEngine`으로 모델 자신의
+  예측(ground truth 없이)으로 n-step 상상 롤아웃을 돌려 Q_imagined를 Bellman target에 섞거나
+  synthetic (s,a,r,s')를 생성. 가장 roadmap 원안에 가깝지만 `EventDetector`가 순수
+  Python/NumPy 루프라 배치/GPU 불가 — 512 배치 크기로 매 gradient step마다 호출하면 처리량
+  병목이 될 게 뻔해서 엔지니어링 리스크가 크다. 다음 단계로 유보.
+- **Option C (pocket_prob 휴리스틱 증강)**: `q_target = r + gamma*V(s') + lambda*pocket_prob`.
+  구현은 가장 간단하지만 위에서 언급한 leak 문제로 신호 품질이 의심스러워 기각.
+
+Option A는 `WMSAC`/`WorldModelCritic`/`TrajectoryReplayBuffer`가 이미 `(max_events,
+event_dim)`에 대해 완전히 범용적으로 짜여 있어서, 타깃의 **의미**만 바꾸고 코드는 거의
+그대로 재사용할 수 있다(`max_events` 자리에 `n_balls_total`, `event_dim` 자리에 `H_DIM`).
+`buffer.py`/`sac.py`/`networks.py`는 전혀 수정하지 않는다 — `simulator.py`가 채우는
+`info["h_real"]`/`info["traj_len"]`의 내용물만 blind-trajectory에서 R-SSM latent로 바뀐다.
+
+**Q(s, 임의의 action) 문제**: Bellman target(`Q(next_obs, next_action)`)과 actor loss
+(`Q(obs, actor_action)`)는 아직 실행되지 않은 가상의 action에 대한 Q가 필요한데, R-SSM은
+실제로 일어난 샷만 인코딩할 수 있어 "미래의 가상 action"에 대해서는 돌릴 수 없다. 이 문제는
+이미 `WMSAC` 구조가 풀어놓았다 — `M(obs,action)`은 임의의 (s,a)에 대해 ĥ를 "예측"하는 학습된
+함수이고, 실제 h(이번엔 R-SSM latent)는 그 예측을 지도학습으로 맞추는 타깃일 뿐 forward
+pass에 직접 쓰이지 않는다. 즉 `RolloutEngine`(Option B, EventDetector 루프라 배치/GPU 불가)은
+이번 phase에서 전혀 필요 없다.
+
+**설계 요약**:
+1. `world_model/rssm_encode.py`(신규) — `load_frozen_rssm()`, `encode_shot_to_latent(model,
+   system, ball_ids)`. `generate_shot_data()`(`rssm_dataset.py`) + `make_node`/`make_edge`
+   (`rssm_rollout.py`) + `RSSMModel.forward()`(`rssm_model.py`)를 그대로 재사용, 새 로직은
+   그 셋을 잇는 글루코드뿐.
+2. `simulator.py` — `trajectory_in_info: bool` 플래그를 `wm_target: str`(`none/traj/rssm`)로
+   교체. `rssm` 모드에서 모듈 레벨 lazy-load 캐시로 frozen R-SSM을 한 번만 로드하고,
+   `info["h_real"]`/`info["traj_len"]`에 동일한 키로 R-SSM latent를 채운다.
+3. `exp16_wm/train.py` — `--wm-target {traj,rssm}` CLI 옵션 추가, `rssm` 선택 시
+   `max_events=n_balls_total`, `event_dim=H_DIM`으로 차원만 교체.
+4. R-SSM continual fine-tuning 여부는 이번 phase에서 건드리지 않는다 — frozen으로 고정
+   ([[project_rssm_rl_integration_open_question]] 미결 이슈 그대로 보류). R-SSM 자체의
+   `aggregate_q`/`q_head`를 in-place로 학습시키지도 않는다 — `exp16_wm/` 격리 규칙상 공유
+   체크포인트를 exp16 전용 목적으로 변형하지 않기 위함.
+
+**범위**: 이번 PR은 "꽂아서 학습이 도는지" 스모크 테스트까지. `wm_target=rssm`과 기존
+`wm_target=traj`의 본격적인 pocket-rate 성능 비교 학습은 다음 세션으로 분리한다.
+브랜치 `feature/wm-rssm-critic-latent`, `dev`로만 머지.

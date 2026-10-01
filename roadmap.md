@@ -286,6 +286,15 @@ Q-value 추출 목표 대비 현재 위치 점검 (2026-09-27):
 
 **후보 3 관련 경고** — `pocket_prob`(= `predict_pocket` head) 자체를 `eval_pocket_head.py`로 리크 헌팅한 결과(상세: [experiments.md](experiments.md)), AUC=0.919 중 0.827은 물리 시뮬레이션 없는 0-파라미터 기하학 baseline(post-collision 속도 방향 직선 연장)만으로 이미 나오는 값이었다. 즉 이 heuristic이 "학습된 물리 이해"를 반영한다고 보기엔 근거가 약함. QHead도 같은 h를 입력으로 쓰므로, 학습 신호가 생긴 뒤 평가할 때 반드시 같은 방식(trivial/geometric baseline 대비)으로 검증할 것 — 정확도나 AUC 단독 숫자를 그대로 믿지 말 것.
 
+**→ 2026-10-01 결정 (Option A 채택)**: 위 세 후보 중 어느 것도 그대로 쓰지 않기로 했다.
+대신 `exp16_wm/sac.py`에 이미 동작 중이던 **다른** world-model critic(`WMSAC`,
+R-SSM과 무관한 blind-MLP 버전)을 발견했고, 이 구조를 그대로 재사용해 R-SSM 통합의
+첫 단계로 삼기로 했다: 실제 관측된 샷 이벤트 시퀀스를 frozen `rssm_v9_ls01_3ball`에
+통과시켜 얻은 `h_final`을 `WMSAC`의 기존 `h_real` 타깃 자리에 꽂는다(R-SSM 자체의
+`aggregate_q`/`q_head`는 학습하지 않음 — exp16 전용 목적으로 공유 체크포인트를
+in-place 변형하지 않기 위해). 상세 설계와 기각된 대안(Option B 진짜 MBPO 상상 롤아웃,
+Option C `pocket_prob` 증강)은 [experiments.md](experiments.md) "MBPO Option A" 항목 참고.
+
 ### pocket head 캘리브레이션 진단 (2026-09-30) — QHead/critic 통합 전 선결 과제
 
 `rssm_v7_3ball`(3-ball 재학습, ④ 참고)로 절대 기준 판정(pooled AUC, 개수, 근시간)은 회복됐지만, 이벤트별 확률 궤적을 직접 추적해보니 **h가 새 증거를 제대로 반영해서 갱신되지 않는 문제**가 남아있음을 확인:
