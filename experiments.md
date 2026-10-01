@@ -2455,3 +2455,27 @@ pass에 직접 쓰이지 않는다. 즉 `RolloutEngine`(Option B, EventDetector 
   이번 변경과 무관한 파일(`test_train_rssm.py`)의 기존 seed-순서-의존 flaky 테스트로 확인
   (격리 실행 시 통과/실패 들쭉날쭉, 이번 커밋들이 건드린 적 없는 코드).
 - 본격적인 `traj` vs `rssm` pocket-rate 비교 학습(수십만 step)은 다음 세션으로 유보.
+
+### `wm_target=traj` vs `wm_target=rssm` 본격 학습 비교 (2026-10-01)
+
+**가설**: frozen R-SSM latent(`h_final`)를 `WMSAC`의 `h_real` 타깃으로 쓰면(= `rssm`),
+blind (x,y,event_type) flat 인코딩(= `traj`) 대비 critic이 더 유용한 supervision을 받아
+pocket rate/clear rate가 더 높아질 것이다.
+
+**설정**: 기존 `exp16_vanilla_multi3_ms5_s0_2026-03-28@1656` 기준 설정(이미 established
+baseline)과 동일하게 맞춰 3-way 비교 가능하도록 함 — `n_balls=3 max_steps=5
+step_penalty=0.1 trunc_penalty=1.0 total_steps=2,000,000 n_envs=10 learning_starts=5000
+eval_freq=1000 eval_episodes=50 seed=0`. 이 baseline의 결과: `random_pocket_rate=13.93%,
+trained_pocket_rate=65.87%, clear_rate=32.2%` (vanilla SAC, world model 없음).
+
+`--agent wm --wm-target traj --seed 0`과 `--agent wm --wm-target rssm --seed 0`을
+동일 설정으로 순차 실행(CPU 10코어 환경이라 동시 실행 시 자원 경합으로 둘 다 느려지는 걸
+피하기 위해 순차 실행 선택). 각 실행 예상 소요: vanilla 2M step 기준 69분(482 fps) 참고,
+wm 쪽은 critic이 추가 forward를 돌지만 env step 자체는 동일해 비슷한 자릿수로 예상.
+
+**비교 축**: `trained_pocket_rate`, `clear_rate`, `best_mean_reward` (vanilla 대비, 그리고
+traj 대비 rssm). `critic_loss`/`wm_loss`/`bellman_loss` 수렴 추이도 wandb run으로 비교.
+
+**범위**: 이번 실행은 seed=0 1개 시드만 — 노이즈 가능성이 있어 결론은 "경향 확인" 수준,
+여러 시드 반복은 결과가 유의미해 보일 때 후속 작업으로. 브랜치
+`feature/wm-traj-vs-rssm-run`, `dev`로만 머지.
