@@ -23,10 +23,11 @@ import wandb
 from stable_baselines3.common.vec_env import SubprocVecEnv
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from simulator import BilliardsEnv, TRAJ_MAX_EVENTS, TRAJ_EVENT_DIM
+from simulator import BilliardsEnv, TRAJ_MAX_EVENTS, TRAJ_EVENT_DIM, DEFAULT_RSSM_CHECKPOINT
 from train import _tee_output
 from exp16_wm.buffer import ReplayBuffer, TrajectoryReplayBuffer
 from exp16_wm.sac import VanillaSAC, WMSAC
+from world_model.rssm_model import H_DIM
 
 
 ACTION_DIM = 2
@@ -70,7 +71,16 @@ def parse_args():
     p.add_argument("--trunc-penalty",   type=float, default=0.0)
     # WM-only
     p.add_argument("--wm-coef",         type=float, default=1.0)
+    p.add_argument("--wm-target",       type=str,   default="traj",
+                   choices=["traj", "rssm"])
     return p.parse_args()
+
+
+def wm_dims(args) -> tuple[int, int]:
+    """(max_events, event_dim) for WMSAC's h_real target, based on --wm-target."""
+    if args.wm_target == "rssm":
+        return args.n_balls + 1, H_DIM   # +1 for cue
+    return TRAJ_MAX_EVENTS, TRAJ_EVENT_DIM
 
 
 # ──────────────────────────────────────────────
@@ -91,13 +101,14 @@ def build_agent(args):
             device     = args.device,
         )
     else:
+        max_events, event_dim = wm_dims(args)
         return WMSAC(
             obs_dim    = obs_dim,
             action_dim = ACTION_DIM,
             act_low    = ACT_LOW,
             act_high   = ACT_HIGH,
-            max_events = TRAJ_MAX_EVENTS,
-            event_dim  = TRAJ_EVENT_DIM,
+            max_events = max_events,
+            event_dim  = event_dim,
             wm_coef    = args.wm_coef,
             lr         = args.lr,
             tau        = args.tau,
@@ -111,8 +122,9 @@ def build_buffer(args):
     if args.agent == "vanilla":
         return ReplayBuffer(obs_dim, ACTION_DIM, args.buffer_size)
     else:
+        max_events, event_dim = wm_dims(args)
         return TrajectoryReplayBuffer(
-            obs_dim, ACTION_DIM, TRAJ_MAX_EVENTS, TRAJ_EVENT_DIM, args.buffer_size
+            obs_dim, ACTION_DIM, max_events, event_dim, args.buffer_size
         )
 
 
@@ -167,6 +179,7 @@ def _train_inner(args, exp_dir):
         "step_penalty":    args.step_penalty,
         "trunc_penalty":   args.trunc_penalty,
         "wm_coef":         args.wm_coef,
+        "wm_target":       args.wm_target,
         "exp_dir":         exp_dir,
         "timestamp":       time.strftime("%Y-%m-%dT%H:%M:%S"),
     }
@@ -199,7 +212,7 @@ def _train_inner(args, exp_dir):
     print(f"{'═' * W}")
 
     # ── environments ──────────────────────────
-    traj_in_info = (args.agent == "wm")
+    wm_target = args.wm_target if args.agent == "wm" else "none"
 
     print(f"  [1/4] Spawning {args.n_envs} subproc envs ...", end=" ", flush=True)
 
@@ -209,8 +222,9 @@ def _train_inner(args, exp_dir):
             max_steps     = args.max_steps,
             step_penalty  = args.step_penalty,
             trunc_penalty = args.trunc_penalty,
+            rssm_checkpoint = DEFAULT_RSSM_CHECKPOINT,
         )
-        e.trajectory_in_info = traj_in_info
+        e.wm_target = wm_target
         return e
 
     vec_env  = SubprocVecEnv([_make_env] * args.n_envs)
@@ -283,12 +297,12 @@ def _train_inner(args, exp_dir):
             timeouts    = np.zeros(args.n_envs, dtype=bool)
 
         if args.agent == "wm":
+            zero_h_real = np.zeros(wm_dims(args), dtype=np.float32)
             for i in range(args.n_envs):
                 buffer.add(
                     obs[i], actions[i], rewards[i], stored_next[i], dones[i],
                     timeout  = bool(timeouts[i]),
-                    h_real   = infos[i].get("h_real",   np.zeros(
-                                    (TRAJ_MAX_EVENTS, TRAJ_EVENT_DIM), dtype=np.float32)),
+                    h_real   = infos[i].get("h_real",   zero_h_real),
                     traj_len = infos[i].get("traj_len", 0),
                 )
         else:
