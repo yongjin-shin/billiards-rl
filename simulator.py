@@ -34,6 +34,20 @@ _N_EVENT_TYPES = len(_EVENT_TYPES)   # 10
 TRAJ_EVENT_DIM  = 2 + _N_EVENT_TYPES   # 12
 TRAJ_MAX_EVENTS = 32
 
+DEFAULT_RSSM_CHECKPOINT = "world_model/results/rssm_v9_ls01_3ball/best.pt"
+
+# Lazy-loaded frozen R-SSM checkpoints, keyed by path — shared across env instances
+# so multiple envs (e.g. vectorized training) don't each hold their own copy.
+_RSSM_MODEL_CACHE: dict = {}
+
+
+def _get_frozen_rssm(checkpoint_path: str):
+    """Lazily load and cache a frozen R-SSM checkpoint for wm_target='rssm'."""
+    if checkpoint_path not in _RSSM_MODEL_CACHE:
+        from world_model.rssm_encode import load_frozen_rssm
+        _RSSM_MODEL_CACHE[checkpoint_path] = load_frozen_rssm(checkpoint_path)
+    return _RSSM_MODEL_CACHE[checkpoint_path]
+
 
 def _get_ball_xy(agent) -> tuple[float, float]:
     """Extract (x, y) from a pooltool event agent."""
@@ -146,8 +160,12 @@ class BilliardsEnv(gym.Env):
                  shots_taken: bool = False,
                  abs_angle: bool = False,
                  legacy_placement: bool = False,
-                 proximity_reward_alpha: float = 0.0):
+                 proximity_reward_alpha: float = 0.0,
+                 rssm_checkpoint: str = DEFAULT_RSSM_CHECKPOINT):
         super().__init__()
+        # wm_target: "none" | "traj" | "rssm" — opt-in, set via env attr (see step())
+        self.wm_target       = "none"
+        self.rssm_checkpoint = rssm_checkpoint
         assert n_balls >= 1, "n_balls must be >= 1"
 
         self.n_balls             = n_balls
@@ -363,16 +381,28 @@ class BilliardsEnv(gym.Env):
                 "clear_bonus_earned": _cb_earned,
             }
 
-        # ── Trajectory (for World Model training) ────────────────────────────
-        # Opt-in: only populated when trajectory_in_info=True (set via env attr)
-        # Format: h_real (MAX_EVENTS, EVENT_DIM) float32, traj_len int
-        if getattr(self, "trajectory_in_info", False):
+        # ── Trajectory / R-SSM latent (for World Model training) ─────────────
+        # Opt-in: only populated when wm_target != "none" (set via env attr).
+        # "traj": blind (x, y, event_type) flat encoding — info["h_real"] shape
+        #         (TRAJ_MAX_EVENTS, TRAJ_EVENT_DIM), info["traj_len"] = n real events.
+        # "rssm": frozen R-SSM per-ball latent of this shot's real events —
+        #         info["h_real"] shape (n_balls+1, H_DIM), info["traj_len"] = n_balls+1.
+        wm_target = getattr(self, "wm_target", "none")
+        if wm_target == "traj":
             h_real, traj_len = _extract_trajectory(
                 self.system,
                 target_id=self._ball_ids[0] if self._ball_ids else "1",
             )
             info["h_real"]   = h_real
             info["traj_len"] = traj_len
+        elif wm_target == "rssm":
+            from world_model.rssm_encode import encode_shot_to_latent
+
+            model    = _get_frozen_rssm(self.rssm_checkpoint)
+            ball_ids = ["cue"] + self._ball_ids
+            h_final  = encode_shot_to_latent(model, self.system, ball_ids)
+            info["h_real"]   = np.stack([h.numpy() for h in h_final])
+            info["traj_len"] = len(ball_ids)
 
         return self._get_obs(), reward, terminated, truncated, info
 
