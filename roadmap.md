@@ -304,6 +304,16 @@ QHead는 여전히 R-SSM 자체 학습 신호는 없는 채로 남지만(`exp16_
 세션 과제. `feature/wm-rssm-critic-latent` → `dev` 머지 완료. 상세는
 [experiments.md](experiments.md) "MBPO Option A" 항목의 "결과" 참고.
 
+**→ 2026-10-01 본격 학습 비교 완료 (seed=0 1개 시드)**: `rssm`이 `traj` 대비 pocket
++3.3pp(58.87%→62.2%), clear +3.6pp(27.8%→31.4%), best_mean_reward +0.108(0.878→0.986)
+전부 우세 — R-SSM latent가 blind flat encoding보다 critic에 더 유용하다는 가설 방향은
+지지됨. **그러나 `wm`(traj/rssm 둘 다)이 vanilla SAC(pocket 65.87%, clear 32.2%)보다
+낮다** — WMSAC 구조 자체를 추가하는 것이 이 설정에서는 순수 SAC 대비 손해였다(학습
+시간도 ~1.6~1.7배). 다음 우선순위는 "R-SSM이 traj보다 나은가"의 시드 반복 확인이
+아니라, **"WMSAC가 왜 vanilla보다 떨어지는가"** 진단(critic/actor loss가 학습 후반
+계속 증가하는 경향 관찰됨 — 수렴 전 종료 가능성). 상세: [experiments.md](experiments.md)
+"`wm_target=traj` vs `wm_target=rssm` 본격 학습 비교" 항목의 "결과".
+
 ### pocket head 캘리브레이션 진단 (2026-09-30) — QHead/critic 통합 전 선결 과제
 
 `rssm_v7_3ball`(3-ball 재학습, ④ 참고)로 절대 기준 판정(pooled AUC, 개수, 근시간)은 회복됐지만, 이벤트별 확률 궤적을 직접 추적해보니 **h가 새 증거를 제대로 반영해서 갱신되지 않는 문제**가 남아있음을 확인:

@@ -2479,3 +2479,27 @@ traj 대비 rssm). `critic_loss`/`wm_loss`/`bellman_loss` 수렴 추이도 wandb
 **범위**: 이번 실행은 seed=0 1개 시드만 — 노이즈 가능성이 있어 결론은 "경향 확인" 수준,
 여러 시드 반복은 결과가 유의미해 보일 때 후속 작업으로. 브랜치
 `feature/wm-traj-vs-rssm-run`, `dev`로만 머지.
+
+**결과**:
+
+| | pocket rate | clear rate | best_mean_reward | training_time | exp_dir |
+|---|---|---|---|---|---|
+| vanilla (baseline) | 65.87% | 32.2% | 0.934 | 69 min | `exp16_vanilla_multi3_ms5_s0_2026-03-28@1656` |
+| wm, `traj` | 58.87% | 27.8% | 0.878 | 112.2 min | `exp16_wm_multi3_ms5_s0_2026-10-01@1845` |
+| wm, `rssm` | 62.2% | 31.4% | 0.986 | 116.4 min | `exp16_wm_multi3_ms5_s0_2026-10-01@2037` |
+
+- **가설 지지**: `rssm`이 `traj` 대비 pocket +3.3pp, clear +3.6pp, best_mean_reward +0.108
+  (0.878→0.986) 모두 우세. frozen R-SSM latent가 blind (x,y,event_type) flat 인코딩보다
+  critic에 더 유용한 supervision을 준다는 가설과 방향이 일치한다.
+- **그러나 둘 다 vanilla보다 낮음**: pocket rate 기준 vanilla(65.87%)가 wm/rssm(62.2%)보다도
+  높다. 이번 설정에서는 world model critic을 추가하는 것 자체가 순수 SAC 대비 손해였다 —
+  WMSAC의 추가 학습 목표(M의 supervised loss)가 critic 학습을 방해했을 가능성, 또는
+  critic이 추가 forward/파라미터로 인해 같은 2M step 내에 덜 수렴했을 가능성. 학습 시간도
+  wm 쪽이 vanilla의 ~1.6~1.7배(112~116분 vs 69분) — 추가 forward 비용이 실제로 큼.
+- **노이즈 주의**: seed=0 단일 시드. `rssm` > `traj` 격차(3~4pp)는 여러 시드로 재확인 전엔
+  "경향 확인" 수준. `wm` < `vanilla` 격차(3~7pp)는 더 크고 두 wm 런 모두에서 일관되게
+  나타나 상대적으로 신뢰도가 높다.
+- **결론/다음 질문**: R-SSM latent가 blind encoding보다는 낫다는 것은 확인됐지만, "WMSAC
+  구조 자체가 이 task에 맞는가"는 별개 문제로 남는다. 여러 시드 반복은 보류 — 먼저
+  WMSAC가 vanilla보다 떨어지는 원인(critic/actor loss가 학습 후반 계속 증가하는 경향이
+  관찰됨, 수렴 전 종료 가능성)을 진단하는 게 우선순위로 보인다.
