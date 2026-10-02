@@ -2571,3 +2571,20 @@ encoding(`traj`)뿐 아니라 world model 없는 순수 SAC(`vanilla`)보다도 
 seed=0 기준으로는 지지된다. 다만 여전히 단일 시드이고, rssm-vanilla 격차(2.6pp)는
 500ep 기준 이항분포 std(~2.2pp)와 비슷한 크기라 "확정" 수준은 아니다. 다음 단계는
 여러 시드(예: 1,2,3) 반복으로 이 순위가 유지되는지 확인하는 것.
+
+### 다중 시드 재확인 (2026-10-03 시작)
+
+**가설**: seed=0에서 나온 순위(`rssm` > `vanilla` > `traj`)가 시드에 무관하게 유지되는지
+확인한다. 격차(rssm-vanilla 2.6pp, rssm-traj 3.7pp)가 500ep 기준 이항 노이즈(~2.2pp)와
+비슷한 크기라 단일 시드로는 결론을 내리기 어려웠다.
+
+**설정**: seed=0과 동일한 baseline 설정(`n_balls=3 max_steps=5 step_penalty=0.1
+trunc_penalty=1.0 total_steps=2,000,000 n_envs=10 learning_starts=5000 eval_freq=1000
+eval_episodes=50 best_ckpt_window=5`)에 `seed ∈ {1, 2, 3}`을 추가해 vanilla/traj/rssm
+각각 3회씩, 총 9개 런을 실행한다. CPU 10코어 제약으로 순차 실행(seed 1의 3-way →
+seed 2의 3-way → seed 3의 3-way 순서), 런당 평균 ~70~115분이므로 총 소요 예상
+~13~15시간.
+
+**비교 축**: 각 시드에서 `rssm`이 `vanilla`/`traj`를 넘는지(순위), 그리고 seed=0을
+포함한 4개 시드에서 방법별 평균±std로 최종 판단. 브랜치
+`feature/wm-traj-vs-rssm-multiseed`, `dev`로만 머지.
