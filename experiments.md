@@ -2541,3 +2541,33 @@ rssm 76.0%→62.2%) — 체크포인트 선정 자체가 50ep 노이즈의 운 �
 `_update_best_ma()` 순수 함수로 분리해 단위 테스트, `train.py` 루프에 연결 후 동일
 3-way(vanilla/traj/rssm, seed=0)를 재실행해 결론이 바뀌는지 확인한다. 브랜치
 `feature/wm-best-ckpt-ma`, `dev`로만 머지.
+
+**구현 + 재실행 결과 (2026-10-02~03)**: `update_best_ma()`(`exp16_wm/train.py`) 구현,
+7개 단위 테스트 통과, vanilla/wm 양쪽 스모크런 확인 후 동일 baseline 설정
+(`best-ckpt-window=5` 추가)으로 vanilla/traj/rssm 3-way를 처음부터 다시 순차 실행.
+
+| | pocket rate | clear rate | best_mean_reward | training_time | exp_dir |
+|---|---|---|---|---|---|
+| vanilla | 63.0% | 32.0% | 0.904 | 68.7 min | `exp16_vanilla_multi3_ms5_s0_2026-10-02@2057` |
+| wm, `traj` | 61.87% | 30.0% | 0.930 | 110.5 min | `exp16_wm_multi3_ms5_s0_2026-10-02@2206` |
+| wm, `rssm` | 65.6% | 34.2% | 1.040 | 115.0 min | `exp16_wm_multi3_ms5_s0_2026-10-02@2357` |
+
+이전 비교(단일-eval 선정)와 순위 자체가 바뀌었다 — **이제 rssm이 vanilla보다도 우세**
+(pocket +2.6pp, clear +2.2pp, reward +0.136), traj는 vanilla와 거의 동급이거나 약간
+아래(pocket -1.1pp, clear -2.0pp, reward는 오히려 +0.026로 미세하게 높음). rssm이
+traj보다 우세한 것은 이전과 동일하게 재확인됨(pocket +3.7pp, clear +4.2pp,
+reward +0.11) — 이쪽은 두 번의 독립적인 실행(체크포인트 선정 기준이 다른)에서도 같은
+방향으로 나왔다는 점에서 신뢰도가 더 올라갔다.
+
+wandb 학습 곡선을 다시 확인한 결과, "중반 피크 → 후반 하락" 패턴 자체는 이번에도
+그대로 남아 있다(세 런 모두 peak ma pocket_rate 68~70%를 학습 9~50% 지점에서
+찍고 후반 30%는 57~61%대로 내려와 머무름) — 이건 체크포인트 선정 노이즈와는 무관한,
+이 환경에서의 SAC 공통 현상으로 재확인. 다만 이동평균 선정 덕분에 "어느 체크포인트가
+실제로 좋은지" 판단의 노이즈는 줄었고, 그 결과 traj vs rssm vs vanilla의 순위가 더
+안정적으로 나왔다.
+
+**결론**: frozen R-SSM latent를 critic 타깃으로 쓰는 쪽(`rssm`)이 blind flat
+encoding(`traj`)뿐 아니라 world model 없는 순수 SAC(`vanilla`)보다도 낫다는 가설이
+seed=0 기준으로는 지지된다. 다만 여전히 단일 시드이고, rssm-vanilla 격차(2.6pp)는
+500ep 기준 이항분포 std(~2.2pp)와 비슷한 크기라 "확정" 수준은 아니다. 다음 단계는
+여러 시드(예: 1,2,3) 반복으로 이 순위가 유지되는지 확인하는 것.
