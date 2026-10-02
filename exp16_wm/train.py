@@ -61,6 +61,7 @@ def parse_args():
     p.add_argument("--gamma",           type=float, default=0.99)
     p.add_argument("--eval-freq",       type=int,   default=10_000)
     p.add_argument("--eval-episodes",   type=int,   default=50)
+    p.add_argument("--best-ckpt-window", type=int,  default=5)
     p.add_argument("--device",          type=str,   default="cpu")
     p.add_argument("--wandb-project",   type=str,   default="billiards-rl-exp16")
     p.add_argument("--no-wandb",        action="store_true")
@@ -81,6 +82,23 @@ def wm_dims(args) -> tuple[int, int]:
     if args.wm_target == "rssm":
         return args.n_balls + 1, H_DIM   # +1 for cue
     return TRAJ_MAX_EVENTS, TRAJ_EVENT_DIM
+
+
+def update_best_ma(history: list[float], new_value: float, window: int,
+                    best_ma_so_far: float) -> tuple[list[float], float, float, bool]:
+    """
+    Append new_value to a rolling window and decide whether its moving average
+    is a new best. A single noisy eval (e.g. 50 episodes) has high binomial
+    variance; averaging the last `window` evals smooths that out before it's
+    used to decide which checkpoint to keep.
+
+    Returns (updated_history, moving_average, new_best_ma, is_new_best).
+    """
+    updated = (history + [new_value])[-window:]
+    ma = float(np.mean(updated))
+    is_new_best = ma > best_ma_so_far
+    new_best_ma = ma if is_new_best else best_ma_so_far
+    return updated, ma, new_best_ma, is_new_best
 
 
 # ──────────────────────────────────────────────
@@ -173,6 +191,7 @@ def _train_inner(args, exp_dir):
         "gamma":           args.gamma,
         "eval_freq":       args.eval_freq,
         "eval_episodes":   args.eval_episodes,
+        "best_ckpt_window": args.best_ckpt_window,
         "device":          args.device,
         "n_balls":         args.n_balls,
         "max_steps":       args.max_steps,
@@ -258,7 +277,8 @@ def _train_inner(args, exp_dir):
 
     obs = vec_env.reset()
 
-    best_pocket_rate = 0.0
+    best_pocket_rate = 0.0        # best moving-average pocket_rate seen so far
+    pocket_rate_history: list = []
     best_mean_reward = float("-inf")
     total_steps      = 0
     last_eval_step   = 0
@@ -340,9 +360,11 @@ def _train_inner(args, exp_dir):
             elapsed = time.time() - t_start
             fps     = total_steps / elapsed
 
-            if mean_r       > best_mean_reward:  best_mean_reward  = mean_r
-            if pocket_rate  > best_pocket_rate:
-                best_pocket_rate = pocket_rate
+            if mean_r > best_mean_reward:  best_mean_reward = mean_r
+            pocket_rate_history, pocket_rate_ma, best_pocket_rate, is_new_best = update_best_ma(
+                pocket_rate_history, pocket_rate, args.best_ckpt_window, best_pocket_rate,
+            )
+            if is_new_best:
                 agent.save(os.path.join(exp_dir, "best_model", "best_model.pt"))
 
             avg_train = {k: v / train_metrics_cnt
@@ -355,6 +377,7 @@ def _train_inner(args, exp_dir):
                 "eval/mean_reward":      mean_r,
                 "eval/std_reward":       std_r,
                 "eval/pocket_rate":      pocket_rate * 100,
+                "eval/pocket_rate_ma":   pocket_rate_ma * 100,
                 "eval/clear_rate":       clear_rate  * 100,
                 "eval/best_mean_reward": best_mean_reward,
                 "eval/best_pocket_rate": best_pocket_rate * 100,
@@ -386,7 +409,8 @@ def _train_inner(args, exp_dir):
             )
             print(
                 f"    pocket   : {pocket_rate*100:6.1f}%"
-                f"              best: {best_pocket_rate*100:.1f}%"
+                f"    ma({args.best_ckpt_window}): {pocket_rate_ma*100:.1f}%"
+                f"    best_ma: {best_pocket_rate*100:.1f}%"
             )
             print(
                 f"    clear    : {clear_rate*100:6.1f}%"

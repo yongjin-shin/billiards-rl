@@ -314,6 +314,19 @@ QHead는 여전히 R-SSM 자체 학습 신호는 없는 채로 남지만(`exp16_
 계속 증가하는 경향 관찰됨 — 수렴 전 종료 가능성). 상세: [experiments.md](experiments.md)
 "`wm_target=traj` vs `wm_target=rssm` 본격 학습 비교" 항목의 "결과".
 
+**→ 2026-10-02 원인 진단 + 재실행 (seed=0)**: wandb 곡선 비교 결과 critic loss 상승과
+"중반 피크→후반 하락" 패턴은 vanilla에서도 동일하게 나타나 WMSAC 전용 결함이
+아니었음을 확인. 대신 `train.py`의 best-checkpoint 선정이 단일 50-episode eval
+(이항분포 std ~6.9pp)만으로 이뤄져, 위 비교의 3~7pp 차이가 선정 노이즈 범위 안에
+있었다는 게 핵심 원인이었다. 최근 N번 eval의 이동평균 기준으로 선정하도록 고친 뒤
+(`--best-ckpt-window`, 기본 5) 3-way를 다시 실행하자 **순위가 바뀌었다**: `rssm`
+(pocket 65.6%, clear 34.2%, reward 1.040)이 `vanilla`(63.0%, 32.0%, 0.904)와
+`traj`(61.87%, 30.0%, 0.930) 둘 다를 앞섬 — "WMSAC가 vanilla보다 나쁘다"는 이전
+결론은 선정 노이즈의 산물이었고, R-SSM latent 자체는 critic에 실질적으로 도움이
+된다는 가설이 지지된다. `traj`는 vanilla와 거의 동급. 여전히 단일 시드라 확정은
+아님 — 다음 단계는 여러 시드 반복. 상세: [experiments.md](experiments.md)
+"위 비교의 원인 진단" 항목.
+
 ### pocket head 캘리브레이션 진단 (2026-09-30) — QHead/critic 통합 전 선결 과제
 
 `rssm_v7_3ball`(3-ball 재학습, ④ 참고)로 절대 기준 판정(pooled AUC, 개수, 근시간)은 회복됐지만, 이벤트별 확률 궤적을 직접 추적해보니 **h가 새 증거를 제대로 반영해서 갱신되지 않는 문제**가 남아있음을 확인:

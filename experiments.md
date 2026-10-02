@@ -2503,3 +2503,71 @@ traj 대비 rssm). `critic_loss`/`wm_loss`/`bellman_loss` 수렴 추이도 wandb
   구조 자체가 이 task에 맞는가"는 별개 문제로 남는다. 여러 시드 반복은 보류 — 먼저
   WMSAC가 vanilla보다 떨어지는 원인(critic/actor loss가 학습 후반 계속 증가하는 경향이
   관찰됨, 수렴 전 종료 가능성)을 진단하는 게 우선순위로 보인다.
+
+### 위 비교의 원인 진단 (2026-10-02)
+
+wandb API로 세 런(vanilla `ggo1t1id`, traj `lkym9orr`, rssm `9ew9d17z`)의 전체 학습 곡선을
+직접 당겨서 비교했다.
+
+**진단 1 — critic/bellman loss 상승은 WM 전용 문제가 아님**: `critic_loss`(vanilla)/
+`bellman_loss`(wm)가 초반 10% 구간 대비 후반 10% 구간에서 모두 ~4배 상승한다
+(vanilla 0.56→2.11, traj 0.65→2.81, rssm 0.55→2.83). `wm_loss`는 오히려 작고 안정적
+(traj 0.05→0.08, rssm 0.44→0.65). 즉 critic loss 상승은 WMSAC 구조 탓이 아니라 이
+환경(max_steps=5, 짧은 호라이즌)에서 SAC 공통으로 나타나는 패턴으로 보인다.
+
+**진단 2 — "중반 피크 → 후반 하락/진동" 패턴도 세 런 공통**:
+
+| | peak pocket(50ep eval) | peak 시점(진행률) | 후반30% 평균±std |
+|---|---|---|---|
+| vanilla | 77.3% | 51% | 62.2% ± 4.4% |
+| traj | 74.7% | 83% | 59.3% ± 5.8% |
+| rssm | 76.0% | 51% | 61.7% ± 5.5% |
+
+셋 다 2M step 중간쯤 74~77%를 찍고 이후 59~62%대로 떨어져 흔들린다. WM이 더 불안정한
+것도 아니다 — 이 task 자체의 SAC 공통 불안정성.
+
+**진단 3 (핵심) — best-checkpoint 선정 기준의 샘플링 노이즈**: `exp16_wm/train.py:343-346`
+이 `pocket_rate > best_pocket_rate`(단일 50-episode eval)만으로 best_model을 저장한다.
+n=50, p≈0.6에서 이항분포 표준편차 ≈ ±6.9pp — 지금 비교 중인 차이들(rssm-traj 3.3pp,
+wm-vanilla 3~7pp)과 같은 크기다. 실제로 세 런 모두 저장된 best 체크포인트를 500ep로
+재평가하면 11~16pp씩 떨어진다 (vanilla 77.3%→65.87%, traj 74.7%→58.87%,
+rssm 76.0%→62.2%) — 체크포인트 선정 자체가 50ep 노이즈의 운 좋은 피크를 주운 것일
+뿐이라는 뜻. 즉 지금까지의 "rssm>traj"/"wm<vanilla" 결론은 이 선정 노이즈 범위 안에
+있어 신뢰하기 어렵다.
+
+**결정**: 여러 시드를 늘리기 전에 먼저 best-checkpoint 선정 기준을 안정화한다 —
+최근 N번 eval(`pocket_rate`)의 이동평균이 기존 최고 이동평균을 넘을 때만 저장
+(`--best-ckpt-window`, 기본 5 → 노이즈 std 6.9pp → 추정 ~3.1pp로 감소). 선정 로직을
+`_update_best_ma()` 순수 함수로 분리해 단위 테스트, `train.py` 루프에 연결 후 동일
+3-way(vanilla/traj/rssm, seed=0)를 재실행해 결론이 바뀌는지 확인한다. 브랜치
+`feature/wm-best-ckpt-ma`, `dev`로만 머지.
+
+**구현 + 재실행 결과 (2026-10-02~03)**: `update_best_ma()`(`exp16_wm/train.py`) 구현,
+7개 단위 테스트 통과, vanilla/wm 양쪽 스모크런 확인 후 동일 baseline 설정
+(`best-ckpt-window=5` 추가)으로 vanilla/traj/rssm 3-way를 처음부터 다시 순차 실행.
+
+| | pocket rate | clear rate | best_mean_reward | training_time | exp_dir |
+|---|---|---|---|---|---|
+| vanilla | 63.0% | 32.0% | 0.904 | 68.7 min | `exp16_vanilla_multi3_ms5_s0_2026-10-02@2057` |
+| wm, `traj` | 61.87% | 30.0% | 0.930 | 110.5 min | `exp16_wm_multi3_ms5_s0_2026-10-02@2206` |
+| wm, `rssm` | 65.6% | 34.2% | 1.040 | 115.0 min | `exp16_wm_multi3_ms5_s0_2026-10-02@2357` |
+
+이전 비교(단일-eval 선정)와 순위 자체가 바뀌었다 — **이제 rssm이 vanilla보다도 우세**
+(pocket +2.6pp, clear +2.2pp, reward +0.136), traj는 vanilla와 거의 동급이거나 약간
+아래(pocket -1.1pp, clear -2.0pp, reward는 오히려 +0.026로 미세하게 높음). rssm이
+traj보다 우세한 것은 이전과 동일하게 재확인됨(pocket +3.7pp, clear +4.2pp,
+reward +0.11) — 이쪽은 두 번의 독립적인 실행(체크포인트 선정 기준이 다른)에서도 같은
+방향으로 나왔다는 점에서 신뢰도가 더 올라갔다.
+
+wandb 학습 곡선을 다시 확인한 결과, "중반 피크 → 후반 하락" 패턴 자체는 이번에도
+그대로 남아 있다(세 런 모두 peak ma pocket_rate 68~70%를 학습 9~50% 지점에서
+찍고 후반 30%는 57~61%대로 내려와 머무름) — 이건 체크포인트 선정 노이즈와는 무관한,
+이 환경에서의 SAC 공통 현상으로 재확인. 다만 이동평균 선정 덕분에 "어느 체크포인트가
+실제로 좋은지" 판단의 노이즈는 줄었고, 그 결과 traj vs rssm vs vanilla의 순위가 더
+안정적으로 나왔다.
+
+**결론**: frozen R-SSM latent를 critic 타깃으로 쓰는 쪽(`rssm`)이 blind flat
+encoding(`traj`)뿐 아니라 world model 없는 순수 SAC(`vanilla`)보다도 낫다는 가설이
+seed=0 기준으로는 지지된다. 다만 여전히 단일 시드이고, rssm-vanilla 격차(2.6pp)는
+500ep 기준 이항분포 std(~2.2pp)와 비슷한 크기라 "확정" 수준은 아니다. 다음 단계는
+여러 시드(예: 1,2,3) 반복으로 이 순위가 유지되는지 확인하는 것.
