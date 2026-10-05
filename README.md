@@ -11,6 +11,7 @@ Reinforcement learning on a physics-accurate billiards simulator ([pooltool](htt
 | **Current status** | Deterministic SSM World Model (feature/wm-ssm) in progress |
 | **Next experiment** | Review Exp-17 HRL direction after SSM results |
 | **Exp-16 vanilla** | Phase 1: pocket 62.2% ≈ SAC 63.6% (p=0.49) / Phase 0: pocket 56.9% ≈ SAC 55.3% (p=0.62) |
+| **Exp-16 WM critic (4 seeds)** | pocket vanilla 62.95% / traj 63.47% / rssm 62.19% — no significant difference (ANOVA p=0.58) |
 
 → Experiment log: [experiments.md](experiments.md) | Next plan: [roadmap.md](roadmap.md)
 

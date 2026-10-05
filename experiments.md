@@ -2588,3 +2588,56 @@ seed 2의 3-way → seed 3의 3-way 순서), 런당 평균 ~70~115분이므로 �
 **비교 축**: 각 시드에서 `rssm`이 `vanilla`/`traj`를 넘는지(순위), 그리고 seed=0을
 포함한 4개 시드에서 방법별 평균±std로 최종 판단. 브랜치
 `feature/wm-traj-vs-rssm-multiseed`, `dev`로만 머지.
+
+**결과 (2026-10-03 완료)**: 9개 런 모두 정상 종료. seed=0 결과(이동평균 선정 재실행분)와 합쳐
+4개 시드 × 3방법 = 12개 런으로 비교한다. 지표는 모두 best 체크포인트를 500ep 재평가한 값
+(`results.json`). pocket rate는 1500볼(500ep×3볼), clear rate는 500ep 기준.
+
+| seed | vanilla (pocket / clear / reward) | wm-`traj` | wm-`rssm` | pocket 1위 |
+|---|---|---|---|---|
+| 0 | 63.0 / 32.0 / 0.904 | 61.87 / 30.0 / 0.930 | **65.6** / 34.2 / 1.040 | rssm |
+| 1 | 64.27 / 33.4 / 1.096 | **64.4** / 32.8 / 1.148 | 62.47 / 32.4 / 1.140 | traj |
+| 2 | 61.67 / 30.4 / 0.938 | **63.6** / 31.8 / 0.998 | 60.0 / 27.8 / 0.944 | traj |
+| 3 | 62.87 / 31.2 / 1.016 | **64.0** / 31.8 / 0.888 | 60.67 / 28.2 / 0.968 | traj |
+
+exp_dir: vanilla `exp16_vanilla_multi3_ms5_s{1,2,3}_2026-10-03@{0720,1216,1717}`,
+traj `exp16_wm_multi3_ms5_s{1,2,3}_2026-10-03@{0829,1326,1826}`,
+rssm `exp16_wm_multi3_ms5_s{1,2,3}_2026-10-03@{1021,1520,2019}`.
+
+4시드 평균 ± 표본 std:
+
+| | pocket | clear | best_mean_reward | training_time |
+|---|---|---|---|---|
+| vanilla | 62.95 ± 1.06 | 31.75 ± 1.28 | 0.988 ± 0.086 | ~69분 |
+| wm, `traj` | 63.47 ± 1.11 | 31.60 ± 1.17 | 0.991 ± 0.114 | ~112분 |
+| wm, `rssm` | 62.19 ± 2.50 | 30.65 ± 3.15 | 1.023 ± 0.088 | ~115분 |
+
+**통계 검정** (n=4 시드; final eval env가 `reset(seed=args.seed)`라 같은 시드끼리는 평가
+배치가 동일 → 시드 단위 paired t-test를 주 검정으로, Welch t-test를 보조로):
+
+| 비교 (pocket) | 평균 차이 | paired p | Welch p | 95% CI |
+|---|---|---|---|---|
+| traj − vanilla | +0.52pp | 0.49 | 0.53 | (−1.59, +2.62) |
+| rssm − vanilla | −0.77pp | 0.55 | 0.60 | (−4.36, +2.82) |
+| traj − rssm | +1.28pp | 0.51 | 0.40 | (−4.16, +6.73) |
+
+3-way 전체: one-way ANOVA p=0.58, Friedman p=0.37. clear rate(모든 p ≥ 0.42),
+best_mean_reward(모든 p ≥ 0.44)도 마찬가지로 유의한 차이 없음. 시드 분산을 무시하고
+런 내부 이항 노이즈만으로 본 pooled two-proportion z-test조차 p ≥ 0.15.
+검정력: 현재 시드 간 차이 std(~1.3pp) 기준 n=4 paired 설계로 80% 검정력으로 잡아낼 수 있는
+최소 효과는 ~2.9pp — 그보다 작은 차이는 이번 설계로는 원래 판별 불가.
+
+**해석**:
+- seed=0의 `rssm > vanilla > traj` 순위는 **재현되지 않았다**. seed 1~3에서 rssm은 pocket
+  기준 매번 3위, traj가 매번 1위. seed=0은 rssm에게 운 좋은 시드였던 것으로 보인다.
+  rssm은 시드 간 분산도 가장 크다(pocket std 2.5pp vs 나머지 ~1.1pp).
+- 세 방법의 평균 차이(≤1.3pp)는 모두 시드 노이즈 범위 안. **world model critic(traj/rssm
+  어느 쪽이든)이 vanilla SAC보다 낫다는 근거는 없다** — "효과 없음이 증명됐다"가 아니라
+  "~3pp 이상의 효과는 없을 가능성이 높고, 그 이하는 판별 불가"라는 의미.
+- 비용 측면에서 wm은 vanilla 대비 학습 시간 ~1.6배.
+
+**결론**: 이 설정(frozen 타깃 + `M(obs,action)→ĥ` 보조 MSE loss, Option A)으로는
+world model이 SAC 성능에 유의미한 이득을 주지 못한다. 보조 loss로 critic 표현을 정규화하는
+방식은 타깃이 blind 궤적이든 R-SSM latent든 차이를 만들지 못했다. 다음 방향 후보: (1) 보조
+loss가 아니라 실제 상상 롤아웃으로 Bellman target/데이터를 늘리는 Option B, (2) 시드 수를
+늘려 ~1pp 수준 효과를 검증하는 것은 비용 대비 의미가 작아 보류.
