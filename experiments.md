@@ -2814,3 +2814,70 @@ teacher-forcing으로만 평가되어 왔다.
 예외로 죽는다. MBPO 롤아웃에서도 그대로 발생할 문제. 진단 스크립트에서는
 `CueSafeDetector`(테이블 밖 정지 더미 공으로 패딩)로 우회했고, `world_model/` 쪽 수정은 아직
 하지 않았다.
+
+### 설계: (G) critic에 pre-shot 기하 특징 주입 → (M) h masking/혼합 (2026-10-05)
+
+**배경**: D1–D4로 정리된 사실 — (1) critic의 pocket 판별력(AUC ~0.66)은 0-파라미터 직선 기하
+계산(0.746)보다 낮다, (2) WM critic의 `q`는 실제 h를 한 번도 보지 못하고 부정확한 ĥ(R² ~0.25)
+로만 학습된다, (3) 현재 R-SSM 자유 롤아웃은 기하보다 못하다. 그래서 두 질문을 순서대로 분리해
+확인한다.
+
+- **G**: "샷 전에 계산 가능한 physics 정보가 critic 입력에 명시적으로 주어지면 Q(그리고
+  정책)가 좋아지는가?" — WM 품질과 무관하게, *정보를 주면 쓰는가*를 먼저 본다. 효과가 있으면
+  그 정보를 학습된 WM으로 대체할 가치가 있다는 상한선 근거가 된다.
+- **M**: "q가 실제 h의 의미를 학습하도록 강제하면, WM critic이 h를 실제로 활용하는가?"
+
+#### G — `GeomSAC` (`--agent geom`)
+
+- critic 입력 = `[obs, action, geom(obs, action)]`. 나머지(actor, alpha, 버퍼, 하이퍼파라미터)는
+  VanillaSAC와 동일.
+- `geom()`은 **torch로 구현해 action에 대해 미분 가능**하게 만든다. actor는 ∂Q/∂a로
+  학습되므로, numpy로 특징을 계산해 붙이면 기하 특징을 통한 gradient가 actor에 전달되지 않는다.
+  첫 접촉 공 선택(argmin)만 이산 선택이고, 선택된 뒤의 특징은 a에 대해 연속이다.
+- 특징(정규화 좌표 → 미터 변환 후 계산, env와 동일한 aim 규칙: 가장 가까운 남은 공 방향 +
+  `delta_angle`):
+  1. `hit` — 큐볼 직선 경로가 남은 타깃 공 중 하나에 닿는가 (0/1)
+  2. `cos_cut` — 큐볼 진행 방향과 접촉 시 중심선(큐→타깃) 사이 cos (얇게 맞을수록 작음)
+  3. `d_cue` — 큐볼이 접촉점까지 가는 거리
+  4. `miss` — 타깃 공이 중심선 방향으로 굴러갈 때 가장 가까운 포켓까지의 최소 수직 거리
+     (D4 기하 baseline 점수와 같은 양)
+  5. `d_obj` — 그 포켓까지 진행 방향 거리
+  6. `speed` — 정규화 속도 (action[1])
+  미접촉 시 2–5는 고정 sentinel 값. 포켓 중심은 `pt.Table.default()` 상수.
+- 비교 대상: 기존 vanilla 4시드(s0–3, 동일 설정 2M step) — 새로 돌리는 것은 geom 4런뿐.
+
+#### M — WMSAC + h 혼합 (`--agent wm --wm-target rssm --h-mix-start 0.5 --h-mix-steps 1000000`)
+
+- critic 업데이트의 **현재 (s,a)에 대한 Bellman 항**에서, 샘플별로 확률 p로 `q`의 입력을 ĥ 대신
+  실제 h_real(그 transition에서 R-SSM이 인코딩한 값)로 바꾼다. 나머지는 그대로:
+  - Bellman target(`Q(s', a')`)과 actor loss(`Q(s, π(s))`)는 가상의 action이라 실제 h가 없으므로
+    항상 ĥ 사용.
+  - wm_loss(MSE(ĥ, h_real))는 유지.
+- p는 0.5에서 시작해 1M step(전체의 절반)에 걸쳐 선형으로 0까지 감소, 이후 0. 실제 h는 샷
+  결과(pocket 이벤트 포함)를 담고 있어 leak이 있으므로, 끝에는 반드시 ĥ만으로 동작해야 한다.
+- 기대 메커니즘: `q`가 실제 h에서 "h의 어느 방향이 pocket/가치와 연결되는지"를 배우고, ĥ로
+  학습하는 샘플에서는 Bellman gradient가 q를 거쳐 M으로 흘러, M이 "q가 이해하는 방향"으로 ĥ를
+  내도록 압박받는다.
+- 알려진 위험: ĥ는 R² 0.25라 분포가 h_real보다 평균 쪽으로 수축되어 있어, q가 실제 h에서
+  배운 것이 ĥ에 그대로 전이되지 않을 수 있다(분포 불일치). 이 경우 p가 0이 되는 후반에 성능이
+  꺾일 것이다 — 학습 곡선에서 확인.
+- 비교 대상: 기존 wm-`rssm` 4시드(s0–3). 새로 돌리는 것은 4런.
+
+#### 공통
+
+- 설정은 기존 12런과 동일(`n_balls=3 max_steps=5 step_penalty=0.1 trunc_penalty=1.0
+  total_steps=2M n_envs=10 eval_freq=1000 eval_episodes=50 best_ckpt_window=5`), seed 0–3.
+- 위에서 발견한 truncation/샷순번 문제는 **이번에는 고치지 않는다** — 기존 런과 비교 가능성을
+  유지하기 위해서. 결론 해석 시 공통 교란 요인으로 명시.
+- 평가 지표: (a) 최종 pocket/clear(500ep, best ckpt), (b) 학습 곡선 구간별 pocket(특히
+  100–200k), (c) D1 Q pocket AUC / critic 표현 probe AUC (`diagnose_q` 확장), M은 추가로 ĥ R².
+- 판단 기준:
+  - G에서 Q AUC가 기하 수준(≥0.72)으로 오르고 pocket rate 또는 초반 샘플 효율이 유의하게
+    오르면 → "pre-shot physics 정보는 Q에 쓸모 있다". Q AUC는 오르는데 정책이 안 오르면 →
+    병목은 Q 목표(truncation)나 정책 쪽.
+  - M에서 Q AUC·ĥ probe가 wm-rssm 대비 오르고 성능이 같거나 나으면 → masking으로 q가 h를
+    활용하게 만들 수 있다.
+- 순서: G 4런(~70분/런) → G 분석 → M 4런(~115분/런) → M 분석. 순차 실행 총 ~13시간.
+- 코드: `exp16_wm/networks.py`(GeomCritic, `geom_features`), `exp16_wm/sac.py`(GeomSAC,
+  WMSAC h-mix), `exp16_wm/train.py`(CLI), 테스트 `tests/test_exp16_wm_geom.py`,
+  `tests/test_exp16_wm_hmix.py`.
