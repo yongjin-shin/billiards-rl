@@ -2704,3 +2704,48 @@ pocket rate(정책 성능)는 Q 품질을 간접적으로만 반영하므로, �
 같거나 낮으면, 그 원인이 "M이 (s,a)→h 예측을 못해서"(D3a R² 낮음)인지 "h 자체가 pocket에
 무관해서"(실제 h_real probe도 낮음)인지 가른다. 코드: `exp16_wm/diagnose_q.py`, 테스트
 `tests/test_exp16_wm_diagnose_q.py`.
+
+**결과 (2026-10-05)**: `python -m exp16_wm.diagnose_q --seeds 0 1 2 3 --n-shots 3000
+--n-episodes 200` → `logs/diagnose_q.json`. 시드별 공통 데이터셋 3000샷(pocket 성공 비율
+23%), 4시드 평균 ± std, p는 vs vanilla paired t-test.
+
+| 지표 | vanilla | wm-`traj` | wm-`rssm` |
+|---|---|---|---|
+| D1 Q(s,a)의 pocket AUC | **0.654 ± 0.027** | 0.616 ± 0.013 (p=0.09) | 0.625 ± 0.016 (p=0.04) |
+| D1 Spearman(Q, 즉시 reward) | **0.144** | 0.093 (p=0.05) | 0.086 (p=0.05) |
+| D2 Pearson(Q, G_t), 전체 | −0.02 | −0.05 | −0.05 |
+| D2 Pearson(Q, G_t), 샷 순번 t별 평균 | 0.12 | 0.09 | 0.09 |
+| D2 bias(Q − G_t) | −3.46 | −4.76 | −3.53 |
+| D3a ĥ vs h_real R² | — | 0.29 ± 0.08 | 0.25 ± 0.01 |
+| D3b critic 표현 linear probe AUC | 0.699 | 0.682 | 0.697 |
+
+참조 probe (모델 무관): 원시 [s,a] linear 0.646 / MLP 0.607, **실제 h_real(샷 이후)
+traj 0.950 / rssm 0.962** (샷 결과를 이미 담고 있으므로 leak이 있는 상한선).
+
+**해석**:
+1. **h 자체의 정보량은 문제가 아니다.** 실제 샷의 h_real은 pocket을 거의 완벽히 판별한다
+   (0.95–0.96). 다만 R-SSM latent(0.962)와 blind 궤적(0.950)의 차이는 작다 — "이미 일어난
+   샷"을 기술하는 데에는 R-SSM의 구조화가 별 이득이 없다.
+2. **병목은 (s,a)→h 예측이다.** critic 안의 M(512×3 MLP)이 h를 예측한 정도는 R² 0.25–0.29에
+   그친다. Q가 실제로 보는 것은 h_real이 아니라 이 예측값 ĥ이므로, h_real의 풍부한 정보가
+   Q로 전달되지 않는다. pocket 여부를 (s,a)로부터 예측하는 것 자체가 어려운 문제이고(원시
+   [s,a] probe 0.61–0.65, 2M step 학습한 critic도 0.62–0.65), 보조 MSE loss는 이 어려운
+   physics forward mapping을 M에게 가르치지 못했다.
+3. **WM critic은 pocket 판별에서 오히려 vanilla보다 약간 나쁘다**(rssm p=0.04). 보조 loss가
+   critic 용량을 h의 Q와 무관한 차원에 쓰게 한다는 앞의 가설과 맞는다.
+4. **세 방법 공통: Q의 학습 목표 자체가 실제 return과 어긋나 있다.** 샷 순번 t가 커질수록
+   실제 G_t는 내려가는데(seed 0 vanilla: 0.54→−0.57) Q는 반대로 올라간다(−3.53→−2.38).
+   같은 t 안에서도 상관은 0.09–0.12. 원인 후보: (a) 5샷 truncation을 SB3가
+   `TimeLimit.truncated`로 표시해 버퍼가 done을 마스킹(`buffer.py:86`) → 실제로는 게임이
+   끝나고 trunc_penalty −1까지 받는데 critic은 무한히 이어지는 것처럼 bootstrap, (b) obs에
+   샷 순번이 없어 남은 샷 수를 알 수 없음(`shots_taken` 옵션 미사용), (c) soft-Q 엔트로피 항
+   (log π ≈ +2.4, α ≈ 0.12–0.15)이 매 step 누적돼 ~−3 bias. (a)+(b)는 Q가 무엇을
+   추정해야 하는지 자체를 흐린다 — h가 아무리 좋아도 Q로 이득이 드러나기 어려운 구조.
+
+**결론**: "h가 physics 정보를 담고 있으니 Q가 좋아질 것"이라는 가설은 이 Option A 설정으로는
+검증 자체가 막혀 있다. h_real의 정보는 충분하지만, (1) critic이 h를 (s,a)에서 예측해야 하고
+그 예측이 R² ~0.25 수준이며, (2) Q의 학습 목표가 truncation 처리 때문에 실제 return과
+어긋나 있다. MBPO로 가는 판단에 직접 필요한 질문은 "R-SSM 롤아웃이 (s,a)로부터 pocket을
+critic(AUC ~0.65)보다 잘 예측하는가"이며, 이는 R-SSM pocket head를 같은 데이터셋에 돌려
+비교하면 값싸게 확인할 수 있다. 별개로 truncation 처리/샷 순번 obs 수정은 세 방법 모두에
+영향을 주는 선결 문제다.
