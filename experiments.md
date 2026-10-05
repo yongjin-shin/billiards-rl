@@ -2773,3 +2773,44 @@ pocket AUC를 비교한다(라벨 = `pocketed_this_step>0`).
 critic이 못 배우는 physics를 제공한다는 뜻 → MBPO(또는 롤아웃 결과를 critic 입력으로 직접
 주는 방식)로 갈 근거. 기하 baseline과도 비교해, 이득이 R-SSM 학습 덕분인지 EventDetector의
 해석적 기하 계산 덕분인지 가른다.
+
+**결과 (2026-10-05)**: `python -m exp16_wm.diagnose_q --d4 --seeds 0 1 2 3 --n-shots 3000`
+→ `logs/diagnose_q_d4.json`. 시드별 3000샷(pocket 23%), 샷 단위 AUC, 4시드 평균 ± std.
+
+| 점수 (샷 전 정보만 사용 / 참조) | pocket AUC | vs vanilla Q (paired p) |
+|---|---|---|
+| critic Q — vanilla | 0.662 ± 0.026 | — |
+| critic Q — wm-`traj` | 0.622 ± 0.008 | |
+| critic Q — wm-`rssm` | 0.632 ± 0.020 | |
+| R-SSM 자유 롤아웃: 롤아웃 안 pocket 이벤트 개수 | 0.561 ± 0.005 | 0.006 (더 나쁨) |
+| R-SSM 자유 롤아웃: first-touch `predict_pocket` | 0.716 ± 0.009 | 0.017 (더 좋음) |
+| **0-파라미터 pre-shot 기하 baseline** | **0.746 ± 0.005** | 0.007 (더 좋음) |
+| (참조) teacher-forced `predict_pocket` — 실제 이벤트 사용 | 0.746 ± 0.004 | |
+
+롤아웃이 "pocket 있음"으로 판정한 비율은 13.5%(실제 23%), 실제 결과와의 일치율 74%는
+"항상 실패" 예측(77%)보다도 낮다.
+
+**해석**:
+1. **R-SSM 롤아웃은 critic보다는 낫지만(0.716 vs 0.66), 직선 기하 계산(0.746)보다 못하다**
+   (rollout_head − geom p=0.008). 즉 R-SSM이 critic에 줄 수 있는 pre-shot physics 정보는
+   "큐볼 진행 방향 → 처음 맞는 공 → 중심선 방향으로 포켓을 향하는가"라는 기초 기하 수준에도
+   못 미친다.
+2. **롤아웃의 동역학 자체가 빠르게 어긋난다.** 롤아웃 안에서 실제로 공이 포켓에 들어가는
+   이벤트로 판정하면 AUC 0.56으로 거의 무작위. 충돌별 Δvel 오차가 이벤트마다 누적되면서
+   공의 경로가 실제와 달라지는 것으로 보인다. `predict_pocket` head(0.716)가 이보다 나은 건
+   first-touch 시점(첫 충돌 직후)의 h만 쓰기 때문 — 누적 오차가 쌓이기 전이다.
+3. **pocket head는 실제 이벤트를 넣어줘도 샷 단위 0.746**으로 기하 baseline과 같다. 기존
+   0.919는 공 단위 + tautological 샘플(첫 이벤트가 곧 pocket)을 포함한 수치였다.
+4. **critic의 pocket 판별에는 개선 여지가 크다.** 0-파라미터 기하조차 critic보다 0.08 높다.
+   다만 그 여지를 채울 도구가 현재 R-SSM은 아니다.
+
+**MBPO 판단에 대한 함의**: 현재 R-SSM(`rssm_v9_ls01_3ball`)으로 상상 롤아웃을 만들면, 그
+롤아웃의 pocket 결과는 거의 무작위(AUC 0.56)라 critic에게 노이즈 데이터를 주게 된다. MBPO를
+진행하려면 먼저 자유 롤아웃(free-running) 정확도를 올리는 것이 선결 과제 — R-SSM은 지금까지
+teacher-forcing으로만 평가되어 왔다.
+
+**부수 발견 (버그)**: `RolloutEngine`/`EventDetector`는 롤아웃 중 큐볼이 포켓되거나 공이
+하나만 남으면 pooltool `System` 생성(cue ball id 누락) 또는 ball-ball 탐색(빈 pair 집합)에서
+예외로 죽는다. MBPO 롤아웃에서도 그대로 발생할 문제. 진단 스크립트에서는
+`CueSafeDetector`(테이블 밖 정지 더미 공으로 패딩)로 우회했고, `world_model/` 쪽 수정은 아직
+하지 않았다.
