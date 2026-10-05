@@ -2749,3 +2749,27 @@ traj 0.950 / rssm 0.962** (샷 결과를 이미 담고 있으므로 leak이 있�
 critic(AUC ~0.65)보다 잘 예측하는가"이며, 이는 R-SSM pocket head를 같은 데이터셋에 돌려
 비교하면 값싸게 확인할 수 있다. 별개로 truncation 처리/샷 순번 obs 수정은 세 방법 모두에
 영향을 주는 선결 문제다.
+
+### D4: R-SSM 자유 롤아웃의 pre-shot pocket 예측력 vs critic (2026-10-05 계획)
+
+**동기**: 위 D1–D3에서 병목은 "(s,a)→h 예측"으로 좁혀졌다. MBPO는 바로 이 예측을 R-SSM
+롤아웃(`RolloutEngine`: EventDetector가 이벤트 시점·종류를 해석적으로 계산, R-SSM이 충돌별
+Δvel 예측)으로 대신하는 방식이다. 그렇다면 MBPO로 갈 가치가 있는지는 "샷 전 상태 + 행동만
+주고 R-SSM을 자유 롤아웃시켰을 때 pocket을 critic(AUC ~0.62–0.65)보다 잘 맞히는가"로 값싸게
+판단할 수 있다. 기존 pocket head AUC 0.919는 **실제 이벤트를 teacher-forcing**한 h에서 측정한
+것이라 이 질문에 대한 답이 아니다.
+
+**방법**: D1과 같은 방식으로 시드별 3000샷 공통 데이터셋을 수집하되, 각 샷마다 샷 직전 공
+배치와 strike 직후 큐볼 rvw(`stick_ball` 이벤트)를 함께 저장. 같은 샷에 대해 아래 점수의
+pocket AUC를 비교한다(라벨 = `pocketed_this_step>0`).
+- 각 시드 vanilla/traj/rssm critic의 Q(s,a) (D1 재현)
+- R-SSM 롤아웃: (a) 롤아웃 안에서 타깃 공의 pocket 이벤트 발생 여부(개수),
+  (b) `predict_pocket(h)` — 롤아웃 이벤트를 따라가며 공별 first-touch h 기준, 타깃 공 중 최댓값
+- teacher-forced 참조: 실제 이벤트로 얻은 h의 `predict_pocket` (기존 0.919와 같은 방식, 상한선)
+- 0-파라미터 pre-shot 기하 baseline: 큐볼 진행 방향으로 처음 맞는 공을 찾고, 그 공이
+  중심선 방향으로 굴러갈 때 가장 가까운 포켓까지의 거리(가까울수록 높은 점수)
+
+**판단 기준**: 롤아웃 기반 점수가 critic Q보다 확실히 높으면(예: AUC +0.1 이상) R-SSM 롤아웃이
+critic이 못 배우는 physics를 제공한다는 뜻 → MBPO(또는 롤아웃 결과를 critic 입력으로 직접
+주는 방식)로 갈 근거. 기하 baseline과도 비교해, 이득이 R-SSM 학습 덕분인지 EventDetector의
+해석적 기하 계산 덕분인지 가른다.
