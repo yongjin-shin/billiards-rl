@@ -38,7 +38,7 @@ from sklearn.preprocessing import StandardScaler
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from simulator import BilliardsEnv, _extract_trajectory
-from exp16_wm.sac import VanillaSAC, WMSAC
+from exp16_wm.sac import GeomSAC, VanillaSAC, WMSAC
 from exp16_wm.train import ACT_HIGH, ACT_LOW, build_agent
 from world_model.event_detector import EventDetector
 from world_model.rssm_encode import load_frozen_rssm, real_event_steps
@@ -47,6 +47,8 @@ from world_model.rssm_rollout import RolloutEngine
 
 
 METHODS = ("vanilla", "traj", "rssm")
+# runs that exist only from the G/M experiments (2026-10-06~); pass via --methods
+EXTRA_METHODS = ("geom", "hmix")
 
 
 # ──────────────────────────────────────────────
@@ -101,14 +103,21 @@ def discounted_returns(rewards: list[float], gamma: float) -> np.ndarray:
 # ──────────────────────────────────────────────
 
 def find_run(method: str, seed: int, root: str = "logs/experiments") -> str:
-    """Latest best-ckpt-MA run dir for (method, seed) — 2026-10-02/03 batch."""
-    agent = "vanilla" if method == "vanilla" else "wm"
+    """
+    Latest best-ckpt-MA run dir for (method, seed): vanilla/traj/rssm from the
+    2026-10-02/03 batch, geom (Exp-16 G) and hmix (Exp-16 M, WM rssm + h mixing).
+    """
+    pattern = {"vanilla": "exp16_vanilla_multi3", "geom": "exp16_geom_multi3",
+               "hmix": "exp16_wm_hmix*_multi3"}.get(method, "exp16_wm_multi3")
+    date = "2026-10-0[23]" if method in METHODS else "2026-*"
     cands = []
-    for d in sorted(glob.glob(f"{root}/exp16_{agent}_multi3_ms5_s{seed}_2026-10-0[23]@*")):
+    for d in sorted(glob.glob(f"{root}/{pattern}_ms5_s{seed}_{date}@*")):
+        if not os.path.exists(os.path.join(d, "results.json")):
+            continue   # unfinished run
         cfg = json.load(open(os.path.join(d, "config.json")))
         if cfg.get("best_ckpt_window") is None:
             continue
-        if agent == "wm" and cfg.get("wm_target") != method:
+        if method in ("traj", "rssm") and cfg.get("wm_target") != method:
             continue
         cands.append(d)
     if not cands:
@@ -138,7 +147,7 @@ def critic_features(agent: VanillaSAC, obs: np.ndarray, act: np.ndarray) -> np.n
     o, a = agent._to_tensor(obs), agent._to_tensor(act)
     if isinstance(agent, WMSAC):
         return agent.critic.M1(o, a).flatten(1).cpu().numpy()
-    x = torch.cat([o, a], dim=-1)
+    x = agent.critic.inputs(o, a) if isinstance(agent, GeomSAC) else torch.cat([o, a], dim=-1)
     return agent.critic.Q1[:-1](x).cpu().numpy()
 
 
@@ -222,9 +231,10 @@ def within_step_pearson(q: np.ndarray, g: np.ndarray, t: np.ndarray, min_n: int 
 # Main
 # ──────────────────────────────────────────────
 
-def diagnose_seed(seed: int, n_shots: int, n_episodes: int) -> dict:
+def diagnose_seed(seed: int, n_shots: int, n_episodes: int,
+                  methods: tuple[str, ...] = METHODS) -> dict:
     agents, cfg = {}, None
-    for m in METHODS:
+    for m in methods:
         agents[m], cfg = load_agent(find_run(m, seed))
     env = make_env(cfg)
     env_plain = make_env(cfg); env_plain.wm_target = "none"
@@ -244,9 +254,10 @@ def diagnose_seed(seed: int, n_shots: int, n_episodes: int) -> dict:
         out[f"{m}_q_auc"] = safe_auc(q, y)
         out[f"{m}_q_reward_spearman"] = float(stats.spearmanr(q, data["reward"]).statistic)
         out[f"{m}_probe_feat"] = probe_auc(critic_features(ag, data["obs"], data["act"]), y)
-        if m != "vanilla":
+        if isinstance(ag, WMSAC):
+            target = "traj" if m == "traj" else "rssm"
             h_hat = critic_features(ag, data["obs"], data["act"])
-            out[f"{m}_h_r2"] = r2_score_flat(h_hat, data[f"h_{m}"].reshape(len(y), -1))
+            out[f"{m}_h_r2"] = r2_score_flat(h_hat, data[f"h_{target}"].reshape(len(y), -1))
         qv, gv, tv = own_policy_rollouts(ag, env_plain, n_episodes, cfg["gamma"], seed=2000 + seed)
         out[f"{m}_ret_pearson"] = float(stats.pearsonr(qv, gv).statistic)
         out[f"{m}_ret_spearman"] = float(stats.spearmanr(qv, gv).statistic)
@@ -434,13 +445,15 @@ def main() -> None:
     p.add_argument("--n-shots", type=int, default=3000)
     p.add_argument("--n-episodes", type=int, default=200)
     p.add_argument("--d4", action="store_true", help="run D4 (R-SSM rollout vs critic) instead")
+    p.add_argument("--methods", type=str, nargs="+", default=list(METHODS),
+                   choices=list(METHODS + EXTRA_METHODS))
     p.add_argument("--out", type=str, default="logs/diagnose_q.json")
     args = p.parse_args()
 
     results = []
     for s in args.seeds:
         r = (diagnose_seed_d4(s, args.n_shots) if args.d4
-             else diagnose_seed(s, args.n_shots, args.n_episodes))
+             else diagnose_seed(s, args.n_shots, args.n_episodes, tuple(args.methods)))
         print(json.dumps(r, indent=1), flush=True)
         results.append(r)
         json.dump(results, open(args.out, "w"), indent=1)

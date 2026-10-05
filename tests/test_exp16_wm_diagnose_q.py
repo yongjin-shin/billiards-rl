@@ -160,3 +160,19 @@ class TestCueSafeDetector:
         rvw = np.array([[0.5, 1.0, 0.028575], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]])
         res = det.next_collision({"cue": (rvw, pt.constants.stationary)})
         assert res.event_type == -1
+
+
+class TestGeomFeaturesAccess:
+    def test_geom_critic_hidden(self):
+        from exp16_wm.sac import GeomSAC
+        ag = GeomSAC(obs_dim=23, action_dim=2, act_low=ACT_LOW, act_high=ACT_HIGH, n_balls=3)
+        obs, act = np.random.rand(4, 23).astype(np.float32), np.random.rand(4, 2).astype(np.float32)
+        assert critic_features(ag, obs, act).shape == (4, 256)
+        assert critic_q(ag, obs, act).shape == (4,)
+
+
+class TestFindRun:
+    def test_unknown_seed_raises(self, tmp_path):
+        from exp16_wm.diagnose_q import find_run
+        with pytest.raises(FileNotFoundError):
+            find_run("geom", 0, root=str(tmp_path))
