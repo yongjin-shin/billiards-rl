@@ -197,3 +197,99 @@ class WorldModelCritic(nn.Module):
     def q_min(self, obs: torch.Tensor, action: torch.Tensor) -> torch.Tensor:
         q1, q2, _, _ = self.forward(obs, action)
         return torch.min(q1, q2)
+
+
+# ──────────────────────────────────────────────
+# GeomCritic  (Exp-16 G: pre-shot geometry features)
+# ──────────────────────────────────────────────
+
+TABLE_W, TABLE_L = 0.9906, 1.9812          # pt.Table.default() w, l (m)
+BALL_R           = 0.028575
+POCKET_CENTERS   = torch.tensor([
+    [-0.0294864, -0.0294864], [-0.0685, 0.9906], [-0.0294864, 2.0106864],
+    [ 1.0200864, -0.0294864], [ 1.0591,  0.9906], [ 1.0200864, 2.0106864],
+])                                          # pt.Table.default() pocket centers (m)
+GEOM_DIM         = 6
+_DIAG            = float(np.hypot(TABLE_W, TABLE_L))
+_NO_HIT          = (0.0, 1.0, 1.0, 1.0)     # (cos_cut, d_cue, miss, d_obj) sentinels, normalized
+
+
+def geom_features(obs: torch.Tensor, action: torch.Tensor, n_balls: int) -> torch.Tensor:
+    """
+    Straight-line pre-shot geometry, differentiable in `action` (the first-ball
+    choice is a discrete argmin; everything after it is continuous).
+
+    Uses the env's aim rule: phi = direction to nearest unpocketed ball + action[0].
+    Returns (B, GEOM_DIM): [hit, cos_cut, d_cue, miss, d_obj, speed], each ~[0, 1].
+      hit     — cue ray touches a remaining target ball
+      cos_cut — cos between cue direction and line of centers at contact
+      d_cue   — cue travel to contact            / table diagonal
+      miss    — closest approach of object-ball ray to any pocket / 0.5 m (clipped to 1)
+      d_obj   — object-ball travel to that pocket / table diagonal
+      speed   — action[1] rescaled from [0.5, 8] to [0, 1]
+    """
+    B, dev = obs.shape[0], obs.device
+    scale  = torch.tensor([TABLE_W, TABLE_L], device=dev)
+    cue    = obs[:, :2] * scale                                   # (B, 2)
+    balls  = obs[:, 2:2 + 3 * n_balls].view(B, n_balls, 3)
+    bpos   = balls[..., :2] * scale                               # (B, n, 2)
+    alive  = balls[..., 2] < 0.5                                  # (B, n)
+
+    rel    = bpos - cue[:, None]                                  # (B, n, 2)
+    dist   = rel.norm(dim=-1).masked_fill(~alive, float("inf"))
+    ref    = rel[torch.arange(B, device=dev), dist.argmin(dim=1)] # (B, 2)
+    ref    = torch.where(alive.any(1, keepdim=True), ref, torch.tensor([1.0, 0.0], device=dev))
+    phi    = torch.atan2(ref[:, 1], ref[:, 0]) + action[:, 0]
+    d      = torch.stack([torch.cos(phi), torch.sin(phi)], dim=-1)  # (B, 2)
+
+    proj   = (rel * d[:, None]).sum(-1)                           # (B, n)
+    perp2  = (rel * rel).sum(-1) - proj ** 2
+    valid  = alive & (proj > 0) & (perp2 < (2 * BALL_R) ** 2)
+    t_hit  = proj - torch.sqrt(torch.clamp((2 * BALL_R) ** 2 - perp2, min=1e-6))
+    idx    = t_hit.masked_fill(~valid, float("inf")).argmin(dim=1)
+    hit    = valid.any(dim=1)
+    ar     = torch.arange(B, device=dev)
+
+    obj     = bpos[ar, idx]                                       # (B, 2)
+    t_sel   = t_hit[ar, idx]
+    contact = cue + t_sel[:, None] * d
+    n       = obj - contact
+    n       = n / torch.clamp(n.norm(dim=-1, keepdim=True), min=1e-6)
+    cos_cut = (d * n).sum(-1)
+
+    pk      = POCKET_CENTERS.to(dev)
+    rel_p   = pk[None] - obj[:, None]                             # (B, 6, 2)
+    tp      = torch.clamp((rel_p * n[:, None]).sum(-1), min=0.0)  # (B, 6)
+    gap     = (pk[None] - (obj[:, None] + tp[..., None] * n[:, None])).norm(dim=-1)
+    pi      = gap.argmin(dim=1)
+    miss    = torch.clamp(gap[ar, pi] / 0.5, max=1.0)
+    d_obj   = tp[ar, pi] / _DIAG
+    d_cue   = t_sel / _DIAG
+
+    hit_vals = torch.stack([cos_cut, d_cue, miss, d_obj], dim=-1)
+    no_hit   = torch.tensor(_NO_HIT, device=dev).expand(B, 4)
+    body     = torch.where(hit[:, None], hit_vals, no_hit)
+    speed    = (action[:, 1:2] - 0.5) / 7.5
+    return torch.cat([hit[:, None].float(), body, speed], dim=-1)
+
+
+class GeomCritic(nn.Module):
+    """Twin Q over [obs, action, geom_features(obs, action)]."""
+
+    def __init__(self, obs_dim: int, action_dim: int, n_balls: int,
+                 hidden: list[int] = [256, 256]):
+        super().__init__()
+        self.n_balls = n_balls
+        self.Q1 = _mlp(obs_dim + action_dim + GEOM_DIM, 1, hidden)
+        self.Q2 = _mlp(obs_dim + action_dim + GEOM_DIM, 1, hidden)
+
+    def inputs(self, obs: torch.Tensor, action: torch.Tensor) -> torch.Tensor:
+        return torch.cat([obs, action, geom_features(obs, action, self.n_balls)], dim=-1)
+
+    def forward(self, obs: torch.Tensor, action: torch.Tensor):
+        x = self.inputs(obs, action)
+        return self.Q1(x), self.Q2(x)
+
+    def q_min(self, obs: torch.Tensor, action: torch.Tensor) -> torch.Tensor:
+        q1, q2 = self.forward(obs, action)
+        return torch.min(q1, q2)

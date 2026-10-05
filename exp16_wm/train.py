@@ -26,7 +26,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from simulator import BilliardsEnv, TRAJ_MAX_EVENTS, TRAJ_EVENT_DIM, DEFAULT_RSSM_CHECKPOINT
 from train import _tee_output
 from exp16_wm.buffer import ReplayBuffer, TrajectoryReplayBuffer
-from exp16_wm.sac import VanillaSAC, WMSAC
+from exp16_wm.sac import GeomSAC, VanillaSAC, WMSAC
 from world_model.rssm_model import H_DIM
 
 
@@ -47,7 +47,7 @@ def get_obs_dim(n_balls: int) -> int:
 def parse_args():
     p = argparse.ArgumentParser()
     p.add_argument("--agent",           type=str,   default="vanilla",
-                   choices=["vanilla", "wm"])
+                   choices=["vanilla", "wm", "geom"])
     p.add_argument("--seed",            type=int,   default=0)
     p.add_argument("--n-envs",          type=int,   default=10)
     p.add_argument("--total-steps",     type=int,   default=1_000_000)
@@ -74,6 +74,10 @@ def parse_args():
     p.add_argument("--wm-coef",         type=float, default=1.0)
     p.add_argument("--wm-target",       type=str,   default="traj",
                    choices=["traj", "rssm"])
+    p.add_argument("--h-mix-start",     type=float, default=0.0,
+                   help="WM only: initial prob. q reads real h instead of ĥ (Exp-16 M)")
+    p.add_argument("--h-mix-steps",     type=int,   default=1_000_000,
+                   help="WM only: env steps over which h-mix prob decays linearly to 0")
     return p.parse_args()
 
 
@@ -82,6 +86,13 @@ def wm_dims(args) -> tuple[int, int]:
     if args.wm_target == "rssm":
         return args.n_balls + 1, H_DIM   # +1 for cue
     return TRAJ_MAX_EVENTS, TRAJ_EVENT_DIM
+
+
+def h_mix_prob(step: int, start: float, decay_steps: int) -> float:
+    """Linear decay start → 0 over decay_steps env steps, then 0."""
+    if start <= 0.0 or decay_steps <= 0:
+        return 0.0
+    return max(0.0, start * (1.0 - step / decay_steps))
 
 
 def update_best_ma(history: list[float], new_value: float, window: int,
@@ -107,6 +118,18 @@ def update_best_ma(history: list[float], new_value: float, window: int,
 
 def build_agent(args):
     obs_dim = get_obs_dim(args.n_balls)
+    if args.agent == "geom":
+        return GeomSAC(
+            obs_dim    = obs_dim,
+            action_dim = ACTION_DIM,
+            act_low    = ACT_LOW,
+            act_high   = ACT_HIGH,
+            n_balls    = args.n_balls,
+            lr         = args.lr,
+            tau        = args.tau,
+            gamma      = args.gamma,
+            device     = args.device,
+        )
     if args.agent == "vanilla":
         return VanillaSAC(
             obs_dim    = obs_dim,
@@ -137,7 +160,7 @@ def build_agent(args):
 
 def build_buffer(args):
     obs_dim = get_obs_dim(args.n_balls)
-    if args.agent == "vanilla":
+    if args.agent != "wm":
         return ReplayBuffer(obs_dim, ACTION_DIM, args.buffer_size)
     else:
         max_events, event_dim = wm_dims(args)
@@ -153,7 +176,8 @@ def build_buffer(args):
 def make_exp_dir(args) -> str:
     ts      = time.strftime("%Y-%m-%d@%H%M")
     env_tag = f"_multi{args.n_balls}_ms{args.max_steps}" if args.n_balls > 1 else ""
-    name    = f"exp16_{args.agent}{env_tag}_s{args.seed}_{ts}"
+    mix_tag = f"_hmix{args.h_mix_start:g}" if args.agent == "wm" and getattr(args, "h_mix_start", 0.0) > 0 else ""
+    name    = f"exp16_{args.agent}{mix_tag}{env_tag}_s{args.seed}_{ts}"
     path = os.path.join("logs", "experiments", name)
     os.makedirs(os.path.join(path, "eval"),       exist_ok=True)
     os.makedirs(os.path.join(path, "best_model"), exist_ok=True)
@@ -199,6 +223,8 @@ def _train_inner(args, exp_dir):
         "trunc_penalty":   args.trunc_penalty,
         "wm_coef":         args.wm_coef,
         "wm_target":       args.wm_target,
+        "h_mix_start":     args.h_mix_start,
+        "h_mix_steps":     args.h_mix_steps,
         "exp_dir":         exp_dir,
         "timestamp":       time.strftime("%Y-%m-%dT%H:%M:%S"),
     }
@@ -344,6 +370,8 @@ def _train_inner(args, exp_dir):
 
         # ── update ─────────────────────────────────────────────────────────
         if total_steps >= args.learning_starts and len(buffer) >= args.batch_size:
+            if args.agent == "wm":
+                agent.h_mix_p = h_mix_prob(total_steps, args.h_mix_start, args.h_mix_steps)
             for _ in range(args.gradient_steps):
                 batch   = buffer.sample(args.batch_size)
                 metrics = agent.update(batch)
