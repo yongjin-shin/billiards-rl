@@ -2881,3 +2881,10 @@ teacher-forcing으로만 평가되어 왔다.
 - 코드: `exp16_wm/networks.py`(GeomCritic, `geom_features`), `exp16_wm/sac.py`(GeomSAC,
   WMSAC h-mix), `exp16_wm/train.py`(CLI), 테스트 `tests/test_exp16_wm_geom.py`,
   `tests/test_exp16_wm_hmix.py`.
+
+**실행 상태 (2026-10-06, 사용자 요청으로 중단)**: G/M 구현·테스트·스모크런 완료(커밋됨) 후 G
+seed 0부터 순차 실행했으나, Mac이 과열 비상(`Dark Wake Thermal Emergency`, AC 연결인데
+배터리 0%)으로 15~20분마다 강제 잠자기에 들어가 학습이 실효 4~5배 느려졌다(깨어 있는 구간은
+정상 ~600fps). 두 번의 G seed 0 부분 런(781k, 705k step)은 완료 전에 중단 —
+`exp16_geom_multi3_ms5_s0_2026-10-06@{0024_ABORTED_slow,0352_ABORTED_stopped}`, 분석에서
+제외. G/M 결과 없음. 하드웨어 상태(덮개/통풍/충전기) 해결 후 동일 설정으로 재실행 필요.
