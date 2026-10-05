@@ -104,3 +104,59 @@ class TestWithinStepPearson:
 
     def test_too_few_samples_is_nan(self):
         assert np.isnan(within_step_pearson(np.arange(5.0), np.arange(5.0), np.zeros(5), min_n=20))
+
+
+from exp16_wm.diagnose_q import geometric_preshot_score, target_max
+
+POCKETS = np.array([[0.0, 0.0], [1.0, 0.0], [0.0, 1.0], [1.0, 1.0], [0.0, 2.0], [1.0, 2.0]])
+
+
+class TestGeometricPreshot:
+    def test_straight_in_shot_scores_near_zero(self):
+        # cue → ball → corner pocket all on one diagonal line
+        s = geometric_preshot_score(np.array([0.5, 0.5]), np.array([1.0, 1.0]),
+                                    {"1": np.array([0.7, 0.7])}, POCKETS)
+        assert s == pytest.approx(0.0, abs=1e-6)
+
+    def test_miss_all_balls(self):
+        s = geometric_preshot_score(np.array([0.5, 0.5]), np.array([-1.0, 0.0]),
+                                    {"1": np.array([0.7, 0.7])}, POCKETS)
+        assert s == -10.0
+
+    def test_zero_velocity_edge_case(self):
+        assert geometric_preshot_score(np.array([0.5, 0.5]), np.zeros(2),
+                                       {"1": np.array([0.7, 0.7])}, POCKETS) == -10.0
+
+    def test_picks_first_ball_on_ray(self):
+        # nearer ball sits straight in line with a pocket; farther one does not
+        near = geometric_preshot_score(np.array([0.5, 0.5]), np.array([1.0, 1.0]),
+                                       {"1": np.array([0.7, 0.7]), "2": np.array([0.85, 0.86])}, POCKETS)
+        assert near == pytest.approx(0.0, abs=1e-6)
+
+
+class TestTargetMax:
+    def test_max_over_targets_only(self):
+        assert target_max({0: 0.9, 1: 0.2, 2: 0.6}, [1, 2]) == 0.6
+
+    def test_untouched_targets_are_zero(self):
+        assert target_max({0: 0.9}, [1, 2]) == 0.0
+
+
+class TestCueSafeDetector:
+    def _detector(self):
+        import pooltool as pt
+        from exp16_wm.diagnose_q import CueSafeDetector
+        return CueSafeDetector(pt.Table.default(), pt.Cue.default()), pt
+
+    def test_single_moving_target_without_cue(self):
+        # cue already pocketed, one ball rolling toward a cushion: must not raise
+        det, pt = self._detector()
+        rvw = np.array([[0.5, 1.0, 0.028575], [0.0, 1.0, 0.0], [0.0, 0.0, 0.0]])
+        res = det.next_collision({"1": (rvw, pt.constants.sliding)})
+        assert res.event_type != 0  # never a ball-ball with the parked padding
+
+    def test_all_stationary_returns_no_event(self):
+        det, pt = self._detector()
+        rvw = np.array([[0.5, 1.0, 0.028575], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]])
+        res = det.next_collision({"cue": (rvw, pt.constants.stationary)})
+        assert res.event_type == -1

@@ -32,19 +32,11 @@ def load_frozen_rssm(checkpoint_path: str, device: str = "cpu") -> RSSMModel:
     return model
 
 
-@torch.no_grad()
-def encode_shot_to_latent(
-    model: RSSMModel,
+def real_event_steps(
     system: "pooltool.System",
     ball_ids: list[str],
-) -> list[torch.Tensor]:
-    """
-    Run a frozen R-SSM, teacher-forced, over the real events of an already-
-    simulated shot. Returns the final per-ball latent (h_final).
-
-    Shots with no tracked events (e.g. a complete miss) return the
-    zero-initialised latent unchanged (model.init_hidden).
-    """
+) -> list[EventStep]:
+    """The real events of an already-simulated shot as R-SSM EventSteps (with node/edge features)."""
     shot = generate_shot_data(system, ball_ids)
 
     events: list[EventStep] = []
@@ -68,5 +60,22 @@ def encode_shot_to_latent(
             normal     = ev.normal,
         ))
 
+    return events
+
+
+@torch.no_grad()
+def encode_shot_to_latent(
+    model: RSSMModel,
+    system: "pooltool.System",
+    ball_ids: list[str],
+) -> list[torch.Tensor]:
+    """
+    Run a frozen R-SSM, teacher-forced, over the real events of an already-
+    simulated shot. Returns the final per-ball latent (h_final).
+
+    Shots with no tracked events (e.g. a complete miss) return the
+    zero-initialised latent unchanged (model.init_hidden).
+    """
+    events = real_event_steps(system, ball_ids)
     out = model.forward(len(ball_ids), events)
     return out.h_final

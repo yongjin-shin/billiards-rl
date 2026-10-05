@@ -26,6 +26,7 @@ from types import SimpleNamespace
 from typing import Callable
 
 import numpy as np
+import pooltool as pt
 import torch
 from scipy import stats
 from sklearn.linear_model import LogisticRegression
@@ -39,6 +40,10 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from simulator import BilliardsEnv, _extract_trajectory
 from exp16_wm.sac import VanillaSAC, WMSAC
 from exp16_wm.train import ACT_HIGH, ACT_LOW, build_agent
+from world_model.event_detector import EventDetector
+from world_model.rssm_encode import load_frozen_rssm, real_event_steps
+from world_model.rssm_model import EVENT_BALL_BALL, EVENT_POCKET
+from world_model.rssm_rollout import RolloutEngine
 
 
 METHODS = ("vanilla", "traj", "rssm")
@@ -252,17 +257,190 @@ def diagnose_seed(seed: int, n_shots: int, n_episodes: int) -> dict:
     return out
 
 
+# ──────────────────────────────────────────────
+# D4 — pre-shot pocket prediction: R-SSM free rollout vs critic
+# ──────────────────────────────────────────────
+
+BALL_R = 0.028575
+
+
+def preshot_balls(system) -> dict[str, tuple[np.ndarray, int]]:
+    """Balls still on the table before a shot, as {id: (rvw, state)} with zero velocity."""
+    out = {}
+    for bid, ball in system.balls.items():
+        if ball.state.s == pt.constants.pocketed:
+            continue
+        rvw = ball.state.rvw.copy()
+        rvw[1:] = 0.0
+        out[bid] = (rvw, pt.constants.stationary)
+    return out
+
+
+def poststrike_cue_rvw(system) -> np.ndarray:
+    """Cue rvw right after the stick hit, read from the shot's `stick_ball` event."""
+    ev = next(e for e in system.events if str(e.event_type) == "stick_ball")
+    cue = next(a for a in ev.agents if getattr(a, "agent_type", "") == "ball")
+    return np.array([cue.initial.state.rvw[0], list(cue.final.vel), list(cue.final.avel)],
+                    dtype=np.float64)
+
+
+def geometric_preshot_score(cue_pos: np.ndarray, cue_vel: np.ndarray,
+                            targets: dict[str, np.ndarray], pockets: np.ndarray,
+                            r: float = BALL_R) -> float:
+    """
+    Zero-parameter pre-shot baseline: straight cue ray → first target ball hit →
+    that ball leaves along the line of centers → -(closest approach to any pocket).
+    No friction, cushions or spin. Misses every ball → -10.
+    """
+    speed = np.linalg.norm(cue_vel[:2])
+    if speed < 1e-9:
+        return -10.0
+    d = cue_vel[:2] / speed
+    best_t, best_pos = np.inf, None
+    for pos in targets.values():
+        rel = pos[:2] - cue_pos[:2]
+        proj = float(rel @ d)
+        perp2 = float(rel @ rel) - proj ** 2
+        if proj <= 0 or perp2 >= (2 * r) ** 2:
+            continue
+        t_hit = proj - np.sqrt((2 * r) ** 2 - perp2)
+        if t_hit < best_t:
+            best_t, best_pos = t_hit, pos[:2]
+    if best_pos is None:
+        return -10.0
+    n = best_pos - (cue_pos[:2] + best_t * d)
+    n = n / np.linalg.norm(n)
+    rel = pockets - best_pos
+    t = np.clip(rel @ n, 0.0, None)
+    return -float(np.min(np.linalg.norm(pockets - (best_pos + t[:, None] * n), axis=1)))
+
+
+@torch.no_grad()
+def first_touch_pocket_probs(model, n_balls: int, events: list) -> dict[int, float]:
+    """Teacher-force `events` through R-SSM; pocket prob of each ball at its first event."""
+    h = model.init_hidden(n_balls)
+    probs: dict[int, float] = {}
+    for ev in events:
+        if ev.event_type == EVENT_BALL_BALL and ev.ball_j is not None:
+            h, *_ = model.step_ball_ball(h, ev.ball_i, ev.ball_j, ev.node_i, ev.node_j, ev.edge)
+        else:
+            h, *_ = model.step_single(h, ev.ball_i, ev.node_i, ev.normal)
+        for b in (ev.ball_i, ev.ball_j):
+            if b is not None and b not in probs:
+                probs[b] = float(model.predict_pocket(h[b].unsqueeze(0)).item())
+    return probs
+
+
+def target_max(probs: dict[int, float], target_idx: list[int]) -> float:
+    """Shot-level score = most pocket-likely target ball; untouched balls count as 0."""
+    return max([probs.get(i, 0.0) for i in target_idx] + [0.0])
+
+
+class CueSafeDetector(EventDetector):
+    """
+    EventDetector builds a pooltool System per query, which needs the cue ball
+    present and at least two balls (pooltool's ball-ball search fails on an empty
+    pair set). Once a rollout pockets the cue or all but one ball, pad with
+    stationary balls parked far off the table — they never take part in an event.
+    """
+
+    _FAR = np.array([[-50.0, -50.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]])
+
+    def next_event(self, balls: dict):
+        padded = dict(balls)
+        if "cue" not in padded:
+            padded["cue"] = (self._FAR.copy(), pt.constants.stationary)
+        if len(padded) < 2:
+            far = self._FAR.copy(); far[0, 0] -= 10.0
+            padded["_pad"] = (far, pt.constants.stationary)
+        return super().next_event(padded)
+
+
+def collect_d4_dataset(env: BilliardsEnv, policies: list[Callable[[np.ndarray], np.ndarray]],
+                       n_shots: int, seed: int, rssm_model) -> dict[str, np.ndarray]:
+    """Like collect_shared_dataset, plus R-SSM rollout / teacher-forced / geometric scores per shot."""
+    ball_ids = ["cue"] + env._ball_ids
+    pockets = np.array([p.center[:2] for p in env.table.pockets.values()])
+    rng = np.random.default_rng(seed)
+    keys = ("obs", "act", "label", "rollout_n_pocket", "rollout_head", "tf_head", "geom")
+
+    # After a scratch the env rebuilds `system` (ball-in-hand), dropping this shot's
+    # events — snapshot the simulated system right before that happens.
+    shot_system: dict = {}
+    respawn = env._respawn_cue
+    def _snapshot_then_respawn() -> None:
+        shot_system["sys"] = env.system
+        respawn()
+    env._respawn_cue = _snapshot_then_respawn
+
+    rows: dict[str, list] = {k: [] for k in keys}
+    env.reset(seed=seed)
+    while len(rows["label"]) < n_shots:
+        obs, _ = env.reset()
+        policy = policies[rng.integers(len(policies))]
+        done = False
+        while not done and len(rows["label"]) < n_shots:
+            pre = preshot_balls(env.system)
+            a = behaviour_action(policy(obs), rng)
+            shot_system.clear()
+            next_obs, _, term, trunc, info = env.step(a)
+            sim = shot_system.get("sys", env.system)
+
+            cue_rvw = poststrike_cue_rvw(sim)
+            balls = dict(pre); balls["cue"] = (cue_rvw, pt.constants.sliding)
+            target_idx = [ball_ids.index(b) for b in pre if b != "cue"]
+            engine = RolloutEngine(rssm_model, CueSafeDetector(sim.table, sim.cue), ball_ids)
+            with torch.no_grad():
+                res = engine.run(balls)
+            rows["rollout_n_pocket"].append(sum(
+                1 for ev in res.event_steps if ev.event_type == EVENT_POCKET and ev.ball_i in target_idx))
+            rows["rollout_head"].append(target_max(
+                first_touch_pocket_probs(rssm_model, len(ball_ids), res.event_steps), target_idx))
+            rows["tf_head"].append(target_max(first_touch_pocket_probs(
+                rssm_model, len(ball_ids), real_event_steps(sim, ball_ids)), target_idx))
+            rows["geom"].append(geometric_preshot_score(
+                cue_rvw[0], cue_rvw[1], {b: v[0][0] for b, v in pre.items() if b != "cue"}, pockets))
+            rows["obs"].append(obs); rows["act"].append(a)
+            rows["label"].append(int(info["pocketed_this_step"] > 0))
+            obs, done = next_obs, term or trunc
+    return {k: np.asarray(v, dtype=np.float32) for k, v in rows.items()}
+
+
+def diagnose_seed_d4(seed: int, n_shots: int) -> dict:
+    agents, cfg = {}, None
+    for m in METHODS:
+        agents[m], cfg = load_agent(find_run(m, seed))
+    env = make_env(cfg); env.wm_target = "none"
+    rssm_model = load_frozen_rssm(env.rssm_checkpoint)
+    data = collect_d4_dataset(
+        env, [lambda o, ag=ag: ag.act(o, deterministic=True) for ag in agents.values()],
+        n_shots, seed=3000 + seed, rssm_model=rssm_model,
+    )
+    env.close()
+    y = data["label"]
+    out: dict = {"seed": seed, "n_shots": len(y), "pocket_frac": float(y.mean())}
+    for m, ag in agents.items():
+        out[f"{m}_q_auc"] = safe_auc(critic_q(ag, data["obs"], data["act"]), y)
+    for k in ("rollout_n_pocket", "rollout_head", "tf_head", "geom"):
+        out[f"{k}_auc"] = safe_auc(data[k], y)
+    out["rollout_pocket_any_acc"] = float(((data["rollout_n_pocket"] > 0) == (y > 0)).mean())
+    out["rollout_pocket_any_rate"] = float((data["rollout_n_pocket"] > 0).mean())
+    return out
+
+
 def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--seeds", type=int, nargs="+", default=[0, 1, 2, 3])
     p.add_argument("--n-shots", type=int, default=3000)
     p.add_argument("--n-episodes", type=int, default=200)
+    p.add_argument("--d4", action="store_true", help="run D4 (R-SSM rollout vs critic) instead")
     p.add_argument("--out", type=str, default="logs/diagnose_q.json")
     args = p.parse_args()
 
     results = []
     for s in args.seeds:
-        r = diagnose_seed(s, args.n_shots, args.n_episodes)
+        r = (diagnose_seed_d4(s, args.n_shots) if args.d4
+             else diagnose_seed(s, args.n_shots, args.n_episodes))
         print(json.dumps(r, indent=1), flush=True)
         results.append(r)
         json.dump(results, open(args.out, "w"), indent=1)
