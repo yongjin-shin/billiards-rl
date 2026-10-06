@@ -2888,3 +2888,15 @@ seed 0부터 순차 실행했으나, Mac이 과열 비상(`Dark Wake Thermal Eme
 정상 ~600fps). 두 번의 G seed 0 부분 런(781k, 705k step)은 완료 전에 중단 —
 `exp16_geom_multi3_ms5_s0_2026-10-06@{0024_ABORTED_slow,0352_ABORTED_stopped}`, 분석에서
 제외. G/M 결과 없음. 하드웨어 상태(덮개/통풍/충전기) 해결 후 동일 설정으로 재실행 필요.
+
+**재실행 계획 (2026-10-06)**: Mac mini 대신 로컬 CPU 서버에서 **기준선 포함 전 arm을 동일 환경으로
+다시 실행**한다 — 하드웨어/환경이 바뀌면 수치가 완전히 재현되지 않으므로, 비교 대상(vanilla,
+rssm)도 같은 서버에서 다시 돌려야 공정하다. 서버가 Mac mini보다 느리므로 런당 시간은 더 길어질
+것으로 예상.
+- arm: `vanilla`, `rssm`(기존 WM 기준선), `geom`(G), `hmix`(M) × seed 0–3 = 16런.
+  (`traj`는 선택 — 이전 결과에서 rssm과 유의차 없음.)
+- 실행: `ARMS="vanilla rssm geom hmix" SEEDS="0 1 2 3" PARALLEL=<코어수/11> bash exp16_wm/run_grid.sh`
+  — 설정은 기존 12런과 동일, `--n-envs 10` 고정(update-to-data 비율 유지).
+- 이식성 정리: R-SSM 체크포인트 `world_model/results/rssm_v9_ls01_3ball/best.pt`(2.4MB)를 git에
+  포함(`.gitignore` 예외로 강제 추가), `requirements.txt`에 wandb/scipy/scikit-learn/pytest 추가,
+  `diagnose_q.find_run`의 날짜 필터 제거(서버 런도 탐색).

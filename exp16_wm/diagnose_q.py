@@ -104,14 +104,14 @@ def discounted_returns(rewards: list[float], gamma: float) -> np.ndarray:
 
 def find_run(method: str, seed: int, root: str = "logs/experiments") -> str:
     """
-    Latest best-ckpt-MA run dir for (method, seed): vanilla/traj/rssm from the
-    2026-10-02/03 batch, geom (Exp-16 G) and hmix (Exp-16 M, WM rssm + h mixing).
+    Latest finished best-ckpt-MA run dir for (method, seed): vanilla/traj/rssm,
+    geom (Exp-16 G) and hmix (Exp-16 M, WM rssm + h mixing). Aborted dirs
+    (suffix after the timestamp) and runs without results.json are skipped.
     """
     pattern = {"vanilla": "exp16_vanilla_multi3", "geom": "exp16_geom_multi3",
                "hmix": "exp16_wm_hmix*_multi3"}.get(method, "exp16_wm_multi3")
-    date = "2026-10-0[23]" if method in METHODS else "2026-*"
     cands = []
-    for d in sorted(glob.glob(f"{root}/{pattern}_ms5_s{seed}_{date}@*")):
+    for d in sorted(glob.glob(f"{root}/{pattern}_ms5_s{seed}_*@*")):
         if not os.path.exists(os.path.join(d, "results.json")):
             continue   # unfinished run
         cfg = json.load(open(os.path.join(d, "config.json")))
