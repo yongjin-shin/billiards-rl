@@ -2988,7 +2988,8 @@ rate(참고). 학습 곡선에서 후반 하락 여부(peak MA vs 후반 30% 평
 **코드**: `exp16_wm/train.py`, `exp16_wm/run_grid.sh`, 테스트 `tests/test_exp16_wm_train.py`.
 브랜치 `feature/exp16-clear-speed-reward`, `dev`로만 머지.
 
-**결과**: 4시드 완료 후 TBD. 아래는 seed 0 중간 기록.
+**결과**: 4시드 완료 후 TBD. 아래는 seed 0 중간 기록. **(2026-10-09 계획 변경)** 엔트로피 실험과 seed 0 하나씩 먼저 비교하기로 해서
+seed 1은 820k step에서 중단했다(`exp16_vanilla_multi3_ms30_s1_2026-10-09@0741_ABORTED_stopped`, 분석 제외). seed 1~3은 필요하면 나중에.
 
 **seed 0 (2026-10-09, `exp16_vanilla_multi3_ms30_s0_2026-10-09@0639`, 61.7분)**: best ckpt 500게임 — 평균
 7.89샷(다 넣은 게임 7.81), clear 99.6%, mean reward −5.73, 첫 5샷 pocket 64.2%(참고: 예전 5샷 설정 vanilla 63%).
@@ -3110,8 +3111,9 @@ RL도 이 상태에 빠질 수 있고, obs는 좌표를 [0, 1]로 잘라서 보�
 
 **설정**: vanilla clear와 동일(`--n-balls 3 --max-steps 30 --step-penalty 1.0 --trunc-penalty 0 --total-steps 2000000
 --n-envs 10 --learning-starts 5000 --eval-freq 5000 --eval-episodes 50 --best-ckpt-window 5 --best-ckpt-metric
-mean_reward`) + `--target-entropy -2 --target-entropy-end -7 --target-entropy-steps 1000000`. seed 0~3, vanilla clear
-4시드가 끝난 뒤 순차 실행.
+mean_reward`) + `--target-entropy -2 --target-entropy-end -7 --target-entropy-steps 1000000`.
+**실행 계획 변경(2026-10-09)**: 4시드 대신 먼저 vanilla clear와 **같은 seed 0 하나만** 1:1로 비교한다(사용자 결정 —
+방향부터 빠르게 확인). 효과가 보이면 시드를 늘린다. 2026-10-09 08:05 시작.
 
 **지표**: 평균 샷 수(주 지표, vanilla clear와 시드별 paired 비교), 샷당 성공률, 학습 곡선. 정책 분석: 속도 분포(7m/s대에서
 내려오는가), ghost-ball 정답 각도와의 오차, 학습 중 조준 흔들림 std.
