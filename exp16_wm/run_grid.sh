@@ -16,8 +16,11 @@ ARMS=${ARMS:-"vanilla rssm geom hmix"}
 SEEDS=${SEEDS:-"0 1 2 3"}
 PARALLEL=${PARALLEL:-1}
 PY=${PY:-python}
-COMMON="--n-balls 3 --max-steps 5 --step-penalty 0.1 --trunc-penalty 1.0 --total-steps 2000000 \
---n-envs 10 --learning-starts 5000 --eval-freq 1000 --eval-episodes 50 --best-ckpt-window 5"
+# COMMON / TAG can be overridden, e.g. the clear-speed task (2026-10-08):
+#   TAG=_clear COMMON="--n-balls 3 --max-steps 30 --step-penalty 1.0 --trunc-penalty 0 ..." bash exp16_wm/run_grid.sh
+COMMON=${COMMON:-"--n-balls 3 --max-steps 5 --step-penalty 0.1 --trunc-penalty 1.0 --total-steps 2000000 \
+--n-envs 10 --learning-starts 5000 --eval-freq 1000 --eval-episodes 50 --best-ckpt-window 5"}
+TAG=${TAG:-}
 
 arm_args() {
   case "$1" in
@@ -33,15 +36,15 @@ arm_args() {
 run_one() {
   local arm=$1 seed=$2 args
   args=$(arm_args "$arm") || exit 1
-  echo "start $arm s$seed $(date '+%F %T')" >> logs/runs/grid.log
-  if $PY -u -m exp16_wm.train $args --seed "$seed" $COMMON > "logs/runs/${arm}_s${seed}.log" 2>&1; then
-    echo "done  $arm s$seed $(date '+%F %T')" >> logs/runs/grid.log
+  echo "start $arm$TAG s$seed $(date '+%F %T')" >> logs/runs/grid.log
+  if $PY -u -m exp16_wm.train $args --seed "$seed" $COMMON > "logs/runs/${arm}${TAG}_s${seed}.log" 2>&1; then
+    echo "done  $arm$TAG s$seed $(date '+%F %T')" >> logs/runs/grid.log
   else
-    echo "FAIL  $arm s$seed $(date '+%F %T')" >> logs/runs/grid.log
+    echo "FAIL  $arm$TAG s$seed $(date '+%F %T')" >> logs/runs/grid.log
   fi
 }
 export -f run_one arm_args
-export PY COMMON
+export PY COMMON TAG
 
 mkdir -p logs/runs
 for s in $SEEDS; do for a in $ARMS; do echo "$a $s"; done; done \
