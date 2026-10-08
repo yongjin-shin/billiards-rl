@@ -66,6 +66,12 @@ def parse_args():
                    choices=list(CKPT_METRICS),
                    help="eval metric whose moving average picks best_model "
                         "(mean_reward when pocket rate saturates, e.g. large --max-steps)")
+    p.add_argument("--target-entropy",  type=float, default=None,
+                   help="SAC target entropy (tanh space); default -action_dim")
+    p.add_argument("--target-entropy-end",   type=float, default=None,
+                   help="if set, anneal target entropy linearly to this value")
+    p.add_argument("--target-entropy-steps", type=int,   default=1_000_000,
+                   help="env steps over which target entropy anneals, then held")
     p.add_argument("--device",          type=str,   default="cpu")
     p.add_argument("--wandb-project",   type=str,   default="billiards-rl-exp16")
     p.add_argument("--no-wandb",        action="store_true")
@@ -100,6 +106,14 @@ def h_mix_prob(step: int, start: float, decay_steps: int) -> float:
 
 
 CKPT_METRICS = ("pocket_rate", "mean_reward")
+
+
+def target_entropy_at(step: int, start: float, end: float | None, anneal_steps: int) -> float:
+    """Linear start → end over anneal_steps env steps, then held at end (end=None → constant start)."""
+    if end is None or anneal_steps <= 0:
+        return start if end is None else end
+    frac = min(1.0, max(0.0, step / anneal_steps))
+    return start + (end - start) * frac
 
 
 def initial_best_ckpt(metric: str) -> float:
@@ -227,7 +241,11 @@ def make_exp_dir(args) -> str:
     ts      = time.strftime("%Y-%m-%d@%H%M")
     env_tag = f"_multi{args.n_balls}_ms{args.max_steps}" if args.n_balls > 1 else ""
     mix_tag = f"_hmix{args.h_mix_start:g}" if args.agent == "wm" and getattr(args, "h_mix_start", 0.0) > 0 else ""
-    name    = f"exp16_{args.agent}{mix_tag}{env_tag}_s{args.seed}_{ts}"
+    ent_tag = ""
+    if getattr(args, "target_entropy", None) is not None or getattr(args, "target_entropy_end", None) is not None:
+        ent_start = args.target_entropy if args.target_entropy is not None else -float(ACTION_DIM)
+        ent_tag = f"_ent{ent_start:g}" + (f"to{args.target_entropy_end:g}" if args.target_entropy_end is not None else "")
+    name    = f"exp16_{args.agent}{mix_tag}{ent_tag}{env_tag}_s{args.seed}_{ts}"
     path = os.path.join("logs", "experiments", name)
     os.makedirs(os.path.join(path, "eval"),       exist_ok=True)
     os.makedirs(os.path.join(path, "best_model"), exist_ok=True)
@@ -276,6 +294,9 @@ def _train_inner(args, exp_dir):
         "wm_target":       args.wm_target,
         "h_mix_start":     args.h_mix_start,
         "h_mix_steps":     args.h_mix_steps,
+        "target_entropy":       args.target_entropy,
+        "target_entropy_end":   args.target_entropy_end,
+        "target_entropy_steps": args.target_entropy_steps,
         "exp_dir":         exp_dir,
         "timestamp":       time.strftime("%Y-%m-%dT%H:%M:%S"),
     }
@@ -305,6 +326,9 @@ def _train_inner(args, exp_dir):
           f"  learning_starts={args.learning_starts:,}")
     print(f"  eval_freq={args.eval_freq:,}  eval_episodes={args.eval_episodes}"
           f"  best_ckpt={args.best_ckpt_metric} ma({args.best_ckpt_window})")
+    if args.target_entropy is not None or args.target_entropy_end is not None:
+        print(f"  target_entropy={args.target_entropy}  → end={args.target_entropy_end}"
+              f"  over {args.target_entropy_steps:,} steps")
     print(f"  exp_dir: {exp_dir}")
     print(f"{'═' * W}")
 
@@ -341,6 +365,8 @@ def _train_inner(args, exp_dir):
     # ── agent & buffer ────────────────────────
     print(f"  [3/4] Building {args.agent} agent ...", end=" ", flush=True)
     agent  = build_agent(args)
+    ent_start = args.target_entropy if args.target_entropy is not None else agent.target_entropy
+    agent.target_entropy = ent_start
     n_params = sum(p.numel() for p in agent.actor.parameters()) + \
                sum(p.numel() for p in agent.critic.parameters())
     print(f"done  ({n_params:,} params  device={args.device})")
@@ -426,6 +452,9 @@ def _train_inner(args, exp_dir):
         if total_steps >= args.learning_starts and len(buffer) >= args.batch_size:
             if args.agent == "wm":
                 agent.h_mix_p = h_mix_prob(total_steps, args.h_mix_start, args.h_mix_steps)
+            if args.target_entropy_end is not None:
+                agent.target_entropy = target_entropy_at(total_steps, ent_start,
+                                                         args.target_entropy_end, args.target_entropy_steps)
             for _ in range(args.gradient_steps):
                 batch   = buffer.sample(args.batch_size)
                 metrics = agent.update(batch)
@@ -472,6 +501,7 @@ def _train_inner(args, exp_dir):
                 "eval/best_ckpt_ma":     best_ckpt_ma,
                 "train/fps":             fps,
                 "train/buffer_size":     len(buffer),
+                "train/target_entropy":  agent.target_entropy,
             }
             _key_map = {"alpha": "ent_coef", "alpha_loss": "ent_coef_loss"}
             log_dict.update({f"train/{_key_map.get(k, k)}": v for k, v in avg_train.items()})
@@ -522,7 +552,7 @@ def _train_inner(args, exp_dir):
                     f"    actor: {actor:+.4f}"
                     f"    alpha: {alpha:.4f}"
                 )
-                print(f"    log_pi   : {log_pi:+8.4f}    fps:   {fps:.0f}")
+                print(f"    log_pi   : {log_pi:+8.4f}    tgt_ent: {agent.target_entropy:+.2f}    fps:   {fps:.0f}")
             else:
                 print(f"  fps: {fps:.0f}  (warming up — no updates yet)")
             print(f"{'─' * W}")
@@ -624,6 +654,9 @@ def _train_inner(args, exp_dir):
         "improvement_pp":      round(improvement,   2),
         "best_mean_reward":    round(best_mean_reward, 4),
         "best_ckpt_metric":    args.best_ckpt_metric,
+        "target_entropy":      args.target_entropy,
+        "target_entropy_end":  args.target_entropy_end,
+        "target_entropy_steps": args.target_entropy_steps,
         "final_mean_reward":   round(float(np.mean(final_rewards)), 4),
         "mean_shots":          round(speed["mean_shots"], 3),
         "mean_shots_cleared":  (round(speed["mean_shots_cleared"], 3)

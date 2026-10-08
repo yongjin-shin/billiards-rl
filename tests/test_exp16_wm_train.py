@@ -13,8 +13,10 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pytest
 
+from types import SimpleNamespace
+
 from exp16_wm.train import (update_best_ma, initial_best_ckpt, ckpt_value,
-                             summarize_final_eval)
+                             summarize_final_eval, target_entropy_at, make_exp_dir)
 
 
 class TestUpdateBestMa:
@@ -119,3 +121,37 @@ class TestSummarizeFinalEval:
     def test_empty_eval(self):
         out = summarize_final_eval([], [], [], n_balls=3)
         assert out == {"mean_shots": None, "mean_shots_cleared": None, "pocket_rate_at5": None}
+
+
+class TestTargetEntropySchedule:
+    def test_constant_when_no_end(self):
+        assert target_entropy_at(0, -2.0, None, 1_000_000) == -2.0
+        assert target_entropy_at(5_000_000, -2.0, None, 1_000_000) == -2.0
+
+    def test_linear_anneal_then_hold(self):
+        assert target_entropy_at(0, -2.0, -7.0, 1_000_000) == -2.0
+        assert target_entropy_at(500_000, -2.0, -7.0, 1_000_000) == pytest.approx(-4.5)
+        assert target_entropy_at(1_000_000, -2.0, -7.0, 1_000_000) == -7.0
+        assert target_entropy_at(2_000_000, -2.0, -7.0, 1_000_000) == -7.0
+
+    def test_zero_anneal_steps_jumps_to_end(self):
+        # edge case: no anneal window → use the end value immediately
+        assert target_entropy_at(0, -2.0, -7.0, 0) == -7.0
+
+
+class TestExpDirName:
+    def _args(self, **kw):
+        base = dict(agent="vanilla", n_balls=3, max_steps=30, seed=0, h_mix_start=0.0,
+                    target_entropy=None, target_entropy_end=None)
+        base.update(kw)
+        return SimpleNamespace(**base)
+
+    def test_default_name_unchanged(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        name = os.path.basename(make_exp_dir(self._args()))
+        assert name.startswith("exp16_vanilla_multi3_ms30_s0_")
+
+    def test_entropy_anneal_tag(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        name = os.path.basename(make_exp_dir(self._args(target_entropy=-2.0, target_entropy_end=-7.0)))
+        assert name.startswith("exp16_vanilla_ent-2to-7_multi3_ms30_s0_")
