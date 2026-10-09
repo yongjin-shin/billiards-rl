@@ -41,17 +41,8 @@ def pocket_index_map(env: BilliardsEnv) -> dict[str, int]:
             for pid, p in env.system.table.pockets.items()}
 
 
-def made_slots(env: BilliardsEnv, raw_obs: np.ndarray, action: np.ndarray,
-               pocket_map: dict[str, int] | None = None) -> tuple[np.ndarray, bool]:
-    """
-    Restore the table from raw_obs, play action (delta_angle, speed) on a copy, and return
-    (made (18,) bool, scratch). Deterministic: pooltool gives the same result every time.
-    """
-    pocket_map = pocket_map or pocket_index_map(env)
-    restore_state(env, raw_obs)
-    sys_c = env.system.copy()
-    sys_c.strike(phi=strike_phi_deg(aim_reference(env), action), V0=float(action[1]), cue_ball_id="cue")
-    pt.simulate(sys_c, inplace=True, max_events=2000)
+def slots_from_system(env: BilliardsEnv, sys_c, pocket_map: dict[str, int]) -> tuple[np.ndarray, bool]:
+    """(made (18,) bool, scratch) read from the BALL_POCKET events of an already simulated system."""
     made, scratch = np.zeros(N_SLOTS, dtype=bool), False
     for e in sys_c.events:
         if e.event_type != pt.EventType.BALL_POCKET:
@@ -64,6 +55,20 @@ def made_slots(env: BilliardsEnv, raw_obs: np.ndarray, action: np.ndarray,
         else:
             made[(int(ball) - 1) * N_POCKETS + pocket_map[pocket]] = True
     return made, scratch
+
+
+def made_slots(env: BilliardsEnv, raw_obs: np.ndarray, action: np.ndarray,
+               pocket_map: dict[str, int] | None = None) -> tuple[np.ndarray, bool]:
+    """
+    Restore the table from raw_obs, play action (delta_angle, speed) on a copy, and return
+    (made (18,) bool, scratch). Deterministic: pooltool gives the same result every time.
+    """
+    pocket_map = pocket_map or pocket_index_map(env)
+    restore_state(env, raw_obs)
+    sys_c = env.system.copy()
+    sys_c.strike(phi=strike_phi_deg(aim_reference(env), action), V0=float(action[1]), cue_ball_id="cue")
+    pt.simulate(sys_c, inplace=True, max_events=2000)
+    return slots_from_system(env, sys_c, pocket_map)
 
 
 def annotate_file(path: str, max_k: int = 2) -> dict:
