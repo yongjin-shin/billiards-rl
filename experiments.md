@@ -3652,3 +3652,30 @@ obs에서 테이블을 복원해(포켓된 공은 pooltool의 pocketed 상태로
   (게임 성적은 별도의 500게임 평가라 영향이 없다).
 - 가설(미검증): (a) 최적화 잡음이 정밀도(~0.1°)를 가로막는다 — 학습률 감쇠/가중치 이동평균/더 큰 배치로 확인 가능, (b) 정답이 여러 개인 상태에서 교사와 다른 목표를
   고르는 것(각도 오차 p90 40~56°)은 허용되지만, 고른 목표 안에서의 정밀도가 부족하다.
+
+### 학습이 잘못됐는가? — overfit test, lr decay, pair supervision (2026-10-09)
+
+**Trigger**: train set에서도 policy action이 label과 크게 달랐다(train ≈ val). 지도학습에서 train set도 못 맞추면 학습 자체를 의심해야 한다.
+
+**1. Overfit test** (robust label 512 states, GNN, 3000 epochs, 같은 states에서 평가): angle error median 2.62°, <0.2° 11%, simulator pocket 33.8% (teacher 98.4%). 512개도 못 외운다.
+- 분해(lr을 1e-3→3e-5로 단계적으로 낮춤): winner pair의 regression error는 0.27°→0.06°로 내려가 97%가 0.2° 이내 — regression 자체는 된다.
+  반면 **selection(어느 pair를 고르나) accuracy는 22%→48%**, CE 2.3→1.6 (ln 18 = 2.9)에 머문다.
+- 원인: winner-takes-all(WTA)은 "현재 prediction이 label에 가장 가까운 pair"를 매 step 다시 고른다 → selection head의 target이 계속 바뀐다(moving target).
+
+**2. Fix**: label을 만든 (ball, pocket) pair를 states에서 복원해(`exp16_wm/pair_labels.py`, simulation 없이 ghost-ball aim과 label angle 매칭; robust 95.8%, geom 99.4% 할당) **pair supervision**: 각 label은 자기 pair의 output으로 regress, selection head는 그 pair를 고르는 CE.
+같은 512 states, cosine lr: WTA → pair supervision = angle error median 1.56° → 0.10°, <0.2° 27.7% → 64.5%, simulator pocket 45.9% → 79.1%.
+
+**3. 전체 데이터 (GNN, relative obs, no augment, 15,051 train states, 500 epochs, `--select within`, policy alone 500 games)**:
+
+| label | WTA, const lr (이전) | WTA, cosine lr | **pair supervision, cosine lr** |
+|---|---|---|---|
+| robust teacher v1 | 6.18 shots / 48.1% | 12.25 / 23.8% | **4.35 / 68.4%** |
+| geom teacher (32 cand.) | 9.48 / 30.8% | 9.19 / 32.3% | **4.34 / 68.1%** |
+
+(shots/game, shot success rate; SAC 7.89, entropy-lowered SAC 7.39, geom teacher itself 2.24, robust teacher itself 2.98)
+
+- **lr decay만으로는 도움이 안 된다**: robust가 6.18→12.25로 오히려 나빠짐(train loss 267 vs val loss 673, 외우는 쪽으로 감). 위 "const lr이 문제"라는 처음 가설은 틀렸다 — 512 states overfit test에서만 도움이 됐다.
+- **진짜 원인은 WTA의 moving-target selection**이었다. pair supervision이 두 label 모두 ~4.3 shots/game로 올렸다(SAC 7.89 대비 −45%).
+- **Correction**: 이전의 "robust teacher label이 geom label보다 훨씬 낫다"(6.18 vs 9.48)는 결론은 **WTA 학습의 불안정성이 만든 격차**였다. pair supervision 하에서는 두 label이 같다(4.35 vs 4.34 shots). 그 전에 낸 모든 GNN 수치(총정리 표 포함)는 WTA + const lr로 학습된 값이라, 같은 조건으로 다시 비교해야 한다.
+- 이상한 점: robust+pairs의 val loss가 2990(train 44.8)으로 매우 크다. within 0.2° 54.7%, 게임 성적은 좋아서 일부 outlier states(CE가 큰 states)가 val loss를 지배하는 것으로 보이지만 확인하지 않았다. orig32+pairs는 train 121 / val 146로 정상.
+- Caveat: seed 1개, run 1회. pair label은 teacher가 ghost-ball aim으로 만든 candidate에서 복원하므로 "(ball, pocket) pair 단위"라는 prior가 label에 들어간다(architecture의 pair slot과 같은 prior).
