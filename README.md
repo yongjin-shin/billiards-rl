@@ -8,8 +8,9 @@ Reinforcement learning on a physics-accurate billiards simulator ([pooltool](htt
 
 | | |
 |---|---|
-| **Current status** | Deterministic SSM World Model (feature/wm-ssm) in progress |
-| **Next experiment** | Review Exp-17 HRL direction after SSM results |
+| **Current status** | Exp-16 follow-up (2026-10-09): clear-speed task + search-planner reference; behaviour cloning from the planner in progress (`feature/exp16-imitation-teacher`) |
+| **Next experiment** | Search + learning (expert iteration): imitate the planner, then let the policy propose search candidates — see roadmap.md |
+| **Clear-speed task (seed 0)** | shots to clear 3 balls: vanilla SAC 7.89 / SAC low-entropy 7.39 / random search 2.50 / geometry search planner 2.24 |
 | **Exp-16 vanilla** | Phase 1: pocket 62.2% ≈ SAC 63.6% (p=0.49) / Phase 0: pocket 56.9% ≈ SAC 55.3% (p=0.62) |
 | **Exp-16 WM critic (4 seeds)** | pocket vanilla 62.95% / traj 63.47% / rssm 62.19% — no significant difference (ANOVA p=0.58) |
 
@@ -43,6 +44,7 @@ Both environments share the same 2-dim continuous action space:
 | **Reward** | +1.0 per ball pocketed · −step_penalty×i (progressive) / flat · −0.5 scratch · −trunc_penalty if truncated |
 | **Episode** | All 3 balls pocketed OR step ≥ max_steps |
 | **Ball-in-hand** | Cue ball repositioned after scratch |
+| **Clear-speed setting** (2026-10-09) | `--max-steps 30 --step-penalty 1.0 --trunc-penalty 0`: game ends only when all balls are in (30 shots is a safety cap, bootstrapped), reward +1/ball −1/shot (−0.5 scratch) → return = 3 − shots |
 
 ---
 
