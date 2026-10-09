@@ -55,8 +55,10 @@ def load_teacher_data(paths: list[str]) -> dict[str, np.ndarray]:
     parts = [dict(np.load(p)) for p in sorted(paths)]
     if not parts:
         raise FileNotFoundError("no teacher data files")
-    out = {k: np.concatenate([d[k] for d in parts]) for k in
-           ["obs", "action", "good_actions", "n_good", "pocketed", "shot"]}
+    keys = ["obs", "action", "good_actions", "n_good", "pocketed", "shot"]
+    if all("good_pairs" in d for d in parts):
+        keys.append("good_pairs")
+    out = {k: np.concatenate([d[k] for d in parts]) for k in keys}
     offset, games = 0, []
     for d in parts:
         games.append(d["game"].astype(np.int64) + offset)
@@ -92,14 +94,15 @@ def build_split(data: dict[str, np.ndarray], val_frac: float, seed: int, data_fr
         keep = rng.choice(tr_games, size=max(1, int(round(len(tr_games) * data_frac))), replace=False)
         train = train & np.isin(data["game"], keep)
     tr_idx, va_idx = np.where(train)[0], np.where(val)[0]
+    keys = _KEYS + (["good_pairs"] if "good_pairs" in data and augment == "none" else [])   # flips permute pockets
     if augment == "flip4":
         tr_part = augment_flip4(data, tr_idx)
     elif augment == "none":
-        tr_part = {k: data[k][tr_idx] for k in _KEYS}
+        tr_part = {k: data[k][tr_idx] for k in keys}
     else:
         raise ValueError(f"unknown augment: {augment}")
-    va_part = {k: data[k][va_idx] for k in _KEYS}
-    combined = {k: np.concatenate([tr_part[k], va_part[k]]) for k in _KEYS}
+    va_part = {k: data[k][va_idx] for k in keys}
+    combined = {k: np.concatenate([tr_part[k], va_part[k]]) for k in keys}
     n_tr = len(tr_part["obs"])
     tr_mask = np.arange(len(combined["obs"])) < n_tr
     return combined, tr_mask, ~tr_mask
@@ -203,7 +206,7 @@ class MLPModel:
         return deterministic_unit(self.agent, obs)
 
     def train_loss(self, obs: torch.Tensor, teacher_u: torch.Tensor, good_u: torch.Tensor,
-                   w: torch.Tensor | None = None) -> torch.Tensor:
+                   w: torch.Tensor | None = None, pairs: torch.Tensor | None = None) -> torch.Tensor:
         return bc_loss(self.predict_unit(obs), teacher_u, good_u, self.loss, w)
 
     def params(self) -> list:
@@ -226,7 +229,7 @@ def train_bc(agent: VanillaSAC, data: dict[str, np.ndarray], train: np.ndarray, 
              loss: str, epochs: int, batch: int, lr: float, patience: int, seed: int,
              log_every: int = 10, w: torch.Tensor | None = None,
              select: str = "loss", select_thresh_deg: float = 0.2,
-             lr_schedule: str = "const", lr_final_frac: float = 0.01) -> dict:
+             lr_schedule: str = "const", lr_final_frac: float = 0.01, use_pairs: bool = False) -> dict:
     """select: 'loss' keeps the lowest val loss; 'within' the highest val within-threshold rate
     (the val loss is dominated by a few far-off predictions and can disagree with it)."""
     if select not in ("loss", "within"):
@@ -239,6 +242,9 @@ def train_bc(agent: VanillaSAC, data: dict[str, np.ndarray], train: np.ndarray, 
     obs   = torch.as_tensor(data["obs"])
     t_u   = torch.as_tensor(to_unit(data["action"]).astype(np.float32))
     g_u   = torch.as_tensor(to_unit(data["good_actions"]).astype(np.float32))
+    if use_pairs and "good_pairs" not in data:
+        raise ValueError("use_pairs needs data['good_pairs'] (run exp16_wm.pair_labels; no --augment flip4)")
+    pr = torch.as_tensor(data["good_pairs"].astype(np.int64)) if use_pairs else None
     opt = torch.optim.Adam(model.params(), lr=lr)
     # constant lr plateaus ~1e-3 of the action range above the precision a pocket needs (~0.1°); anneal it
     sched = (torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=max(1, epochs), eta_min=lr * lr_final_frac)
@@ -252,7 +258,7 @@ def train_bc(agent: VanillaSAC, data: dict[str, np.ndarray], train: np.ndarray, 
         tr_loss = 0.0
         for i in range(0, len(perm), batch):
             b = perm[i:i + batch]
-            l = model.train_loss(obs[b], t_u[b], g_u[b], w)
+            l = model.train_loss(obs[b], t_u[b], g_u[b], w, pairs=None if pr is None else pr[b])
             opt.zero_grad()
             l.backward()
             opt.step()
@@ -261,7 +267,8 @@ def train_bc(agent: VanillaSAC, data: dict[str, np.ndarray], train: np.ndarray, 
         model.module.eval()
         with torch.no_grad():
             pred_va = model.predict_unit(obs[va_idx])
-            va_loss = float(model.train_loss(obs[va_idx], t_u[va_idx], g_u[va_idx], w))
+            va_loss = float(model.train_loss(obs[va_idx], t_u[va_idx], g_u[va_idx], w,
+                                             pairs=None if pr is None else pr[va_idx]))
             va_within = within_rate(pred_va, g_u[va_idx], select_thresh_deg)
         history.append((ep, tr_loss, va_loss, va_within))
         if sched is not None:
@@ -350,6 +357,8 @@ def parse_args():
     p.add_argument("--sel-weight", type=float, default=10.0)
     p.add_argument("--obs-transform", type=str, default="raw", choices=list(TRANSFORMS))
     p.add_argument("--augment",    type=str, default="none", choices=["none", "flip4"])
+    p.add_argument("--pair-supervision", action="store_true",
+                   help="GNN: train each pair head on the pair that produced the label (needs exp16_wm.pair_labels)")
     p.add_argument("--select",     type=str, default="within", choices=["loss", "within"],
                    help="best checkpoint: lowest val loss or highest val within-0.2° rate")
     p.add_argument("--data-frac",  type=float, default=1.0, help="fraction of train games used")
@@ -361,6 +370,8 @@ def parse_args():
 
 def main():
     args = parse_args()
+    if args.pair_supervision and (args.model != "gnn" or args.augment != "none"):
+        raise SystemExit("--pair-supervision needs --model gnn and --augment none")
     if args.model == "gnn" and args.obs_transform != "relative":
         raise SystemExit("--model gnn takes the relative observation: add --obs-transform relative")
     torch.set_num_threads(args.threads)
@@ -374,7 +385,7 @@ def main():
             ("" if args.obs_transform == "raw" else f"_{args.obs_transform}") + \
             ("" if args.augment == "none" else f"_{args.augment}") + \
             ("" if args.data_frac >= 1.0 else f"_frac{args.data_frac:g}") + \
-            ("" if args.lr_schedule == "const" else "_cos")
+            ("" if args.lr_schedule == "const" else "_cos") + ("_pairs" if args.pair_supervision else "")
     name = (f"exp16_bc_{teacher}_{args.loss}{h_tag}_a{args.angle_scale_deg:g}_v{args.speed_scale:g}"
             f"_s{args.seed}_{time.strftime('%Y-%m-%d@%H%M')}")
     out_dir = os.path.join(args.out_root, name)
@@ -390,7 +401,8 @@ def main():
     t0 = time.time()
     fit = train_bc(agent, data, train, val, args.loss, args.epochs, args.batch, args.lr,
                    args.patience, args.seed, w=dim_weights(args.angle_scale_deg, args.speed_scale),
-                   select=args.select, lr_schedule=args.lr_schedule, lr_final_frac=args.lr_final_frac)
+                   select=args.select, lr_schedule=args.lr_schedule, lr_final_frac=args.lr_final_frac,
+                   use_pairs=args.pair_supervision)
     vm = val_metrics(agent, data, val)
     print(f"  trained {fit['epochs_run']} epochs ({time.time()-t0:.0f}s), best ({args.select}) @{fit['best_epoch']}"
           f" val loss {fit['best_val_loss']:.6f}  |  {json.dumps({k: round(v, 4) for k, v in vm.items()})}", flush=True)

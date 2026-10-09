@@ -227,3 +227,24 @@ class TestLrSchedule:
         fit = train_bc(make_agent(3), data, tr, ~tr, "teacher", epochs=1, batch=16, lr=1e-3,
                        patience=1, seed=0, log_every=0, lr_schedule="cosine")
         assert fit["epochs_run"] == 1
+
+
+class TestPairData:
+    def test_use_pairs_requires_good_pairs(self):
+        data = {"obs": np.zeros((4, 23), np.float32), "action": np.zeros((4, 2), np.float32),
+                "good_actions": np.zeros((4, 1, 2), np.float32)}
+        tr = np.array([1, 1, 1, 0], bool)
+        with pytest.raises(ValueError):
+            train_bc(make_agent(3), data, tr, ~tr, "nearest_good", epochs=1, batch=2, lr=1e-3,
+                     patience=1, seed=0, log_every=0, use_pairs=True)
+
+    def test_build_split_carries_pairs_only_without_augment(self):
+        n = 40
+        d = {"obs": np.random.default_rng(0).uniform(0, 1, (n, 23)).astype(np.float32),
+             "action": np.zeros((n, 2), np.float32), "good_actions": np.full((n, 2, 2), np.nan, np.float32),
+             "n_good": np.zeros(n, int), "pocketed": np.ones(n, int), "shot": np.zeros(n, int),
+             "game": np.arange(n) // 2, "good_pairs": np.full((n, 2), 3, np.int8)}
+        out, tr, va = build_split(d, 0.2, seed=0)
+        assert "good_pairs" in out and len(out["good_pairs"]) == n
+        out, tr, va = build_split(d, 0.2, seed=0, augment="flip4")
+        assert "good_pairs" not in out

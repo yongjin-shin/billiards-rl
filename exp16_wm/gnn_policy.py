@@ -100,7 +100,41 @@ class PairGNNPolicy(nn.Module):
         return means[torch.arange(len(means)), logits.argmax(dim=1)]
 
     def train_loss(self, rel: torch.Tensor, teacher_u: torch.Tensor, good_u: torch.Tensor,
-                   w: torch.Tensor | None = None) -> torch.Tensor:
+                   w: torch.Tensor | None = None, pairs: torch.Tensor | None = None) -> torch.Tensor:
+        """
+        pairs None → relaxed winner-takes-all (below). pairs (B, K) int64, −1 = unknown →
+        supervised pairs: each labelled candidate regresses its own pair's output and the
+        selection head is trained to pick those pairs (fixed targets instead of a moving winner).
+        Rows with no labelled pair fall back to winner-takes-all.
+        """
+        if pairs is None:
+            return self._wta_loss(rel, teacher_u, good_u, w)
+        rows = (pairs >= 0).any(dim=1)
+        if bool(rows.all()):
+            return self._pair_loss(rel, good_u, pairs, w)
+        loss, n = rel.new_zeros(()), len(rel)
+        if bool(rows.any()):
+            loss = loss + self._pair_loss(rel[rows], good_u[rows], pairs[rows], w) * int(rows.sum())
+        loss = loss + self._wta_loss(rel[~rows], teacher_u[~rows], good_u[~rows], w) * int((~rows).sum())
+        return loss / n
+
+    def _pair_loss(self, rel: torch.Tensor, good_u: torch.Tensor, pairs: torch.Tensor,
+                   w: torch.Tensor | None) -> torch.Tensor:
+        w = torch.ones(2, device=rel.device) if w is None else w
+        means, logits, _ = self(rel)
+        B, K = pairs.shape
+        has = pairs >= 0
+        pidx = pairs.clamp(min=0)
+        m = means.gather(1, pidx[..., None].expand(B, K, 2))
+        d = (((m - torch.nan_to_num(good_u)) * w) ** 2).sum(-1)
+        n = has.sum(dim=1).clamp(min=1)
+        reg = (d * has).sum(dim=1) / n
+        logp = F.log_softmax(logits, dim=1).gather(1, pidx)
+        ce = -(logp * has).sum(dim=1) / n
+        return (reg + self.sel_weight * ce).mean()
+
+    def _wta_loss(self, rel: torch.Tensor, teacher_u: torch.Tensor, good_u: torch.Tensor,
+                  w: torch.Tensor | None = None) -> torch.Tensor:
         """Relaxed winner-takes-all regression to the nearest pocketing candidate + selection CE."""
         w = torch.ones(2, device=rel.device) if w is None else w
         means, logits, valid = self(rel)

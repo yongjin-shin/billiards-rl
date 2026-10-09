@@ -91,3 +91,66 @@ class TestEnv:
         out = evaluate_policy(pol, seed=0, n_games=1, env_kw={**CLEAR_ENV, "max_steps": 2})
         assert 1 <= out["mean_shots"] <= 2
         assert REL.shape == (REL_DIM,)
+
+
+class TestPairSupervision:
+    def _batch(self, n=6):
+        rels = np.stack([REL] * n)
+        good = torch.full((n, 3, 2), float("nan"))
+        good[:, 0] = torch.tensor([0.05, 0.2])
+        good[:, 1] = torch.tensor([-0.03, 0.1])
+        return torch.as_tensor(rels), good
+
+    def test_pair_loss_is_finite_and_has_gradients(self):
+        torch.manual_seed(0)
+        m = PairGNNPolicy(hidden=16)
+        rel, good = self._batch()
+        pairs = torch.full((6, 3), -1, dtype=torch.long)
+        pairs[:, 0], pairs[:, 1] = 4, 9
+        loss = m.train_loss(rel, good[:, 0], good, pairs=pairs)
+        loss.backward()
+        assert torch.isfinite(loss)
+        grads = [p.grad for p in m.parameters() if p.grad is not None]
+        assert grads and all(torch.isfinite(g).all() for g in grads) and any(g.abs().sum() > 0 for g in grads)
+
+    def test_regression_targets_the_labelled_pairs_own_output(self):
+        # label asks pair 4 for (0.5, 0.5) and pair 9 for (-0.5, -0.5): after fitting, those outputs move there
+        torch.manual_seed(0)
+        m = PairGNNPolicy(hidden=32)
+        rel, _ = self._batch(8)
+        good = torch.zeros(8, 2, 2)
+        good[:, 0], good[:, 1] = torch.tensor([0.5, 0.5]), torch.tensor([-0.5, -0.5])
+        pairs = torch.zeros(8, 2, dtype=torch.long)
+        pairs[:, 0], pairs[:, 1] = 4, 9
+        opt = torch.optim.Adam(m.parameters(), lr=3e-3)
+        for _ in range(300):
+            loss = m.train_loss(rel, good[:, 0], good, pairs=pairs)
+            opt.zero_grad(); loss.backward(); opt.step()
+        means, _, _ = m(rel)
+        assert torch.allclose(means[0, 4], torch.tensor([0.5, 0.5]), atol=0.05)
+        assert torch.allclose(means[0, 9], torch.tensor([-0.5, -0.5]), atol=0.05)
+
+    def test_learns_fixed_pair_selection(self):
+        torch.manual_seed(0)
+        m = PairGNNPolicy(hidden=32)
+        rng = np.random.default_rng(0)
+        rels = np.stack([_rel([(rng.uniform(0.1, 0.9), rng.uniform(0.1, 0.9), 0) for _ in range(3)]) for _ in range(64)])
+        rel = torch.as_tensor(rels)
+        pairs = torch.zeros(64, 1, dtype=torch.long) + 7                     # always pair 7
+        good = torch.zeros(64, 1, 2)
+        opt = torch.optim.Adam(m.parameters(), lr=3e-3)
+        for _ in range(200):
+            loss = m.train_loss(rel, good[:, 0], good, pairs=pairs)
+            opt.zero_grad(); loss.backward(); opt.step()
+        _, logits, _ = m(rel)
+        assert (logits.argmax(dim=1) == 7).float().mean() > 0.95
+
+    def test_rows_without_labelled_pair_fall_back_to_wta(self):
+        torch.manual_seed(0)
+        m = PairGNNPolicy(hidden=16)
+        rel, good = self._batch(4)
+        pairs = torch.tensor([[4, -1, -1], [-1, -1, -1], [9, 4, -1], [-1, -1, -1]])
+        loss = m.train_loss(rel, good[:, 0], good, pairs=pairs)
+        loss.backward()
+        assert torch.isfinite(loss)
+        assert torch.isfinite(m.train_loss(rel, good[:, 0], good, pairs=torch.full((4, 3), -1)))   # all rows fall back
