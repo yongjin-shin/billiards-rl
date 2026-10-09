@@ -3734,3 +3734,22 @@ obs에서 테이블을 복원해(포켓된 공은 pooltool의 pocketed 상태로
 - teacher는 coarse hit 수 상위 **2개 pair만** 정밀 scan하고 label로 남기므로, 동점(8 hits)인 (2,2), (1,2)는 배열 순서에 따라 빠진다. selection CE는 이들을 **false negative**로 취급한다 — 그래도 model은 0.14~0.20을 준다(geometry가 positive와 비슷해서).
 - 2D margin이 이산화 때문에 1.41 같은 값에 몰려 이 state에서는 네 pair를 구분하지 못한다(tie).
 - 개선 후보: 상위 2개가 아니라 feasible한 모든 pair(coarse hit > 0 또는 margin ≥ 임계)를 positive로 label (scan 비용 ~3배), selection target을 coarse hit/margin에 비례한 soft distribution으로.
+
+### Wrap-aware loss는 val loss를 고쳤지만 policy를 악화시켰다 + 모델 init seed 버그 (2026-10-09)
+
+**val loss 이상의 원인(TODO #8)**: `delta_angle`이 ±180°에서 이어지는 원형인데 loss가 raw 차이로 계산 → label이 ±150° 밖인 backward shot(label의 1.3%, state의 2.3%)에서 loss가 1e6까지 폭발. val 5개 state가 val loss 합의 99%. median val loss(15.6)는 train(15.2)과 같음. wrap-aware 차이로 재계산하면 val loss robust 2807→261, margin 3287→614. pair 매핑 버그는 아님. 부수 발견: backward shot의 wrapped angle error 중앙값 1.1~1.3° vs 나머지 0.16~0.22°.
+`action_diff`/`wrap_angle_unit`(gnn_policy.py)으로 GNN/MLP/label_gap loss를 wrap-aware로 고침.
+
+**Seed 버그**: `bc.main()`에서 model이 `train_bc`의 `torch.manual_seed`보다 먼저 만들어져서 `--seed`와 무관하게 초기 weights가 매번 달랐다. `seed_everything(args.seed)`를 model 생성 전에 호출하도록 고침. 이 수정 전의 모든 BC 단일 실행은 init이 seed되지 않은 1회 결과다.
+
+**Wrap fix의 효과** (robust label, GNN, pair supervision, cosine lr 1e-3, 500 epochs, seed 0/1/2 짝지어, policy alone 500 games):
+
+| | seed 0 / 1 / 2 shots/game | mean ± std | success | val within 0.2° | val loss |
+|---|---|---|---|---|---|
+| raw angle diff (`--no-angle-wrap`) | 4.32 / 4.45 / 4.76 | **4.51 ± 0.23** | 66.2 ± 3.3% | 50.6 / 54.1 / 47.3% | 1,180~2,091 |
+| wrap-aware (fix) | 5.96 / 5.46 / 5.34 | 5.59 ± 0.33 | 53.5 ± 2.9% | 31.2 / 38.5 / 35.3% | 112~858 |
+
+- seed 3개 모두에서 wrap이 나빴고 차이(~1.1 shots)는 seed std(~0.3)의 3배 이상 → 잡음이 아닌 효과. seed 고정 전 1회 결과(robust 5.40, margin 5.02, geom32 6.90)도 같은 방향.
+- 이전 loss로 seed를 달리한 결과(4.32~4.76)가 고정 전 단일 실행(4.35 robust, 4.41 margin, 4.34 geom32)과 같은 범위 → 그 숫자들은 신뢰할 만하다.
+- **가설(검증 중)**: 이전 loss의 spike(1e6)가 Adam의 second-moment 추정을 키워 실효 learning rate를 낮추는 브레이크로 작용했다 → wrap으로 spike가 사라지면 같은 lr이 사실상 커져 정밀도가 떨어진다. 검증: wrap loss에서 lr 3e-4, 1e-4 (seed 0~2).
+- **seed 간 std**: shots/game ~0.2-0.3, success ~3%p. 이 크기보다 작은 단일 실행 차이(예: robust 4.35 vs margin 4.41 vs geom32 4.34)는 label 효과로 해석할 수 없다.
