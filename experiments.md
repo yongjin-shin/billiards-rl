@@ -3695,3 +3695,15 @@ obs에서 테이블을 복원해(포켓된 공은 pooltool의 pocketed 상태로
 - robust label은 intent가 거의 verified (99%). geom label은 28%가 intended pair와 다른 outcome.
 - 그럼에도 pair supervision 결과는 둘 다 ~4.3 shots/game — 약 28%의 noisy pair label이 있어도 학습이 됐다는 뜻이지만, intent가 clean한 것은 아니다.
 - sims 파일에는 outcome의 개수만 있고 (ball, pocket) identity가 없다 → outcome-grounded pair label이나 goal-conditioned 학습을 하려면 simulation 기록에 identity를 추가해야 한다.
+
+**Full-data result** (`exp16_wm/outcomes.py`: event log의 BALL_POCKET으로 label action이 실제로 made하는 (ball, pocket) slot을 `good_made (N,2,18)`, `good_scratch (N,2)`로 label npz에 추가; 앞 2개 candidate):
+
+| label set | candidate | pair assigned | **intended pair really made** | any ball made | scratch |
+|---|---|---|---|---|---|
+| robust v1 | 0 / 1 | 16,502 / 13,960 | **97.7%** / 91.4% | 99.9% / 99.3% | 166 / 223 |
+| margin v2 | 0 / 1 | 16,514 / 13,981 | **95.5%** / 84.6% | 100% / 100% | 108 / 108 |
+| geom (32 cand.) | 0 / 1 | 16,496 / 16,455 | **73.5%** / 77.8% | 99.8% / 99.8% | 595 / 599 |
+
+- 400-state 표본 결과(99.0%, 71.9%)와 일치. 거의 모든 label이 무언가는 넣지만, **angle matching으로 붙인 pair가 실제 outcome과 다른 비율**이 geom label은 ~26%, margin/robust는 2~5%(candidate 1은 8~15%).
+- geom teacher label은 scratch도 ~3.6%(candidate 0)로 robust(1.0%)/margin(0.6%)보다 많다.
+- 다음: label의 pair를 angle matching 대신 `good_made`(실제 made slots)로 바꾸는 outcome-grounded pair label과, pair별 "made?" aux head.
