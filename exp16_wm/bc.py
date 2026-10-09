@@ -5,7 +5,10 @@ Trains the same TanhGaussian actor SAC uses (so the result can seed SAC later)
 on data from exp16_wm/teacher_data.py, then evaluates the policy alone — no
 search, no simulator at decision time — on the clear-speed task.
 
-Losses (on the deterministic action tanh(mean), in [-1, 1] units per dim):
+Losses (on the deterministic action tanh(mean); per-dim errors are rescaled to
+physical precision units — 1 = angle_scale_deg degrees / speed_scale m/s — so the
+needle-narrow angle is not drowned out by speed, which in raw [-1, 1] units is
+~50× larger per physical unit):
   teacher       MSE to the teacher's chosen action
   nearest_good  MSE to the nearest stored pocketing candidate (set loss: any
                 pocketing shot is a right answer — guards against averaging
@@ -73,20 +76,28 @@ def split_by_game(game: np.ndarray, val_frac: float, seed: int) -> tuple[np.ndar
 # Losses / metrics
 # ──────────────────────────────────────────────
 
+def dim_weights(angle_scale_deg: float, speed_scale: float) -> torch.Tensor:
+    """Per-dim multipliers turning [-1, 1]-unit differences into precision units."""
+    half_range = (ACT_HIGH - ACT_LOW) / 2.0                    # [π rad, 3.75 m/s]
+    return torch.tensor([np.degrees(half_range[0]) / angle_scale_deg,
+                         half_range[1] / speed_scale], dtype=torch.float32)
+
+
 def bc_loss(pred_unit: torch.Tensor, teacher_unit: torch.Tensor, good_unit: torch.Tensor,
-            loss: str) -> torch.Tensor:
+            loss: str, w: torch.Tensor | None = None) -> torch.Tensor:
     """
-    pred_unit (B,2), teacher_unit (B,2), good_unit (B,K,2) NaN-padded.
-    Returns the mean per-sample squared error under the chosen loss.
+    pred_unit (B,2), teacher_unit (B,2), good_unit (B,K,2) NaN-padded, w (2,) per-dim
+    weights (None → 1). Returns the mean per-sample weighted squared error.
     """
+    w = torch.ones(2) if w is None else w
     if loss == "teacher":
-        return ((pred_unit - teacher_unit) ** 2).sum(-1).mean()
+        return (((pred_unit - teacher_unit) * w) ** 2).sum(-1).mean()
     if loss == "nearest_good":
         valid = ~torch.isnan(good_unit[..., 0])                          # (B,K)
-        d = ((pred_unit.unsqueeze(1) - torch.nan_to_num(good_unit)) ** 2).sum(-1)
+        d = (((pred_unit.unsqueeze(1) - torch.nan_to_num(good_unit)) * w) ** 2).sum(-1)
         d = torch.where(valid, d, torch.full_like(d, float("inf")))
         nearest = d.min(dim=1).values
-        fallback = ((pred_unit - teacher_unit) ** 2).sum(-1)
+        fallback = (((pred_unit - teacher_unit) * w) ** 2).sum(-1)
         return torch.where(valid.any(dim=1), nearest, fallback).mean()
     raise ValueError(f"unknown loss: {loss}")
 
@@ -122,7 +133,7 @@ def deterministic_unit(agent: VanillaSAC, obs: torch.Tensor) -> torch.Tensor:
 
 def train_bc(agent: VanillaSAC, data: dict[str, np.ndarray], train: np.ndarray, val: np.ndarray,
              loss: str, epochs: int, batch: int, lr: float, patience: int, seed: int,
-             log_every: int = 10) -> dict:
+             log_every: int = 10, w: torch.Tensor | None = None) -> dict:
     torch.manual_seed(seed)
     rng = np.random.default_rng(seed)
     obs   = torch.as_tensor(data["obs"])
@@ -139,15 +150,15 @@ def train_bc(agent: VanillaSAC, data: dict[str, np.ndarray], train: np.ndarray, 
         tr_loss = 0.0
         for i in range(0, len(perm), batch):
             b = perm[i:i + batch]
-            l = bc_loss(deterministic_unit(agent, obs[b]), t_u[b], g_u[b], loss)
+            l = bc_loss(deterministic_unit(agent, obs[b]), t_u[b], g_u[b], loss, w)
             opt.zero_grad()
             l.backward()
             opt.step()
-            tr_loss += float(l) * len(b)
+            tr_loss += l.item() * len(b)
         tr_loss /= max(1, len(perm))
         agent.actor.eval()
         with torch.no_grad():
-            va_loss = float(bc_loss(deterministic_unit(agent, obs[va_idx]), t_u[va_idx], g_u[va_idx], loss))
+            va_loss = float(bc_loss(deterministic_unit(agent, obs[va_idx]), t_u[va_idx], g_u[va_idx], loss, w))
         history.append((ep, tr_loss, va_loss))
         if va_loss < best_val:
             best_val, best_epoch = va_loss, ep
@@ -213,7 +224,11 @@ def parse_args():
     p.add_argument("--epochs",     type=int, default=300)
     p.add_argument("--batch",      type=int, default=512)
     p.add_argument("--lr",         type=float, default=3e-4)
-    p.add_argument("--patience",   type=int, default=30)
+    p.add_argument("--patience",   type=int, default=50)
+    p.add_argument("--angle-scale-deg", type=float, default=0.2,
+                   help="angle error (deg) that counts as 1 in the loss")
+    p.add_argument("--speed-scale",     type=float, default=0.5,
+                   help="speed error (m/s) that counts as 1 in the loss")
     p.add_argument("--val-frac",   type=float, default=0.1)
     p.add_argument("--seed",       type=int, default=0)
     p.add_argument("--eval-seed",  type=int, default=0)
@@ -230,7 +245,8 @@ def main():
     data = load_teacher_data(paths)
     teacher = json.loads(str(np.load(paths[0])["meta"]))["teacher"]
     train, val = split_by_game(data["game"], args.val_frac, args.seed)
-    name = f"exp16_bc_{teacher}_{args.loss}_s{args.seed}_{time.strftime('%Y-%m-%d@%H%M')}"
+    name = (f"exp16_bc_{teacher}_{args.loss}_a{args.angle_scale_deg:g}_v{args.speed_scale:g}"
+            f"_s{args.seed}_{time.strftime('%Y-%m-%d@%H%M')}")
     out_dir = os.path.join(args.out_root, name)
     os.makedirs(out_dir, exist_ok=True)
     print(f"{name}: {len(paths)} files, {len(data['shot'])} shots "
@@ -240,7 +256,7 @@ def main():
     agent = make_agent(CLEAR_ENV["n_balls"])
     t0 = time.time()
     fit = train_bc(agent, data, train, val, args.loss, args.epochs, args.batch, args.lr,
-                   args.patience, args.seed)
+                   args.patience, args.seed, w=dim_weights(args.angle_scale_deg, args.speed_scale))
     vm = val_metrics(agent, data, val)
     print(f"  trained {fit['epochs_run']} epochs ({time.time()-t0:.0f}s), best val {fit['best_val_loss']:.6f}"
           f"@{fit['best_epoch']}  |  {json.dumps({k: round(v, 4) for k, v in vm.items()})}", flush=True)
