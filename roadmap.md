@@ -33,6 +33,7 @@ Experiment plans and next directions. For completed experiment results, see [exp
 [-] 행동 재파라미터화 — (공, 포켓) 선택 + ghost-ball 보정각 + 속도 — 보류 (2026-10-09, bitter lesson: 도메인 지식 주입)
 [~] 탐색 + 학습 (expert iteration) — 시뮬레이터 탐색이 찾은 샷을 정책이 배우고, 정책이 탐색 후보를 제안 (2026-10-09 제안)
              └─ [~] 0단계: 모방학습(behaviour cloning) — 기하 플래너 교사로 빠른 검증 → 무작위 탐색 교사로
+                    └─ raw 좌표로는 과적합(정책 단독 9~11샷) → 입력 표현: 상대 좌표(행동 기준틀) → GNN(공·포켓 관계, N-ball 일반화)
 [ ] Exp-17   Phase 1 HRL — System 2 (ball selection discrete 3) + System 1 (Phase 1 Exp-10 freeze)
 
 [ ] cushion / bank shots
