@@ -91,8 +91,9 @@ def relabel_rows(data: dict[str, np.ndarray], rows: np.ndarray, seed: int, max_g
         out["win_width"].append(width)
         out["pocketed"].append(1 if width > 0 else int(data["pocketed"][r] > 0))
         if log_every and (n + 1) % log_every == 0:
+            unit = "margin units" if teacher == "margin" else "deg window"
             print(f"  {n + 1}/{len(rows)} states  {time.time() - t0:.0f}s  "
-                  f"median window {np.median(out['win_width']):.3f}°", flush=True)
+                  f"median {np.median(out['win_width']):.3f} {unit}", flush=True)
     env.close()
     return {
         "obs": data["obs"][rows], "game": data["game"][rows], "shot": data["shot"][rows],
