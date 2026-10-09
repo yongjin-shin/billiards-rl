@@ -187,3 +187,87 @@ class TestAngleWrap:
         from exp16_wm.bc import dim_weights
         loss = float(m.train_loss(rel, good[:, 0], good, w=dim_weights(0.2, 0.5), pairs=pairs))
         assert loss < 100.0
+
+
+class TestFactorized:
+    def _extras(self, B, pair_made_slots=(7,), made_slot=7, scratch_slots=()):
+        pm = torch.zeros(B, 18, dtype=torch.int64)
+        pn = torch.zeros(B, 18, dtype=torch.int64)
+        ps = torch.zeros(B, 18, dtype=torch.int64)
+        for sl in range(12):                                       # balls 1-2 were tried (ball 3 pocketed in REL)
+            pn[:, sl] = 20
+        for sl in pair_made_slots:
+            pm[:, sl] = 12
+        for sl in scratch_slots:
+            ps[:, sl] = 20
+        gm = torch.zeros(B, 2, 18); gm[:, 0, made_slot] = 1.0
+        return {"good_made": gm, "good_scratch": torch.zeros(B, 2), "pair_n": pn, "pair_made": pm, "pair_scratch": ps}
+
+    def test_joint_logprob_is_a_distribution_over_the_live_pairs(self):
+        torch.manual_seed(0)
+        m = PairGNNPolicy(hidden=16, factorized=True)
+        means, logits, valid = m(torch.as_tensor(np.stack([REL, REL])))
+        p = torch.exp(logits).sum(dim=1)
+        assert torch.allclose(p, torch.ones(2), atol=1e-5)
+        assert (logits[:, 12:] < -1e8).all()                       # ball 3 is pocketed in REL
+
+    def test_loss_needs_extras_and_is_differentiable(self):
+        import pytest
+        torch.manual_seed(0)
+        m = PairGNNPolicy(hidden=16, factorized=True)
+        rel = torch.as_tensor(np.stack([REL] * 4))
+        good = torch.zeros(4, 3, 2); good[:, 1:] = float("nan")
+        with pytest.raises(ValueError):
+            m.train_loss(rel, good[:, 0], good)
+        loss = m.train_loss(rel, good[:, 0], good, extras=self._extras(4))
+        loss.backward()
+        assert torch.isfinite(loss)
+        assert all(torch.isfinite(p.grad).all() for p in m.parameters() if p.grad is not None)
+
+    def test_learns_verified_pair_selection_and_action_for_that_pair(self):
+        torch.manual_seed(0)
+        m = PairGNNPolicy(hidden=32, factorized=True)
+        rel = torch.as_tensor(np.stack([REL] * 16))
+        good = torch.full((16, 2, 2), float("nan")); good[:, 0] = torch.tensor([0.3, -0.5])
+        ex = self._extras(16, pair_made_slots=(7,), made_slot=7)
+        opt = torch.optim.Adam(m.parameters(), lr=5e-3)
+        for _ in range(300):
+            loss = m.train_loss(rel, good[:, 0], good, extras=ex)
+            opt.zero_grad(); loss.backward(); opt.step()
+        means, logits, _ = m(rel)
+        assert int(logits.argmax(dim=1)[0]) == 7
+        assert torch.allclose(means[0, 7], torch.tensor([0.3, -0.5]), atol=0.05)
+
+    def test_target_mass_follows_made_counts_across_pockets(self):
+        torch.manual_seed(0)
+        m = PairGNNPolicy(hidden=32, factorized=True)
+        rel = torch.as_tensor(np.stack([REL] * 16))
+        good = torch.full((16, 2, 2), float("nan")); good[:, 0] = torch.tensor([0.0, 0.0])
+        ex = self._extras(16, pair_made_slots=(6, 8), made_slot=6)
+        ex["pair_made"][:, 6], ex["pair_made"][:, 8] = 15, 5          # ball 2: pocket 0 three times as good as pocket 2
+        opt = torch.optim.Adam(m.parameters(), lr=5e-3)
+        for _ in range(400):
+            loss = m.train_loss(rel, good[:, 0], good, extras=ex)
+            opt.zero_grad(); loss.backward(); opt.step()
+        o = m.forward_full(rel[:1])
+        p = torch.softmax(o["pocket_logits"][0, 1], dim=0)             # ball 2's pockets
+        assert abs(float(p[0]) - 0.75) < 0.05 and abs(float(p[2]) - 0.25) < 0.05
+
+    def test_scratch_head_learns_and_penalty_steers_the_choice(self):
+        torch.manual_seed(0)
+        m = PairGNNPolicy(hidden=32, factorized=True)
+        rel = torch.as_tensor(np.stack([REL] * 16))
+        good = torch.full((16, 2, 2), float("nan")); good[:, 0] = torch.tensor([0.0, 0.0])
+        ex = self._extras(16, pair_made_slots=(7, 8), made_slot=7, scratch_slots=(7,))
+        ex["pair_made"][:, 7], ex["pair_made"][:, 8] = 12, 11          # slot 7 slightly preferred, but it scratches
+        opt = torch.optim.Adam(m.parameters(), lr=5e-3)
+        for _ in range(400):
+            loss = m.train_loss(rel, good[:, 0], good, extras=ex)
+            opt.zero_grad(); loss.backward(); opt.step()
+        o = m.forward_full(rel[:1])
+        assert float(torch.sigmoid(o["scratch_logit"][0, 7])) > 0.9 and float(torch.sigmoid(o["scratch_logit"][0, 8])) < 0.1
+        m.scratch_lambda = 0.0
+        a0 = m.predict_unit(rel[:1])
+        m.scratch_lambda = 5.0
+        picked = int(torch.argmax(o["logits"][0] - 5.0 * torch.sigmoid(o["scratch_logit"][0])))
+        assert picked == 8 and a0.shape == (1, 2)

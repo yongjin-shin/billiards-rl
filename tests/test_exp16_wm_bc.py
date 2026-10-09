@@ -288,3 +288,34 @@ class TestAngleWrapToggle:
             assert abs(float(gp.action_diff(a, b)[0, 0])) > 1.9
         finally:
             gp.ANGLE_WRAP = True
+
+
+class TestFactorizedPlumbing:
+    def _data(self, n=40):
+        rng = np.random.default_rng(0)
+        d = {"obs": rng.uniform(0, 1, (n, 21)).astype(np.float32), "action": np.zeros((n, 2), np.float32),
+             "good_actions": np.zeros((n, 2, 2), np.float32)}
+        d["good_made"] = np.zeros((n, 2, 18), bool); d["good_made"][:, 0, 4] = True
+        d["good_scratch"] = np.zeros((n, 2), bool)
+        d["pair_n"] = np.full((n, 18), 20, np.int8); d["pair_made"] = np.zeros((n, 18), np.int8); d["pair_made"][:, 4] = 10
+        d["pair_scratch"] = np.zeros((n, 18), np.int8)
+        return d
+
+    def test_missing_keys_raise_and_train_runs_with_them(self):
+        from exp16_wm.gnn_policy import PairGNNPolicy
+        d = self._data()
+        tr = np.arange(40) < 30
+        bad = {k: v for k, v in d.items() if k != "pair_made"}
+        with pytest.raises(ValueError):
+            train_bc(PairGNNPolicy(16, factorized=True), bad, tr, ~tr, "nearest_good", epochs=1, batch=8, lr=1e-3,
+                     patience=1, seed=0, log_every=0, selection="factorized")
+        fit = train_bc(PairGNNPolicy(16, factorized=True), d, tr, ~tr, "nearest_good", epochs=2, batch=8, lr=1e-3,
+                       patience=2, seed=0, log_every=0, selection="factorized")
+        assert fit["epochs_run"] == 2
+
+    def test_unknown_selection_raises(self):
+        d = self._data()
+        tr = np.arange(40) < 30
+        with pytest.raises(ValueError):
+            train_bc(make_agent(3), d, tr, ~tr, "teacher", epochs=1, batch=8, lr=1e-3, patience=1, seed=0,
+                     log_every=0, selection="local")

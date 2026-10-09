@@ -39,7 +39,7 @@ def wrap_angle_unit(x: torch.Tensor) -> torch.Tensor:
     return x - 2.0 * torch.round(x / 2.0)
 
 
-ANGLE_WRAP = True        # set False only to reproduce runs from before the wrap fix (bc.py --no-angle-wrap)
+ANGLE_WRAP = True        # the training CLI (bc.py) sets this from --angle-wrap (off by default: worse for the policy)
 
 
 def action_diff(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
@@ -53,15 +53,21 @@ def _mlp(i: int, h: int, o: int) -> nn.Sequential:
 
 
 class PairGNNPolicy(nn.Module):
-    def __init__(self, hidden: int = 128, wta_eps: float = 0.05, sel_weight: float = 10.0):
+    def __init__(self, hidden: int = 128, wta_eps: float = 0.05, sel_weight: float = 10.0,
+                 factorized: bool = False):
         super().__init__()
         H = hidden
         self.wta_eps, self.sel_weight = wta_eps, sel_weight
+        self.factorized = factorized
+        self.scratch_lambda = 0.0         # inference: penalise pairs the scratch head expects to scratch
         self.bb   = _mlp(5 + 2 + 1 + 1, H, H)
         self.ball = _mlp(5 + H, H, H)
         self.pair = _mlp(H + 2 + 2 + 1 + 1, H, H)
         self.head_a = nn.Linear(H, 2)
-        self.head_s = nn.Linear(H, 1)
+        self.head_s = nn.Linear(H, 1)             # global mode: pair score; factorized mode: pocket logit within a ball
+        if factorized:
+            self.head_ball = nn.Linear(2 * H, 1)  # which ball: [h_i, max_j e_ij]
+            self.head_scratch = nn.Linear(H, 1)   # will this pair's shot pocket the cue ball
         side = torch.zeros(N_POCKETS)
         side[list(SIDE_POCKETS)] = 1.0
         self.register_buffer("side", side)
@@ -71,6 +77,10 @@ class PairGNNPolicy(nn.Module):
     # ── encoder ───────────────────────────────
 
     def _encode(self, rel: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        _, e, valid = self._encode_full(rel)
+        return e, valid
+
+    def _encode_full(self, rel: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         B = rel.shape[0]
         balls = rel[:, :3 * N_BALLS].reshape(B, N_BALLS, 3)
         pos, pocketed = balls[..., :2], balls[..., 2]
@@ -97,30 +107,58 @@ class PairGNNPolicy(nn.Module):
                              self.side.view(1, 1, N_POCKETS, 1).expand(B, N_BALLS, N_POCKETS, 1)], dim=-1)
         e = self.pair(pair_in).reshape(B, N_PAIRS, H)
         valid = live[:, :, None].expand(B, N_BALLS, N_POCKETS).reshape(B, N_PAIRS)
-        return e, valid
+        return h, e, valid
+
+    def forward_full(self, rel: torch.Tensor) -> dict[str, torch.Tensor]:
+        """Everything the heads produce. Factorized mode adds ball/pocket logits and the scratch logit."""
+        h, e, valid = self._encode_full(rel)
+        B, H = rel.shape[0], e.shape[-1]
+        means = torch.tanh(self.head_a(e))
+        out = {"means": means, "valid": valid, "e": e}
+        pocket = self.head_s(e).squeeze(-1)
+        if not self.factorized:
+            out["logits"] = pocket.masked_fill(~valid, _NEG)
+            return out
+        live = valid.view(B, N_BALLS, N_POCKETS)[:, :, 0]
+        e3 = e.view(B, N_BALLS, N_POCKETS, H)
+        ball = self.head_ball(torch.cat([h, e3.max(dim=2).values], dim=-1)).squeeze(-1).masked_fill(~live, _NEG)
+        pocket = pocket.view(B, N_BALLS, N_POCKETS)
+        joint = F.log_softmax(ball, dim=1)[:, :, None] + F.log_softmax(pocket, dim=2)
+        out.update(ball_logits=ball, pocket_logits=pocket, live=live,
+                   scratch_logit=self.head_scratch(e).squeeze(-1),
+                   logits=joint.reshape(B, N_PAIRS).masked_fill(~valid, _NEG))
+        return out
 
     def forward(self, rel: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """rel (B, 21) → per-pair actions in [-1, 1] (B, 18, 2), selection logits (B, 18), valid (B, 18)."""
-        e, valid = self._encode(rel)
-        means = torch.tanh(self.head_a(e))
-        logits = self.head_s(e).squeeze(-1).masked_fill(~valid, _NEG)
-        return means, logits, valid
+        """rel (B, 21) → per-pair actions in [-1, 1] (B, 18, 2), selection logits (B, 18), valid (B, 18).
+        Factorized mode returns the joint log p(ball) + log p(pocket | ball) as the logits."""
+        o = self.forward_full(rel)
+        return o["means"], o["logits"], o["valid"]
 
     # ── interface used by exp16_wm/bc.py ──────
 
     def predict_unit(self, rel: torch.Tensor) -> torch.Tensor:
         """Deterministic action in [-1, 1]: the top-scored pair's proposal. (B, 2)"""
-        means, logits, _ = self(rel)
-        return means[torch.arange(len(means)), logits.argmax(dim=1)]
+        o = self.forward_full(rel)
+        score = o["logits"]
+        if self.factorized and self.scratch_lambda > 0:
+            score = score - self.scratch_lambda * torch.sigmoid(o["scratch_logit"])
+        return o["means"][torch.arange(len(score)), score.argmax(dim=1)]
 
     def train_loss(self, rel: torch.Tensor, teacher_u: torch.Tensor, good_u: torch.Tensor,
-                   w: torch.Tensor | None = None, pairs: torch.Tensor | None = None) -> torch.Tensor:
+                   w: torch.Tensor | None = None, pairs: torch.Tensor | None = None,
+                   extras: dict[str, torch.Tensor] | None = None) -> torch.Tensor:
         """
+        factorized + extras → outcome-grounded loss (_fact_loss).
         pairs None → relaxed winner-takes-all (below). pairs (B, K) int64, −1 = unknown →
         supervised pairs: each labelled candidate regresses its own pair's output and the
         selection head is trained to pick those pairs (fixed targets instead of a moving winner).
         Rows with no labelled pair fall back to winner-takes-all.
         """
+        if self.factorized:
+            if extras is None:
+                raise ValueError("factorized PairGNNPolicy needs extras (good_made, good_scratch, pair_made, pair_scratch, pair_n)")
+            return self._fact_loss(rel, good_u, extras, w)
         if pairs is None:
             return self._wta_loss(rel, teacher_u, good_u, w)
         rows = (pairs >= 0).any(dim=1)
@@ -131,6 +169,52 @@ class PairGNNPolicy(nn.Module):
             loss = loss + self._pair_loss(rel[rows], good_u[rows], pairs[rows], w) * int(rows.sum())
         loss = loss + self._wta_loss(rel[~rows], teacher_u[~rows], good_u[~rows], w) * int((~rows).sum())
         return loss / n
+
+    def _fact_loss(self, rel: torch.Tensor, good_u: torch.Tensor, ex: dict[str, torch.Tensor],
+                   w: torch.Tensor | None) -> torch.Tensor:
+        """
+        Outcome-grounded loss from simulator event logs.
+          reg      : every label candidate k that cleanly pocketed regresses *each pair it really made*
+                     (ex["good_made"][b,k,p]) onto its action — an action making two pairs trains both heads
+          ball CE  : target_i ∝ max_j pair_made[i,j]   (balls with at least one verified-made pair)
+          pocket CE: per ball, target_j ∝ pair_made[i,j] (softmax over that ball's 6 pockets)
+          scratch  : BCE of the scratch head to pair_scratch / pair_n on pairs that were tried
+        """
+        w = torch.ones(2, device=rel.device) if w is None else w
+        o = self.forward_full(rel)
+        means, valid, live = o["means"], o["valid"], o["live"]
+        B = rel.shape[0]
+        # regression onto the pairs each candidate really made
+        gm = ex["good_made"].float()                                            # (B, K2, 18)
+        K2 = gm.shape[1]
+        g = torch.nan_to_num(good_u[:, :K2])
+        cand_ok = (~torch.isnan(good_u[:, :K2, 0])).float() * (1.0 - ex["good_scratch"].float())
+        combo = gm * cand_ok[..., None]                                          # (B, K2, 18)
+        diff = action_diff(means[:, None, :, :], g[:, :, None, :])               # (B, K2, 18, 2)
+        d = ((diff * w) ** 2).sum(-1)
+        reg = (d * combo).sum() / combo.sum().clamp(min=1.0)
+        # selection: ball head and per-ball pocket softmax, soft targets from intent-verified hits
+        made = ex["pair_made"].float().view(B, N_BALLS, N_POCKETS) * live[..., None].float()
+        best = made.max(dim=2).values                                             # (B, 3)
+        rows = best.sum(dim=1) > 0
+        ball_ce = pocket_ce = reg.new_zeros(())
+        if bool(rows.any()):
+            t_ball = best / best.sum(dim=1, keepdim=True).clamp(min=1e-9)
+            logp_b = F.log_softmax(o["ball_logits"], dim=1)
+            ball_ce = -(t_ball * logp_b).sum(dim=1)[rows].mean()
+            has = best > 0                                                        # (B, 3)
+            t_p = made / made.sum(dim=2, keepdim=True).clamp(min=1e-9)
+            logp_p = F.log_softmax(o["pocket_logits"], dim=2)
+            pocket_ce = (-(t_p * logp_p).sum(dim=2))[has].mean()
+        # scratch head
+        n = ex["pair_n"].float()
+        tried = (n > 0) & valid
+        if bool(tried.any()):
+            target = ex["pair_scratch"].float() / n.clamp(min=1.0)
+            scratch_bce = F.binary_cross_entropy_with_logits(o["scratch_logit"][tried], target[tried])
+        else:
+            scratch_bce = reg.new_zeros(())
+        return reg + self.sel_weight * (ball_ce + pocket_ce + scratch_bce)
 
     def _pair_loss(self, rel: torch.Tensor, good_u: torch.Tensor, pairs: torch.Tensor,
                    w: torch.Tensor | None) -> torch.Tensor:
@@ -186,7 +270,7 @@ class PairGNNPolicy(nn.Module):
         return a[0] if np.asarray(rel_obs).ndim == 1 else a
 
     def save(self, path: str) -> None:
-        torch.save({"gnn": self.state_dict()}, path)
+        torch.save({"gnn": self.state_dict(), "factorized": self.factorized}, path)
 
 
 assert REL_DIM == 3 * N_BALLS + 2 * N_POCKETS

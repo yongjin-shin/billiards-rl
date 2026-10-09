@@ -96,7 +96,7 @@ def analyse_run(run_dir: str, limit: int = 0, split: str = "val") -> dict:
     data, train, val = build_split(load_teacher_data(paths), a["val_frac"], a["seed"], a.get("data_frac", 1.0), "none")
     idx = pick_rows(val if split == "val" else train, limit, split)
     raw = data["obs"][idx]
-    model = PairGNNPolicy(a["gnn_hidden"], a["wta_eps"], a["sel_weight"])
+    model = PairGNNPolicy(a["gnn_hidden"], a["wta_eps"], a["sel_weight"], factorized=a.get("selection") == "factorized")
     model.load_state_dict(torch.load(os.path.join(run_dir, "bc_model.pt"))["gnn"])
     model.eval()
     with torch.no_grad():

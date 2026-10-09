@@ -41,6 +41,10 @@ from exp16_wm.gnn_policy import PairGNNPolicy, action_diff
 
 LOSSES = ("teacher", "nearest_good")
 
+# optional per-state arrays carried through load/split when every shard has them
+EXTRA_KEYS = ["good_pairs", "good_made", "good_scratch", "pair_n", "pair_made", "pair_any", "pair_scratch"]
+FACT_KEYS = ("good_made", "good_scratch", "pair_n", "pair_made", "pair_scratch")
+
 
 def seed_everything(seed: int) -> None:
     """Seed before the model is built: weights are initialised at construction, not in train_bc."""
@@ -64,8 +68,7 @@ def load_teacher_data(paths: list[str]) -> dict[str, np.ndarray]:
     if not parts:
         raise FileNotFoundError("no teacher data files")
     keys = ["obs", "action", "good_actions", "n_good", "pocketed", "shot"]
-    if all("good_pairs" in d for d in parts):
-        keys.append("good_pairs")
+    keys += [k for k in EXTRA_KEYS if all(k in d for d in parts)]
     out = {k: np.concatenate([d[k] for d in parts]) for k in keys}
     offset, games = 0, []
     for d in parts:
@@ -102,7 +105,7 @@ def build_split(data: dict[str, np.ndarray], val_frac: float, seed: int, data_fr
         keep = rng.choice(tr_games, size=max(1, int(round(len(tr_games) * data_frac))), replace=False)
         train = train & np.isin(data["game"], keep)
     tr_idx, va_idx = np.where(train)[0], np.where(val)[0]
-    keys = _KEYS + (["good_pairs"] if "good_pairs" in data and augment == "none" else [])   # flips permute pockets
+    keys = _KEYS + ([k for k in EXTRA_KEYS if k in data] if augment == "none" else [])   # flips permute pockets
     if augment == "flip4":
         tr_part = augment_flip4(data, tr_idx)
     elif augment == "none":
@@ -214,7 +217,8 @@ class MLPModel:
         return deterministic_unit(self.agent, obs)
 
     def train_loss(self, obs: torch.Tensor, teacher_u: torch.Tensor, good_u: torch.Tensor,
-                   w: torch.Tensor | None = None, pairs: torch.Tensor | None = None) -> torch.Tensor:
+                   w: torch.Tensor | None = None, pairs: torch.Tensor | None = None,
+                   extras: dict | None = None) -> torch.Tensor:
         return bc_loss(self.predict_unit(obs), teacher_u, good_u, self.loss, w)
 
     def params(self) -> list:
@@ -237,7 +241,8 @@ def train_bc(agent: VanillaSAC, data: dict[str, np.ndarray], train: np.ndarray, 
              loss: str, epochs: int, batch: int, lr: float, patience: int, seed: int,
              log_every: int = 10, w: torch.Tensor | None = None,
              select: str = "loss", select_thresh_deg: float = 0.2,
-             lr_schedule: str = "const", lr_final_frac: float = 0.01, use_pairs: bool = False) -> dict:
+             lr_schedule: str = "const", lr_final_frac: float = 0.01, use_pairs: bool = False,
+             selection: str = "global") -> dict:
     """select: 'loss' keeps the lowest val loss; 'within' the highest val within-threshold rate
     (the val loss is dominated by a few far-off predictions and can disagree with it)."""
     if select not in ("loss", "within"):
@@ -253,6 +258,14 @@ def train_bc(agent: VanillaSAC, data: dict[str, np.ndarray], train: np.ndarray, 
     if use_pairs and "good_pairs" not in data:
         raise ValueError("use_pairs needs data['good_pairs'] (run exp16_wm.pair_labels; no --augment flip4)")
     pr = torch.as_tensor(data["good_pairs"].astype(np.int64)) if use_pairs else None
+    ex = None
+    if selection == "factorized":
+        missing = [k for k in FACT_KEYS if k not in data]
+        if missing:
+            raise ValueError(f"selection=factorized needs {missing} (exp16_wm.outcomes / exp16_wm.pair_stats)")
+        ex = {k: torch.as_tensor(data[k].astype(np.float32 if k in ("good_made", "good_scratch") else np.int64)) for k in FACT_KEYS}
+    elif selection != "global":
+        raise ValueError(f"unknown selection: {selection}")
     opt = torch.optim.Adam(model.params(), lr=lr)
     # constant lr plateaus ~1e-3 of the action range above the precision a pocket needs (~0.1°); anneal it
     sched = (torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=max(1, epochs), eta_min=lr * lr_final_frac)
@@ -266,7 +279,8 @@ def train_bc(agent: VanillaSAC, data: dict[str, np.ndarray], train: np.ndarray, 
         tr_loss = 0.0
         for i in range(0, len(perm), batch):
             b = perm[i:i + batch]
-            l = model.train_loss(obs[b], t_u[b], g_u[b], w, pairs=None if pr is None else pr[b])
+            l = model.train_loss(obs[b], t_u[b], g_u[b], w, pairs=None if pr is None else pr[b],
+                                 extras=None if ex is None else {k: v[b] for k, v in ex.items()})
             opt.zero_grad()
             l.backward()
             opt.step()
@@ -276,7 +290,8 @@ def train_bc(agent: VanillaSAC, data: dict[str, np.ndarray], train: np.ndarray, 
         with torch.no_grad():
             pred_va = model.predict_unit(obs[va_idx])
             va_loss = float(model.train_loss(obs[va_idx], t_u[va_idx], g_u[va_idx], w,
-                                             pairs=None if pr is None else pr[va_idx]))
+                                             pairs=None if pr is None else pr[va_idx],
+                                             extras=None if ex is None else {k: v[va_idx] for k, v in ex.items()}))
             va_within = within_rate(pred_va, g_u[va_idx], select_thresh_deg)
         history.append((ep, tr_loss, va_loss, va_within))
         if sched is not None:
@@ -365,6 +380,10 @@ def parse_args():
     p.add_argument("--sel-weight", type=float, default=10.0)
     p.add_argument("--obs-transform", type=str, default="raw", choices=list(TRANSFORMS))
     p.add_argument("--augment",    type=str, default="none", choices=["none", "flip4"])
+    p.add_argument("--selection", type=str, default="global", choices=["global", "factorized"],
+                   help="factorized: ball head + per-ball pocket softmax, outcome-grounded targets, scratch head")
+    p.add_argument("--scratch-penalty", type=float, default=3.0,
+                   help="factorized: extra evaluation with score −= λ·σ(scratch logit)")
     p.add_argument("--pair-supervision", action="store_true",
                    help="GNN: train each pair head on the pair that produced the label (needs exp16_wm.pair_labels)")
     p.add_argument("--angle-wrap", action="store_true",
@@ -381,8 +400,8 @@ def parse_args():
 
 def main():
     args = parse_args()
-    if args.pair_supervision and (args.model != "gnn" or args.augment != "none"):
-        raise SystemExit("--pair-supervision needs --model gnn and --augment none")
+    if (args.pair_supervision or args.selection == "factorized") and (args.model != "gnn" or args.augment != "none"):
+        raise SystemExit("--pair-supervision / --selection factorized need --model gnn and --augment none")
     if args.model == "gnn" and args.obs_transform != "relative":
         raise SystemExit("--model gnn takes the relative observation: add --obs-transform relative")
     torch.set_num_threads(args.threads)
@@ -399,7 +418,7 @@ def main():
             ("" if args.obs_transform == "raw" else f"_{args.obs_transform}") + \
             ("" if args.augment == "none" else f"_{args.augment}") + \
             ("" if args.data_frac >= 1.0 else f"_frac{args.data_frac:g}") + \
-            ("" if args.lr_schedule == "const" else "_cos") + ("_pairs" if args.pair_supervision else "") + \
+            ("" if args.lr_schedule == "const" else "_cos") + ("_pairs" if args.pair_supervision else "") + ("_fact" if args.selection == "factorized" else "") + \
             ("_wrap" if args.angle_wrap else "_nowrap")
     name = (f"exp16_bc_{teacher}_{args.loss}{h_tag}_a{args.angle_scale_deg:g}_v{args.speed_scale:g}"
             f"_s{args.seed}_{time.strftime('%Y-%m-%d@%H%M')}")
@@ -410,14 +429,15 @@ def main():
           flush=True)
 
     if args.model == "gnn":
-        agent = PairGNNPolicy(args.gnn_hidden, args.wta_eps, args.sel_weight)
+        agent = PairGNNPolicy(args.gnn_hidden, args.wta_eps, args.sel_weight,
+                              factorized=args.selection == "factorized")
     else:
         agent = make_agent(CLEAR_ENV["n_balls"], args.hidden, OBS_DIMS[args.obs_transform])
     t0 = time.time()
     fit = train_bc(agent, data, train, val, args.loss, args.epochs, args.batch, args.lr,
                    args.patience, args.seed, w=dim_weights(args.angle_scale_deg, args.speed_scale),
                    select=args.select, lr_schedule=args.lr_schedule, lr_final_frac=args.lr_final_frac,
-                   use_pairs=args.pair_supervision)
+                   use_pairs=args.pair_supervision, selection=args.selection)
     vm = val_metrics(agent, data, val)
     print(f"  trained {fit['epochs_run']} epochs ({time.time()-t0:.0f}s), best ({args.select}) @{fit['best_epoch']}"
           f" val loss {fit['best_val_loss']:.6f}  |  {json.dumps({k: round(v, 4) for k, v in vm.items()})}", flush=True)
@@ -426,7 +446,14 @@ def main():
     ev = evaluate_policy(TransformedPolicy(agent, args.obs_transform), args.eval_seed, args.eval_games, CLEAR_ENV)
     print(f"  policy alone ({args.eval_games} games): {json.dumps({k: (round(v, 3) if v is not None else None) for k, v in ev.items()})}",
           flush=True)
-    results = {"name": name, "teacher": teacher, "loss": args.loss, "data": paths,
+    ev_pen = None
+    if args.selection == "factorized":                       # the scratch head's effect, same model, penalty at inference only
+        agent.scratch_lambda = args.scratch_penalty
+        ev_pen = evaluate_policy(TransformedPolicy(agent, args.obs_transform), args.eval_seed, args.eval_games, CLEAR_ENV)
+        agent.scratch_lambda = 0.0
+        print(f"  policy alone with scratch penalty {args.scratch_penalty}: "
+              f"{json.dumps({k: (round(v, 3) if v is not None else None) for k, v in ev_pen.items()})}", flush=True)
+    results = {"name": name, "teacher": teacher, "loss": args.loss, "data": paths, "eval_scratch_penalty": ev_pen,
                "n_shots": int(len(data["shot"])), "n_train": int(train.sum()), "n_val": int(val.sum()),
                "train": {k: v for k, v in fit.items() if k != "history"}, "val": vm, "eval": ev,
                "args": vars(args)}
