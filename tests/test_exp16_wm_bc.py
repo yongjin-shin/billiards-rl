@@ -12,7 +12,7 @@ import numpy as np
 import pytest
 import torch
 
-from exp16_wm.bc import (to_unit, bc_loss, dim_weights, TransformedPolicy, build_split, split_by_game, angle_err_deg, nearest_good_angle_err_deg,
+from exp16_wm.bc import (to_unit, bc_loss, dim_weights, TransformedPolicy, build_split, within_rate, split_by_game, angle_err_deg, nearest_good_angle_err_deg,
                          load_teacher_data, make_agent, train_bc, evaluate_policy)
 from exp16_wm.train import ACT_LOW, ACT_HIGH
 from exp16_wm.teacher_data import collect, save, CLEAR_ENV
@@ -161,3 +161,39 @@ class TestBuildSplit:
     def test_unknown_augment_raises(self):
         with pytest.raises(ValueError):
             build_split(self._data(), 0.2, seed=0, augment="rot90")
+
+
+class TestWithinRate:
+    NAN = float("nan")
+
+    def test_exact_and_off_by_one_degree(self):
+        one_deg = np.radians(1.0) / np.pi
+        good = torch.tensor([[[0.1, 0.0]], [[0.1, 0.0]]])
+        pred = torch.tensor([[0.1, 0.5], [0.1 + one_deg, 0.0]])
+        assert within_rate(pred, good, 0.2) == 0.5
+
+    def test_wraps_around_pi(self):
+        eps = np.radians(0.05) / np.pi
+        good = torch.tensor([[[1.0 - eps, 0.0]]])
+        pred = torch.tensor([[-1.0 + eps, 0.0]])      # 0.1° apart across ±π
+        assert within_rate(pred, good, 0.2) == 1.0
+
+    def test_rows_without_candidates_ignored_and_all_empty_is_nan(self):
+        good = torch.tensor([[[0.0, 0.0]], [[self.NAN, self.NAN]]])
+        assert within_rate(torch.zeros(2, 2), good, 0.2) == 1.0
+        assert np.isnan(within_rate(torch.zeros(1, 2), good[1:], 0.2))
+
+    def test_select_within_runs_and_unknown_raises(self):
+        rng = np.random.default_rng(0)
+        n = 64
+        data = {"obs": rng.uniform(0, 1, (n, 23)).astype(np.float32),
+                "action": np.tile(np.array([[0.3, 4.0]], np.float32), (n, 1)),
+                "good_actions": np.tile(np.array([[[0.3, 4.0]]], np.float32), (n, 1, 1))}
+        tr = np.arange(n) < 48
+        torch.manual_seed(0)
+        fit = train_bc(make_agent(3), data, tr, ~tr, "nearest_good", epochs=5, batch=16, lr=1e-3,
+                       patience=5, seed=0, log_every=0, select="within")
+        assert fit["select"] == "within" and len(fit["history"][0]) == 4
+        with pytest.raises(ValueError):
+            train_bc(make_agent(3), data, tr, ~tr, "teacher", epochs=1, batch=16, lr=1e-3,
+                     patience=1, seed=0, log_every=0, select="median")

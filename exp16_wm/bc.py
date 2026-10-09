@@ -134,6 +134,21 @@ def bc_loss(pred_unit: torch.Tensor, teacher_unit: torch.Tensor, good_unit: torc
     raise ValueError(f"unknown loss: {loss}")
 
 
+def within_rate(pred_unit: torch.Tensor, good_unit: torch.Tensor, thresh_deg: float) -> float:
+    """
+    Fraction of rows whose predicted delta_angle is within thresh_deg of some pocketing
+    candidate (wrapped). Rows without any candidate are ignored; NaN if none have one.
+    """
+    valid = ~torch.isnan(good_unit[..., 0])
+    if not bool(valid.any()):
+        return float("nan")
+    diff = (pred_unit[:, None, 0] - torch.nan_to_num(good_unit[..., 0])) * np.pi
+    d = torch.atan2(torch.sin(diff), torch.cos(diff)).abs()
+    d = torch.where(valid, d, torch.full_like(d, float("inf"))).min(dim=1).values
+    rows = valid.any(dim=1)
+    return float((d[rows] < np.radians(thresh_deg)).float().mean())
+
+
 def angle_err_deg(pred: np.ndarray, target: np.ndarray) -> np.ndarray:
     """|wrapped delta_angle difference| in degrees, per sample."""
     return np.degrees(np.abs([wrap_angle(float(p - t)) for p, t in zip(pred, target)]))
@@ -178,7 +193,12 @@ def deterministic_unit(agent: VanillaSAC, obs: torch.Tensor) -> torch.Tensor:
 
 def train_bc(agent: VanillaSAC, data: dict[str, np.ndarray], train: np.ndarray, val: np.ndarray,
              loss: str, epochs: int, batch: int, lr: float, patience: int, seed: int,
-             log_every: int = 10, w: torch.Tensor | None = None) -> dict:
+             log_every: int = 10, w: torch.Tensor | None = None,
+             select: str = "loss", select_thresh_deg: float = 0.2) -> dict:
+    """select: 'loss' keeps the lowest val loss; 'within' the highest val within-threshold rate
+    (the val loss is dominated by a few far-off predictions and can disagree with it)."""
+    if select not in ("loss", "within"):
+        raise ValueError(f"unknown select: {select}")
     torch.manual_seed(seed)
     rng = np.random.default_rng(seed)
     obs   = torch.as_tensor(data["obs"])
@@ -188,7 +208,7 @@ def train_bc(agent: VanillaSAC, data: dict[str, np.ndarray], train: np.ndarray, 
     opt = torch.optim.Adam(params, lr=lr)
     tr_idx, va_idx = np.where(train)[0], np.where(val)[0]
 
-    best_val, best_state, best_epoch, history = float("inf"), None, -1, []
+    best_score, best_val, best_state, best_epoch, history = -float("inf"), float("inf"), None, -1, []
     for ep in range(epochs):
         agent.actor.train()
         perm = rng.permutation(tr_idx)
@@ -203,20 +223,23 @@ def train_bc(agent: VanillaSAC, data: dict[str, np.ndarray], train: np.ndarray, 
         tr_loss /= max(1, len(perm))
         agent.actor.eval()
         with torch.no_grad():
-            va_loss = float(bc_loss(deterministic_unit(agent, obs[va_idx]), t_u[va_idx], g_u[va_idx], loss, w))
-        history.append((ep, tr_loss, va_loss))
-        if va_loss < best_val:
-            best_val, best_epoch = va_loss, ep
+            pred_va = deterministic_unit(agent, obs[va_idx])
+            va_loss = float(bc_loss(pred_va, t_u[va_idx], g_u[va_idx], loss, w))
+            va_within = within_rate(pred_va, g_u[va_idx], select_thresh_deg)
+        history.append((ep, tr_loss, va_loss, va_within))
+        score = -va_loss if select == "loss" else (va_within if va_within == va_within else -float("inf"))
+        if score > best_score:
+            best_score, best_val, best_epoch = score, va_loss, ep
             best_state = {k: v.clone() for k, v in agent.actor.state_dict().items()}
         if log_every and ep % log_every == 0:
-            print(f"  epoch {ep:>4}  train {tr_loss:.6f}  val {va_loss:.6f}  best {best_val:.6f}@{best_epoch}",
-                  flush=True)
+            print(f"  epoch {ep:>4}  train {tr_loss:.6f}  val {va_loss:.6f}  within{select_thresh_deg:g} "
+                  f"{va_within:.4f}  best@{best_epoch}", flush=True)
         if ep - best_epoch >= patience:
             break
     agent.actor.load_state_dict(best_state)
     agent.actor.eval()
     return {"best_val_loss": best_val, "best_epoch": best_epoch, "epochs_run": len(history),
-            "history": history}
+            "select": select, "best_score": best_score, "history": history}
 
 
 def val_metrics(agent: VanillaSAC, data: dict[str, np.ndarray], val: np.ndarray) -> dict:
@@ -281,6 +304,8 @@ def parse_args():
     p.add_argument("--threads",    type=int, default=2)
     p.add_argument("--obs-transform", type=str, default="raw", choices=list(TRANSFORMS))
     p.add_argument("--augment",    type=str, default="none", choices=["none", "flip4"])
+    p.add_argument("--select",     type=str, default="within", choices=["loss", "within"],
+                   help="best checkpoint: lowest val loss or highest val within-0.2° rate")
     p.add_argument("--data-frac",  type=float, default=1.0, help="fraction of train games used")
     p.add_argument("--hidden",     type=int, nargs="+", default=None,
                    help="actor hidden sizes (default: VanillaSAC's, i.e. same as SAC runs)")
@@ -311,10 +336,11 @@ def main():
     agent = make_agent(CLEAR_ENV["n_balls"], args.hidden, OBS_DIMS[args.obs_transform])
     t0 = time.time()
     fit = train_bc(agent, data, train, val, args.loss, args.epochs, args.batch, args.lr,
-                   args.patience, args.seed, w=dim_weights(args.angle_scale_deg, args.speed_scale))
+                   args.patience, args.seed, w=dim_weights(args.angle_scale_deg, args.speed_scale),
+                   select=args.select)
     vm = val_metrics(agent, data, val)
-    print(f"  trained {fit['epochs_run']} epochs ({time.time()-t0:.0f}s), best val {fit['best_val_loss']:.6f}"
-          f"@{fit['best_epoch']}  |  {json.dumps({k: round(v, 4) for k, v in vm.items()})}", flush=True)
+    print(f"  trained {fit['epochs_run']} epochs ({time.time()-t0:.0f}s), best ({args.select}) @{fit['best_epoch']}"
+          f" val loss {fit['best_val_loss']:.6f}  |  {json.dumps({k: round(v, 4) for k, v in vm.items()})}", flush=True)
     agent.save(os.path.join(out_dir, "bc_model.pt"))
 
     ev = evaluate_policy(TransformedPolicy(agent, args.obs_transform), args.eval_seed, args.eval_games, CLEAR_ENV)
