@@ -271,3 +271,19 @@ class TestFactorized:
         m.scratch_lambda = 5.0
         picked = int(torch.argmax(o["logits"][0] - 5.0 * torch.sigmoid(o["scratch_logit"][0])))
         assert picked == 8 and a0.shape == (1, 2)
+
+
+class TestFactTerms:
+    def test_terms_switch_the_loss_pieces_on_and_off(self):
+        torch.manual_seed(0)
+        m = PairGNNPolicy(hidden=16, factorized=True)
+        rel = torch.as_tensor(np.stack([REL] * 4))
+        good = torch.zeros(4, 3, 2); good[:, 1:] = float("nan")
+        h = TestFactorized()._extras(4)
+        vals = {}
+        for terms in (("reg",), ("sel",), ("scratch",), ("reg", "sel", "scratch")):
+            m.fact_terms = terms
+            vals[terms] = float(m.train_loss(rel, good[:, 0], good, extras=h).detach())
+        assert vals[("reg",)] > 0 and vals[("sel",)] > 0 and vals[("scratch",)] > 0
+        parts = vals[("reg",)] + vals[("sel",)] + vals[("scratch",)]
+        assert abs(vals[("reg", "sel", "scratch")] - parts) < 1e-3 * max(1.0, parts)

@@ -60,6 +60,7 @@ class PairGNNPolicy(nn.Module):
         self.wta_eps, self.sel_weight = wta_eps, sel_weight
         self.factorized = factorized
         self.scratch_lambda = 0.0         # inference: penalise pairs the scratch head expects to scratch
+        self.fact_terms = ("reg", "sel", "scratch")     # factorized loss terms that are switched on (ablations)
         self.bb   = _mlp(5 + 2 + 1 + 1, H, H)
         self.ball = _mlp(5 + H, H, H)
         self.pair = _mlp(H + 2 + 2 + 1 + 1, H, H)
@@ -214,7 +215,12 @@ class PairGNNPolicy(nn.Module):
             scratch_bce = F.binary_cross_entropy_with_logits(o["scratch_logit"][tried], target[tried])
         else:
             scratch_bce = reg.new_zeros(())
-        return reg + self.sel_weight * (ball_ce + pocket_ce + scratch_bce)
+        total = reg if "reg" in self.fact_terms else reg * 0.0
+        if "sel" in self.fact_terms:
+            total = total + self.sel_weight * (ball_ce + pocket_ce)
+        if "scratch" in self.fact_terms:
+            total = total + self.sel_weight * scratch_bce
+        return total
 
     def _pair_loss(self, rel: torch.Tensor, good_u: torch.Tensor, pairs: torch.Tensor,
                    w: torch.Tensor | None) -> torch.Tensor:

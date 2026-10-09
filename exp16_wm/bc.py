@@ -382,6 +382,8 @@ def parse_args():
     p.add_argument("--augment",    type=str, default="none", choices=["none", "flip4"])
     p.add_argument("--selection", type=str, default="global", choices=["global", "factorized"],
                    help="factorized: ball head + per-ball pocket softmax, outcome-grounded targets, scratch head")
+    p.add_argument("--fact-terms", type=str, nargs="+", default=["reg", "sel", "scratch"],
+                   choices=["reg", "sel", "scratch"], help="factorized loss terms to keep (ablation)")
     p.add_argument("--scratch-penalty", type=float, default=3.0,
                    help="factorized: extra evaluation with score −= λ·σ(scratch logit)")
     p.add_argument("--pair-supervision", action="store_true",
@@ -418,7 +420,8 @@ def main():
             ("" if args.obs_transform == "raw" else f"_{args.obs_transform}") + \
             ("" if args.augment == "none" else f"_{args.augment}") + \
             ("" if args.data_frac >= 1.0 else f"_frac{args.data_frac:g}") + \
-            ("" if args.lr_schedule == "const" else "_cos") + ("_pairs" if args.pair_supervision else "") + ("_fact" if args.selection == "factorized" else "") + \
+            ("" if args.lr_schedule == "const" else "_cos") + ("_pairs" if args.pair_supervision else "") + ("_fact" + ("" if len(args.fact_terms) == 3 else "-" + "".join(t[0] for t in args.fact_terms))
+             if args.selection == "factorized" else "") + \
             ("_wrap" if args.angle_wrap else "_nowrap")
     name = (f"exp16_bc_{teacher}_{args.loss}{h_tag}_a{args.angle_scale_deg:g}_v{args.speed_scale:g}"
             f"_s{args.seed}_{time.strftime('%Y-%m-%d@%H%M')}")
@@ -431,6 +434,7 @@ def main():
     if args.model == "gnn":
         agent = PairGNNPolicy(args.gnn_hidden, args.wta_eps, args.sel_weight,
                               factorized=args.selection == "factorized")
+        agent.fact_terms = tuple(args.fact_terms)
     else:
         agent = make_agent(CLEAR_ENV["n_balls"], args.hidden, OBS_DIMS[args.obs_transform])
     t0 = time.time()
