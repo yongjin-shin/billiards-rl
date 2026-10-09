@@ -34,6 +34,17 @@ SIDE_POCKETS = (1, 4)            # obs pocket order: (0,0) (0,½) (0,1) (1,0) (1
 _NEG = -1e9
 
 
+def wrap_angle_unit(x: torch.Tensor) -> torch.Tensor:
+    """Angle in units of π (a full turn = 2) → the equivalent value in [-1, 1]."""
+    return x - 2.0 * torch.round(x / 2.0)
+
+
+def action_diff(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+    """a − b for (…, 2) actions in [-1, 1] units; the angle is circular, so its difference is wrapped."""
+    d = a - b
+    return torch.stack([wrap_angle_unit(d[..., 0]), d[..., 1]], dim=-1)
+
+
 def _mlp(i: int, h: int, o: int) -> nn.Sequential:
     return nn.Sequential(nn.Linear(i, h), nn.ReLU(), nn.Linear(h, h), nn.ReLU(), nn.Linear(h, o))
 
@@ -126,7 +137,7 @@ class PairGNNPolicy(nn.Module):
         has = pairs >= 0
         pidx = pairs.clamp(min=0)
         m = means.gather(1, pidx[..., None].expand(B, K, 2))
-        d = (((m - torch.nan_to_num(good_u)) * w) ** 2).sum(-1)
+        d = ((action_diff(m, torch.nan_to_num(good_u)) * w) ** 2).sum(-1)
         n = has.sum(dim=1).clamp(min=1)
         reg = (d * has).sum(dim=1) / n
         logp = F.log_softmax(logits, dim=1).gather(1, pidx)
@@ -145,7 +156,7 @@ class PairGNNPolicy(nn.Module):
         tgt_valid = tgt_valid.clone()
         tgt_valid[~has_good, 0] = True
 
-        d = (((means[:, :, None, :] - tgt[:, None, :, :]) * w) ** 2).sum(-1)       # (B, 18, K)
+        d = ((action_diff(means[:, :, None, :], tgt[:, None, :, :]) * w) ** 2).sum(-1)       # (B, 18, K)
         d = torch.where(tgt_valid[:, None, :], d, torch.full_like(d, float("inf")))
         dp = torch.where(valid, d.min(dim=2).values, torch.full_like(d[..., 0], float("inf")))
         rows = valid.any(dim=1)

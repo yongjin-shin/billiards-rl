@@ -12,7 +12,7 @@ import numpy as np
 import pytest
 import torch
 
-from exp16_wm.gnn_policy import PairGNNPolicy, N_PAIRS
+from exp16_wm.gnn_policy import PairGNNPolicy, N_PAIRS, action_diff, wrap_angle_unit
 from exp16_wm.obs_transform import relative_obs, REL_DIM
 from exp16_wm.bc import train_bc, TransformedPolicy, evaluate_policy, val_metrics, dim_weights
 from exp16_wm.teacher_data import CLEAR_ENV
@@ -154,3 +154,36 @@ class TestPairSupervision:
         loss.backward()
         assert torch.isfinite(loss)
         assert torch.isfinite(m.train_loss(rel, good[:, 0], good, pairs=torch.full((4, 3), -1)))   # all rows fall back
+
+
+class TestAngleWrap:
+    def test_wrap_angle_unit(self):
+        x = torch.tensor([0.0, 0.5, 1.5, -1.5, 1.998, -1.998, 2.0])
+        w = wrap_angle_unit(x)
+        assert torch.allclose(w, torch.tensor([0.0, 0.5, -0.5, 0.5, -0.002, 0.002, 0.0]), atol=1e-5)
+        assert (wrap_angle_unit(torch.linspace(-5, 5, 101)).abs() <= 1.0 + 1e-6).all()
+
+    def test_action_diff_takes_the_short_way_only_for_the_angle(self):
+        a, b = torch.tensor([[0.999, 0.3]]), torch.tensor([[-0.999, 0.1]])
+        d = action_diff(a, b)
+        assert abs(float(d[0, 0]) - (-0.002)) < 1e-5 and abs(float(d[0, 1]) - 0.2) < 1e-6
+
+    def test_pair_loss_regression_term_is_small_just_across_the_seam(self):
+        # label at +179.5° (unit 0.9972). Fit one pair's output to -179.5° (1° across the seam): the
+        # regression term must be ≈ (1°/0.2°)² = 25, not (359°/0.2°)² ≈ 3e6.
+        torch.manual_seed(0)
+        m = PairGNNPolicy(hidden=16)
+        m.sel_weight = 0.0
+        rel = torch.as_tensor(np.stack([REL] * 2))
+        good = torch.zeros(2, 1, 2)
+        good[:, 0] = torch.tensor([0.9972, 0.0])
+        pairs = torch.full((2, 1), 4, dtype=torch.long)
+        opt = torch.optim.Adam(m.parameters(), lr=1e-2)
+        target = torch.tensor([-0.9972, 0.0])
+        for _ in range(300):                                   # drive the pair-4 output to the other side of the seam
+            means, _, _ = m(rel)
+            l = ((means[:, 4] - target) ** 2).sum()
+            opt.zero_grad(); l.backward(); opt.step()
+        from exp16_wm.bc import dim_weights
+        loss = float(m.train_loss(rel, good[:, 0], good, w=dim_weights(0.2, 0.5), pairs=pairs))
+        assert loss < 100.0

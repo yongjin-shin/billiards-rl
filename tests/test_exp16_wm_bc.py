@@ -248,3 +248,14 @@ class TestPairData:
         assert "good_pairs" in out and len(out["good_pairs"]) == n
         out, tr, va = build_split(d, 0.2, seed=0, augment="flip4")
         assert "good_pairs" not in out
+
+
+class TestBcLossWrap:
+    def test_nearest_good_and_teacher_losses_see_the_seam_as_continuous(self):
+        good = torch.tensor([[[0.9972, 0.0]]])
+        teacher = torch.tensor([[0.9972, 0.0]])
+        across = torch.tensor([[-0.9972, 0.0]])                  # 1° away across ±180°
+        w = dim_weights(0.2, 0.5)
+        for loss in ("nearest_good", "teacher"):
+            l = float(bc_loss(across, teacher, good, loss, w))
+            assert l < 40.0                                       # ≈ (1°/0.2°)² = 25, not (359°/0.2°)² ≈ 3e6

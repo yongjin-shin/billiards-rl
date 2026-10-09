@@ -45,7 +45,9 @@ def nearest_good_idx(pred_env: np.ndarray, good_env: np.ndarray, w: np.ndarray) 
     weighted unit space; -1 when a row has no candidate. pred (N,2), good (N,K,2) NaN-padded.
     """
     pu, gu = to_unit(pred_env), to_unit(good_env)
-    d = (((pu[:, None, :] - np.nan_to_num(gu)) * w) ** 2).sum(-1)
+    diff = pu[:, None, :] - np.nan_to_num(gu)
+    diff[..., 0] -= 2.0 * np.round(diff[..., 0] / 2.0)                    # the angle is circular
+    d = ((diff * w) ** 2).sum(-1)
     d = np.where(np.isnan(good_env[..., 0]), np.inf, d)
     idx = d.argmin(axis=1)
     return np.where(np.isfinite(d.min(axis=1)), idx, -1)

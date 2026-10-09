@@ -36,7 +36,7 @@ from exp16_wm.planner import wrap_angle
 from exp16_wm.teacher_data import CLEAR_ENV
 from exp16_wm.obs_transform import TRANSFORMS, OBS_DIMS
 from exp16_wm.augment import augment_flip4
-from exp16_wm.gnn_policy import PairGNNPolicy
+from exp16_wm.gnn_policy import PairGNNPolicy, action_diff
 
 LOSSES = ("teacher", "nearest_good")
 
@@ -127,13 +127,13 @@ def bc_loss(pred_unit: torch.Tensor, teacher_unit: torch.Tensor, good_unit: torc
     """
     w = torch.ones(2) if w is None else w
     if loss == "teacher":
-        return (((pred_unit - teacher_unit) * w) ** 2).sum(-1).mean()
+        return ((action_diff(pred_unit, teacher_unit) * w) ** 2).sum(-1).mean()
     if loss == "nearest_good":
         valid = ~torch.isnan(good_unit[..., 0])                          # (B,K)
-        d = (((pred_unit.unsqueeze(1) - torch.nan_to_num(good_unit)) * w) ** 2).sum(-1)
+        d = ((action_diff(pred_unit.unsqueeze(1), torch.nan_to_num(good_unit)) * w) ** 2).sum(-1)
         d = torch.where(valid, d, torch.full_like(d, float("inf")))
         nearest = d.min(dim=1).values
-        fallback = (((pred_unit - teacher_unit) * w) ** 2).sum(-1)
+        fallback = ((action_diff(pred_unit, teacher_unit) * w) ** 2).sum(-1)
         return torch.where(valid.any(dim=1), nearest, fallback).mean()
     raise ValueError(f"unknown loss: {loss}")
 
@@ -385,7 +385,7 @@ def main():
             ("" if args.obs_transform == "raw" else f"_{args.obs_transform}") + \
             ("" if args.augment == "none" else f"_{args.augment}") + \
             ("" if args.data_frac >= 1.0 else f"_frac{args.data_frac:g}") + \
-            ("" if args.lr_schedule == "const" else "_cos") + ("_pairs" if args.pair_supervision else "")
+            ("" if args.lr_schedule == "const" else "_cos") + ("_pairs" if args.pair_supervision else "") + "_wrap"
     name = (f"exp16_bc_{teacher}_{args.loss}{h_tag}_a{args.angle_scale_deg:g}_v{args.speed_scale:g}"
             f"_s{args.seed}_{time.strftime('%Y-%m-%d@%H%M')}")
     out_dir = os.path.join(args.out_root, name)

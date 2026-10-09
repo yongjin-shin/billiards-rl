@@ -68,3 +68,10 @@ class TestPickRows:
         a, b = pick_rows(self.MASK, 4, "train", seed=0), pick_rows(self.MASK, 4, "train", seed=0)
         np.testing.assert_array_equal(a, b)
         assert len(a) == 4 and (np.diff(a) > 0).all() and self.MASK[a].all()
+
+
+class TestNearestGoodWrap:
+    def test_candidate_across_the_seam_is_nearest(self):
+        pred = np.array([[np.radians(179.5), 3.0]], dtype=np.float32)
+        good = np.array([[[np.radians(-179.5), 3.0], [np.radians(120.0), 3.0]]], dtype=np.float32)
+        assert nearest_good_idx(pred, good, W)[0] == 0
