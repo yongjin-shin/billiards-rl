@@ -12,6 +12,11 @@ Same states, new labels: each shard is written twice with identical rows and gam
 ids — robust labels and the original labels — so a BC comparison differs only in
 the labels (identical train/val split).
 
+Every simulation the robust teacher runs (~300 per state, hits and misses) is also
+kept as a labelled (state, action) → outcome sample for a learned success map:
+sims/<file>_shard<i>.npz with sim_state (row into the shard's arrays), sim_action
+(delta_angle, speed), sim_pocketed (balls), sim_scratch.
+
 Usage:
     python -m exp16_wm.relabel --data logs/teacher_data/snap_1014/ghost_s1000.npz \
         --shard 0 --n-shards 8 --out-dir logs/teacher_data/relabel_s1000
@@ -68,10 +73,16 @@ def relabel_rows(data: dict[str, np.ndarray], rows: np.ndarray, seed: int, max_g
     env.reset(seed=seed)
     rng = np.random.default_rng(seed)
     out = {"action": [], "good_actions": [], "n_good": [], "win_width": [], "pocketed": []}
+    sim_state, sim_action, sim_pocketed, sim_scratch = [], [], [], []
     t0 = time.time()
     for n, r in enumerate(rows):
         restore_state(env, data["obs"][r])
-        action, good, n_good, width = robust_shot(env, rng, TEACHERS["robust"], max_good)
+        record: list = []
+        action, good, n_good, width = robust_shot(env, rng, TEACHERS["robust"], max_good, record=record)
+        sim_state.extend([n] * len(record))
+        sim_action.extend(a for a, _, _ in record)
+        sim_pocketed.extend(p for _, p, _ in record)
+        sim_scratch.extend(sc for _, _, sc in record)
         out["action"].append(action)
         out["good_actions"].append(good)
         out["n_good"].append(n_good)
@@ -88,6 +99,12 @@ def relabel_rows(data: dict[str, np.ndarray], rows: np.ndarray, seed: int, max_g
         "n_good": np.asarray(out["n_good"], np.int32),
         "win_width": np.asarray(out["win_width"], np.float32),
         "pocketed": np.asarray(out["pocketed"], np.int32),
+        "sims": {
+            "sim_state":    np.asarray(sim_state, np.int32),
+            "sim_action":   np.asarray(sim_action, np.float32).reshape(-1, 2),
+            "sim_pocketed": np.asarray(sim_pocketed, np.int8),
+            "sim_scratch":  np.asarray(sim_scratch, bool),
+        },
     }
 
 
@@ -124,14 +141,20 @@ def main():
     print(f"relabel {args.data}  shard {args.shard}/{args.n_shards}: {len(rows)} states", flush=True)
     src = json.loads(str(data["meta"]))
     new = relabel_rows(data, rows, seed=10_000 + args.shard, max_good=args.max_good)
+    sims = new.pop("sims")
     base = os.path.splitext(os.path.basename(args.data))[0]
+    write(os.path.join(args.out_dir, "sims", f"{base}_shard{args.shard}.npz"),
+          {"obs": new["obs"], "game": new["game"], **sims},
+          {"source": args.data, "shard": args.shard, "plan": TEACHERS["robust"], "env": src.get("env")})
     write(os.path.join(args.out_dir, "robust", f"{base}_shard{args.shard}.npz"), new,
           {"teacher": "robust_relabel", "source": args.data, "plan": TEACHERS["robust"], "env": src.get("env")})
     write(os.path.join(args.out_dir, "orig", f"{base}_shard{args.shard}.npz"),
           original_rows(data, rows, args.max_good),
           {"teacher": f"{src.get('teacher')}_same_states", "source": args.data, "env": src.get("env")})
     w = new["win_width"]
-    print(f"done: {len(rows)} states, window median {np.median(w):.3f}°, "
+    print(f"done: {len(rows)} states, {len(sims['sim_state'])} sims "
+          f"({np.mean((sims['sim_pocketed'] > 0) & ~sims['sim_scratch']) * 100:.1f}% pocket clean), "
+          f"window median {np.median(w):.3f}°, "
           f"speed median {np.median(new['action'][:, 1]):.2f} (orig {np.median(data['action'][rows, 1]):.2f}) m/s",
           flush=True)
 

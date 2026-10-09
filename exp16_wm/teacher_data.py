@@ -68,20 +68,29 @@ def widest_window(hits: np.ndarray, offsets: np.ndarray) -> tuple[float, float]:
 
 
 def robust_shot(env: BilliardsEnv, rng: np.random.Generator, plan_kw: dict,
-                max_good: int) -> tuple[np.ndarray, np.ndarray, int, float]:
+                max_good: int, record: list | None = None) -> tuple[np.ndarray, np.ndarray, int, float]:
     """
     The most forgiving pocketing shot. A shot counts as good if it pockets ≥1 ball without scratching.
     Returns (action, good_actions (max_good, 2), n_good, window width deg). Falls back to the plain
     planner's choice (width 0) when no ghost-ball pair pockets.
+    record: if given, every simulated (action, n_pocketed, scratch) is appended — labelled
+    (state, action) → outcome samples for a learned success map.
     """
     phi_ref = aim_reference(env)
+
+    def sim(a: np.ndarray) -> ShotResult:
+        r = simulate_candidate(env, phi_ref, a)
+        if record is not None:
+            record.append((a, r[0], r[1]))
+        return r
+
     aims = ghost_aims(env, plan_kw["max_cut_deg"])
     counts = []
     for _, _, phi in aims:
         n = 0
         for off in plan_kw["offsets_deg"]:
             for v in plan_kw["speeds"]:
-                r = simulate_candidate(env, phi_ref, action_from_phi(phi + np.radians(off), phi_ref, v))
+                r = sim(action_from_phi(phi + np.radians(off), phi_ref, v))
                 n += int(r[0] > 0 and not r[1])
         counts.append(n)
     top = [k for k in np.argsort(counts)[::-1][:plan_kw["top_pairs"]] if counts[k] > 0]
@@ -93,7 +102,7 @@ def robust_shot(env: BilliardsEnv, rng: np.random.Generator, plan_kw: dict,
         for v in plan_kw["scan_speeds"]:
             hits = []
             for o in offs:
-                r = simulate_candidate(env, phi_ref, action_from_phi(phi + np.radians(o), phi_ref, v))
+                r = sim(action_from_phi(phi + np.radians(o), phi_ref, v))
                 hits.append(r[0] > 0 and not r[1])
             width, centre = widest_window(np.array(hits), offs)
             if width > best[0]:
@@ -104,6 +113,8 @@ def robust_shot(env: BilliardsEnv, rng: np.random.Generator, plan_kw: dict,
     if not per_pair:
         ghost_kw = {k: plan_kw[k] for k in ["offsets_deg", "speeds", "max_cut_deg", "n_random"]}
         action, meta = plan_shot(env, rng, **ghost_kw)
+        if record is not None:
+            record.extend((a, r[0], r[1]) for a, r in zip(meta["candidates"], meta["results"]))
         g, n_good = pack_good_actions(meta["candidates"], meta["results"], max_good)
         return action, g, n_good, 0.0
     per_pair.sort(key=lambda wa: wa[0], reverse=True)

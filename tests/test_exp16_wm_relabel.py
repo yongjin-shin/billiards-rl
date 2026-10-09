@@ -59,9 +59,28 @@ class TestRelabel:
         data = collect(seed=41, n_games=2, teacher="ghost", env_kw=CLEAR_ENV, max_good=8, log_every=0)
         rows = np.arange(len(data["shot"]))
         new = relabel_rows(data, rows, seed=0, max_good=4, log_every=0)
+        sims = new.pop("sims")
         old = original_rows(data, rows, max_good=4)
         for k in ["obs", "game", "shot"]:
             np.testing.assert_array_equal(new[k], old[k])
         assert new["good_actions"].shape == old["good_actions"].shape == (len(rows), 4, 2)
         assert (new["win_width"] >= 0).all() and np.isnan(old["win_width"]).all()
         np.testing.assert_array_equal(old["action"], data["action"])
+
+
+class TestSimRecords:
+    def test_records_replay_to_same_outcome(self):
+        """Every stored (state, action) → outcome must reproduce on the restored table."""
+        data = collect(seed=42, n_games=1, teacher="ghost", env_kw=CLEAR_ENV, max_good=8, log_every=0)
+        rows = np.arange(len(data["shot"]))
+        sims = relabel_rows(data, rows, seed=0, max_good=4, log_every=0)["sims"]
+        n = len(sims["sim_state"])
+        assert n >= 100 and sims["sim_action"].shape == (n, 2)
+        assert set(np.unique(sims["sim_state"])) <= set(range(len(rows)))
+        env = BilliardsEnv(**CLEAR_ENV)
+        env.reset(seed=0)
+        for k in np.random.default_rng(0).choice(n, size=10, replace=False):
+            restore_state(env, data["obs"][rows[sims["sim_state"][k]]])
+            p, sc, _ = simulate_candidate(env, aim_reference(env), sims["sim_action"][k])
+            assert p == sims["sim_pocketed"][k] and sc == sims["sim_scratch"][k]
+        env.close()
