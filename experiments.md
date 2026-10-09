@@ -3679,3 +3679,19 @@ obs에서 테이블을 복원해(포켓된 공은 pooltool의 pocketed 상태로
 - **Correction**: 이전의 "robust teacher label이 geom label보다 훨씬 낫다"(6.18 vs 9.48)는 결론은 **WTA 학습의 불안정성이 만든 격차**였다. pair supervision 하에서는 두 label이 같다(4.35 vs 4.34 shots). 그 전에 낸 모든 GNN 수치(총정리 표 포함)는 WTA + const lr로 학습된 값이라, 같은 조건으로 다시 비교해야 한다.
 - 이상한 점: robust+pairs의 val loss가 2990(train 44.8)으로 매우 크다. within 0.2° 54.7%, 게임 성적은 좋아서 일부 outlier states(CE가 큰 states)가 val loss를 지배하는 것으로 보이지만 확인하지 않았다. orig32+pairs는 train 121 / val 146로 정상.
 - Caveat: seed 1개, run 1회. pair label은 teacher가 ghost-ball aim으로 만든 candidate에서 복원하므로 "(ball, pocket) pair 단위"라는 prior가 label에 들어간다(architecture의 pair slot과 같은 prior).
+
+### Intent는 verify되는가? label의 (ball, pocket) pair vs simulator outcome (2026-10-09)
+
+**Question**: pair supervision은 "이 action으로 이 ball을 이 pocket에 넣겠다"를 policy에 심는가?
+현재는 pair slot이 암묵적 intent이고, label → slot 매핑은 label angle이 어느 pair의 ghost-ball aim과 가까운지(≤2.5°)로 정한다 — simulator outcome으로 확인하지 않는다.
+
+**Check** (400 states, `good_actions[0]`을 restore한 table에서 쳐서 pooltool `BALL_POCKET` event의 (ball, pocket)을 읽음):
+
+| label | intended (ball, pocket) 실제로 made | right ball, other pocket | other ball(s) | scratch | pair 미할당 |
+|---|---|---|---|---|---|
+| robust teacher v1 | **99.0%** | 0.0% | 1.0% | 0.5% | 5/400 |
+| geom teacher (32 cand.) | 71.9% | 20.3% | 7.8% | 2.8% | 5/400 |
+
+- robust label은 intent가 거의 verified (99%). geom label은 28%가 intended pair와 다른 outcome.
+- 그럼에도 pair supervision 결과는 둘 다 ~4.3 shots/game — 약 28%의 noisy pair label이 있어도 학습이 됐다는 뜻이지만, intent가 clean한 것은 아니다.
+- sims 파일에는 outcome의 개수만 있고 (ball, pocket) identity가 없다 → outcome-grounded pair label이나 goal-conditioned 학습을 하려면 simulation 기록에 identity를 추가해야 한다.
