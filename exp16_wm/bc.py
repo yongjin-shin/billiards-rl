@@ -36,6 +36,7 @@ from exp16_wm.planner import wrap_angle
 from exp16_wm.teacher_data import CLEAR_ENV
 from exp16_wm.obs_transform import TRANSFORMS, OBS_DIMS
 from exp16_wm.augment import augment_flip4
+from exp16_wm.gnn_policy import PairGNNPolicy
 
 LOSSES = ("teacher", "nearest_good")
 
@@ -191,6 +192,36 @@ def deterministic_unit(agent: VanillaSAC, obs: torch.Tensor) -> torch.Tensor:
     return torch.tanh(agent.actor._dist(obs).mean)
 
 
+class MLPModel:
+    """Adapter giving the SAC actor the interface PairGNNPolicy has (predict_unit / train_loss / params)."""
+
+    def __init__(self, agent: VanillaSAC, loss: str):
+        self.agent, self.loss = agent, loss
+        self.module = agent.actor
+
+    def predict_unit(self, obs: torch.Tensor) -> torch.Tensor:
+        return deterministic_unit(self.agent, obs)
+
+    def train_loss(self, obs: torch.Tensor, teacher_u: torch.Tensor, good_u: torch.Tensor,
+                   w: torch.Tensor | None = None) -> torch.Tensor:
+        return bc_loss(self.predict_unit(obs), teacher_u, good_u, self.loss, w)
+
+    def params(self) -> list:
+        return list(self.agent.actor.trunk.parameters()) + list(self.agent.actor.mean_layer.parameters())
+
+
+class GNNModel:
+    """Same adapter shape for PairGNNPolicy (which already implements predict_unit / train_loss)."""
+
+    def __init__(self, gnn: PairGNNPolicy):
+        self.module = gnn
+        self.predict_unit, self.train_loss, self.params = gnn.predict_unit, gnn.train_loss, gnn.params
+
+
+def as_model(agent: "VanillaSAC | PairGNNPolicy", loss: str) -> "MLPModel | GNNModel":
+    return GNNModel(agent) if isinstance(agent, PairGNNPolicy) else MLPModel(agent, loss)
+
+
 def train_bc(agent: VanillaSAC, data: dict[str, np.ndarray], train: np.ndarray, val: np.ndarray,
              loss: str, epochs: int, batch: int, lr: float, patience: int, seed: int,
              log_every: int = 10, w: torch.Tensor | None = None,
@@ -201,50 +232,50 @@ def train_bc(agent: VanillaSAC, data: dict[str, np.ndarray], train: np.ndarray, 
         raise ValueError(f"unknown select: {select}")
     torch.manual_seed(seed)
     rng = np.random.default_rng(seed)
+    model = as_model(agent, loss)
     obs   = torch.as_tensor(data["obs"])
     t_u   = torch.as_tensor(to_unit(data["action"]).astype(np.float32))
     g_u   = torch.as_tensor(to_unit(data["good_actions"]).astype(np.float32))
-    params = list(agent.actor.trunk.parameters()) + list(agent.actor.mean_layer.parameters())
-    opt = torch.optim.Adam(params, lr=lr)
+    opt = torch.optim.Adam(model.params(), lr=lr)
     tr_idx, va_idx = np.where(train)[0], np.where(val)[0]
 
     best_score, best_val, best_state, best_epoch, history = -float("inf"), float("inf"), None, -1, []
     for ep in range(epochs):
-        agent.actor.train()
+        model.module.train()
         perm = rng.permutation(tr_idx)
         tr_loss = 0.0
         for i in range(0, len(perm), batch):
             b = perm[i:i + batch]
-            l = bc_loss(deterministic_unit(agent, obs[b]), t_u[b], g_u[b], loss, w)
+            l = model.train_loss(obs[b], t_u[b], g_u[b], w)
             opt.zero_grad()
             l.backward()
             opt.step()
             tr_loss += l.item() * len(b)
         tr_loss /= max(1, len(perm))
-        agent.actor.eval()
+        model.module.eval()
         with torch.no_grad():
-            pred_va = deterministic_unit(agent, obs[va_idx])
-            va_loss = float(bc_loss(pred_va, t_u[va_idx], g_u[va_idx], loss, w))
+            pred_va = model.predict_unit(obs[va_idx])
+            va_loss = float(model.train_loss(obs[va_idx], t_u[va_idx], g_u[va_idx], w))
             va_within = within_rate(pred_va, g_u[va_idx], select_thresh_deg)
         history.append((ep, tr_loss, va_loss, va_within))
         score = -va_loss if select == "loss" else (va_within if va_within == va_within else -float("inf"))
         if score > best_score:
             best_score, best_val, best_epoch = score, va_loss, ep
-            best_state = {k: v.clone() for k, v in agent.actor.state_dict().items()}
+            best_state = {k: v.clone() for k, v in model.module.state_dict().items()}
         if log_every and ep % log_every == 0:
             print(f"  epoch {ep:>4}  train {tr_loss:.6f}  val {va_loss:.6f}  within{select_thresh_deg:g} "
                   f"{va_within:.4f}  best@{best_epoch}", flush=True)
         if ep - best_epoch >= patience:
             break
-    agent.actor.load_state_dict(best_state)
-    agent.actor.eval()
+    model.module.load_state_dict(best_state)
+    model.module.eval()
     return {"best_val_loss": best_val, "best_epoch": best_epoch, "epochs_run": len(history),
             "select": select, "best_score": best_score, "history": history}
 
 
-def val_metrics(agent: VanillaSAC, data: dict[str, np.ndarray], val: np.ndarray) -> dict:
+def val_metrics(agent: "VanillaSAC | PairGNNPolicy", data: dict[str, np.ndarray], val: np.ndarray) -> dict:
     with torch.no_grad():
-        u = deterministic_unit(agent, torch.as_tensor(data["obs"][val])).numpy()
+        u = as_model(agent, "teacher").predict_unit(torch.as_tensor(data["obs"][val])).numpy()
     pred = u * (ACT_HIGH - ACT_LOW) / 2.0 + (ACT_HIGH + ACT_LOW) / 2.0
     e_t = angle_err_deg(pred[:, 0], data["action"][val, 0])
     e_g = nearest_good_angle_err_deg(pred[:, 0], data["good_actions"][val])
@@ -302,6 +333,10 @@ def parse_args():
     p.add_argument("--eval-seed",  type=int, default=0)
     p.add_argument("--eval-games", type=int, default=500)
     p.add_argument("--threads",    type=int, default=2)
+    p.add_argument("--model",      type=str, default="mlp", choices=["mlp", "gnn"])
+    p.add_argument("--gnn-hidden", type=int, default=128)
+    p.add_argument("--wta-eps",    type=float, default=0.05)
+    p.add_argument("--sel-weight", type=float, default=10.0)
     p.add_argument("--obs-transform", type=str, default="raw", choices=list(TRANSFORMS))
     p.add_argument("--augment",    type=str, default="none", choices=["none", "flip4"])
     p.add_argument("--select",     type=str, default="within", choices=["loss", "within"],
@@ -315,13 +350,16 @@ def parse_args():
 
 def main():
     args = parse_args()
+    if args.model == "gnn" and args.obs_transform != "relative":
+        raise SystemExit("--model gnn takes the relative observation: add --obs-transform relative")
     torch.set_num_threads(args.threads)
     paths = sorted({p for pat in args.data for p in glob.glob(pat)})
     data = load_teacher_data(paths)
     teacher = json.loads(str(np.load(paths[0])["meta"]))["teacher"]
     data, train, val = build_split(data, args.val_frac, args.seed, args.data_frac, args.augment)
     data["obs"] = TRANSFORMS[args.obs_transform](data["obs"])
-    h_tag = ("" if args.hidden is None else "_h" + "x".join(map(str, args.hidden))) + \
+    h_tag = ("_gnn" if args.model == "gnn" else "") + \
+            ("" if args.hidden is None else "_h" + "x".join(map(str, args.hidden))) + \
             ("" if args.obs_transform == "raw" else f"_{args.obs_transform}") + \
             ("" if args.augment == "none" else f"_{args.augment}") + \
             ("" if args.data_frac >= 1.0 else f"_frac{args.data_frac:g}")
@@ -333,7 +371,10 @@ def main():
           f"(train {train.sum()}, val {val.sum()}), teacher shot success {np.mean(data['pocketed'] > 0)*100:.1f}%",
           flush=True)
 
-    agent = make_agent(CLEAR_ENV["n_balls"], args.hidden, OBS_DIMS[args.obs_transform])
+    if args.model == "gnn":
+        agent = PairGNNPolicy(args.gnn_hidden, args.wta_eps, args.sel_weight)
+    else:
+        agent = make_agent(CLEAR_ENV["n_balls"], args.hidden, OBS_DIMS[args.obs_transform])
     t0 = time.time()
     fit = train_bc(agent, data, train, val, args.loss, args.epochs, args.batch, args.lr,
                    args.patience, args.seed, w=dim_weights(args.angle_scale_deg, args.speed_scale),
