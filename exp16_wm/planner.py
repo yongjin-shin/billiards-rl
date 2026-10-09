@@ -169,7 +169,7 @@ def plan_shot(env: BilliardsEnv, rng: np.random.Generator, offsets_deg: list[flo
 
     best = pick_best(results)
     meta = {"n_candidates": len(cands), "stage": "ghost" if best < n_ghost else "random",
-            "predicted": results[best]}
+            "predicted": results[best], "candidates": cands, "results": results}
     return cands[best], meta
 
 
