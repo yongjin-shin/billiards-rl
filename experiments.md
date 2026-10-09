@@ -3707,3 +3707,15 @@ obs에서 테이블을 복원해(포켓된 공은 pooltool의 pocketed 상태로
 - 400-state 표본 결과(99.0%, 71.9%)와 일치. 거의 모든 label이 무언가는 넣지만, **angle matching으로 붙인 pair가 실제 outcome과 다른 비율**이 geom label은 ~26%, margin/robust는 2~5%(candidate 1은 8~15%).
 - geom teacher label은 scratch도 ~3.6%(candidate 0)로 robust(1.0%)/margin(0.6%)보다 많다.
 - 다음: label의 pair를 angle matching 대신 `good_made`(실제 made slots)로 바꾸는 outcome-grounded pair label과, pair별 "made?" aux head.
+
+**Policy가 (i, j)를 실제로 "아는가"** (val 1,697 states, policy의 top-scored pair slot과 그 pair의 action을 restore한 table에서 쳐서 event log로 확인):
+
+| model | clean pocket | chosen pair (i,j) really made (scratch 포함) | clean pocket 중 chosen pair였던 비율 |
+|---|---|---|---|
+| robust, WTA const lr (이전) | 52.6% | 55.3% | 95.6% |
+| robust, pair supervision | 68.7% | 75.7% | **98.0%** |
+| geom32, pair supervision | 61.2% | 68.8% | 93.7% |
+
+- 모델은 이미 pair slot ↔ action을 일관되게 묶고 있다: shot이 clean하게 들어갈 때 94~98%는 선택한 pair가 made된 것이다 (intent-action consistency는 병목이 아님).
+- 실패의 대부분은 **chosen pair를 못 넣는 것**(robust+pairs 24%, geom32+pairs 31%)이고, **chosen pair를 넣었지만 scratch**가 8~11%다(made − clean). 다른 pair를 넣은 clean pocket은 1~4%.
+- 따라서 (i,j) intent label을 더 명시적으로 만드는 것의 가치는 "intent 일관성 개선"이 아니라 (a) geom label의 26% impure pair 정리, (b) pair별 P(made)를 verifier로 써서 선택/action 보정에 활용, (c) scratch를 별도 target으로 분리하는 데 있다.
