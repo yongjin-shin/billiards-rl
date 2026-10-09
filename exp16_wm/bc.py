@@ -35,6 +35,7 @@ from exp16_wm.train import ACTION_DIM, ACT_LOW, ACT_HIGH, get_obs_dim, summarize
 from exp16_wm.planner import wrap_angle
 from exp16_wm.teacher_data import CLEAR_ENV
 from exp16_wm.obs_transform import TRANSFORMS, OBS_DIMS
+from exp16_wm.augment import augment_flip4
 
 LOSSES = ("teacher", "nearest_good")
 
@@ -71,6 +72,36 @@ def split_by_game(game: np.ndarray, val_frac: float, seed: int) -> tuple[np.ndar
     val_ids = rng.choice(ids, size=n_val, replace=False) if n_val else np.array([], dtype=ids.dtype)
     val = np.isin(game, val_ids)
     return ~val, val
+
+
+_KEYS = ["obs", "action", "good_actions", "n_good", "pocketed", "shot", "game"]
+
+
+def build_split(data: dict[str, np.ndarray], val_frac: float, seed: int, data_frac: float = 1.0,
+                augment: str = "none") -> tuple[dict[str, np.ndarray], np.ndarray, np.ndarray]:
+    """
+    Game-level train/val split, then (train only) subsample a fraction of train games and
+    optionally augment. Returns (combined data, train mask, val mask) — val is never augmented,
+    so no reflected copy of a val game can leak into train.
+    """
+    train, val = split_by_game(data["game"], val_frac, seed)
+    tr_games = np.unique(data["game"][train])
+    if data_frac < 1.0:
+        rng = np.random.default_rng(seed + 1)
+        keep = rng.choice(tr_games, size=max(1, int(round(len(tr_games) * data_frac))), replace=False)
+        train = train & np.isin(data["game"], keep)
+    tr_idx, va_idx = np.where(train)[0], np.where(val)[0]
+    if augment == "flip4":
+        tr_part = augment_flip4(data, tr_idx)
+    elif augment == "none":
+        tr_part = {k: data[k][tr_idx] for k in _KEYS}
+    else:
+        raise ValueError(f"unknown augment: {augment}")
+    va_part = {k: data[k][va_idx] for k in _KEYS}
+    combined = {k: np.concatenate([tr_part[k], va_part[k]]) for k in _KEYS}
+    n_tr = len(tr_part["obs"])
+    tr_mask = np.arange(len(combined["obs"])) < n_tr
+    return combined, tr_mask, ~tr_mask
 
 
 # ──────────────────────────────────────────────
@@ -249,6 +280,8 @@ def parse_args():
     p.add_argument("--eval-games", type=int, default=500)
     p.add_argument("--threads",    type=int, default=2)
     p.add_argument("--obs-transform", type=str, default="raw", choices=list(TRANSFORMS))
+    p.add_argument("--augment",    type=str, default="none", choices=["none", "flip4"])
+    p.add_argument("--data-frac",  type=float, default=1.0, help="fraction of train games used")
     p.add_argument("--hidden",     type=int, nargs="+", default=None,
                    help="actor hidden sizes (default: VanillaSAC's, i.e. same as SAC runs)")
     p.add_argument("--out-root",   type=str, default="logs/experiments")
@@ -261,10 +294,12 @@ def main():
     paths = sorted({p for pat in args.data for p in glob.glob(pat)})
     data = load_teacher_data(paths)
     teacher = json.loads(str(np.load(paths[0])["meta"]))["teacher"]
+    data, train, val = build_split(data, args.val_frac, args.seed, args.data_frac, args.augment)
     data["obs"] = TRANSFORMS[args.obs_transform](data["obs"])
-    train, val = split_by_game(data["game"], args.val_frac, args.seed)
     h_tag = ("" if args.hidden is None else "_h" + "x".join(map(str, args.hidden))) + \
-            ("" if args.obs_transform == "raw" else f"_{args.obs_transform}")
+            ("" if args.obs_transform == "raw" else f"_{args.obs_transform}") + \
+            ("" if args.augment == "none" else f"_{args.augment}") + \
+            ("" if args.data_frac >= 1.0 else f"_frac{args.data_frac:g}")
     name = (f"exp16_bc_{teacher}_{args.loss}{h_tag}_a{args.angle_scale_deg:g}_v{args.speed_scale:g}"
             f"_s{args.seed}_{time.strftime('%Y-%m-%d@%H%M')}")
     out_dir = os.path.join(args.out_root, name)

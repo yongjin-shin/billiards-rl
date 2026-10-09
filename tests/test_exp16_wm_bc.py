@@ -12,7 +12,7 @@ import numpy as np
 import pytest
 import torch
 
-from exp16_wm.bc import (to_unit, bc_loss, dim_weights, TransformedPolicy, split_by_game, angle_err_deg, nearest_good_angle_err_deg,
+from exp16_wm.bc import (to_unit, bc_loss, dim_weights, TransformedPolicy, build_split, split_by_game, angle_err_deg, nearest_good_angle_err_deg,
                          load_teacher_data, make_agent, train_bc, evaluate_policy)
 from exp16_wm.train import ACT_LOW, ACT_HIGH
 from exp16_wm.teacher_data import collect, save, CLEAR_ENV
@@ -133,3 +133,31 @@ class TestPipeline:
         out = evaluate_policy(make_agent(3), seed=0, n_games=1,
                               env_kw={**CLEAR_ENV, "max_steps": 3})
         assert 0.0 <= out["clear_rate"] <= 100.0 and 1 <= out["mean_shots"] <= 3
+
+
+class TestBuildSplit:
+    def _data(self, n_games=20, shots=3):
+        n = n_games * shots
+        return {"obs": np.random.default_rng(0).uniform(0, 1, (n, 23)).astype(np.float32),
+                "action": np.zeros((n, 2), np.float32), "good_actions": np.full((n, 2, 2), np.nan, np.float32),
+                "n_good": np.zeros(n, int), "pocketed": np.ones(n, int), "shot": np.tile(np.arange(shots), n_games),
+                "game": np.repeat(np.arange(n_games), shots)}
+
+    def test_augment_only_train_and_no_leak(self):
+        d = self._data()
+        plain, tr0, va0 = build_split(d, 0.2, seed=0)
+        aug, tr, va = build_split(d, 0.2, seed=0, augment="flip4")
+        assert tr.sum() == 4 * tr0.sum() and va.sum() == va0.sum()
+        assert not set(aug["game"][tr]) & set(aug["game"][va])
+
+    def test_data_frac_keeps_whole_games_and_full_val(self):
+        d = self._data()
+        _, tr_full, va_full = build_split(d, 0.2, seed=0)
+        sub, tr, va = build_split(d, 0.2, seed=0, data_frac=0.25)
+        assert va.sum() == va_full.sum()
+        assert tr.sum() == 4 * 3                       # 16 train games × 0.25 = 4 games × 3 shots
+        assert len(set(sub["game"][tr])) == 4
+
+    def test_unknown_augment_raises(self):
+        with pytest.raises(ValueError):
+            build_split(self._data(), 0.2, seed=0, augment="rot90")
