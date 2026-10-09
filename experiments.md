@@ -3794,4 +3794,20 @@ obs에서 테이블을 복원해(포켓된 공은 pooltool의 pocketed 상태로
 
 **판단 기준**: A(4.51 ± 0.23)보다 shots가 seed std 이상 확실히 줄고(예: < 4.2) miss/scratch 비율이 줄면 → 채택. 아니면 어느 항목이 손해인지 ablation.
 
-**결과**: TBD
+**결과 (2026-10-10, 첫 시도): 크게 나빠졌다 — 채택 불가.**
+
+pair_stats(16,748 states, 8조각, ~17분): state당 시도한 pair 평균 4.0개, made-pair가 있는 state 97~98%, scratch 비율 ~16% (coarse candidate 기준).
+
+| (robust label, seed 0/1/2) | shots/game | success | val within 0.2° |
+|---|---|---|---|
+| baseline A (global softmax + angle-matched pairs) | 4.32 / 4.45 / 4.76 → **4.51 ± 0.23** | **66.2 ± 3.3%** | 50.7% |
+| factorized + outcome-grounded + scratch head, λ=0 | 7.98 / 7.36 / 7.94 → 7.76 ± 0.35 | 38.3 ± 1.6% | 25.3% |
+| 같은 모델, scratch penalty λ=3 | 8.24 / 7.14 / 8.01 → 7.80 ± 0.58 | 38.2% | |
+
+SAC(7.89) 수준으로 악화. 세 항목(2·3·4)을 한꺼번에 바꿔서 어느 것이 원인인지는 이 실험만으로는 분리되지 않는다.
+
+**진단 (seed 0, val 1,000 states / train 1,000 states, policy의 top-1 pair를 restore한 table에서 쳐서 확인)**:
+- chosen pair의 **22.5%는 action label이 없다**(어떤 label action도 그 pair를 made하지 않음). 이 pair의 clean pocket 20.9% vs label 있는 pair 46.1%. 원인: 새 selection target(`pair_made`)은 label 없는 feasible pair에도 확률을 주는데, action head는 label action이 made한 pair만 regression을 받는다 → **selection mass와 action supervision이 정렬되지 않는다**. (이전 baseline은 selection이 label pair에만 있어서 항상 정렬됐다.)
+- 그것만으로는 설명이 안 된다: label 있는 pair를 고른 경우에도 clean pocket이 46%(train states 49.7%) — baseline의 66%보다 낮고 train에서도 낮다 → action regression 자체가 부실해졌다. 의심: selection 항목이 3개(ball CE, pocket CE, scratch BCE)로 늘어 각 ×10으로 regression을 압도(soft target의 irreducible entropy도 gradient를 유지). 미검증.
+- scratch penalty λ=3은 효과 없음(7.76 → 7.80): chosen pair 선택이 이미 부정확해서 scratch head를 분리해 볼 단계가 아니다.
+- 다음: (a) `--sel-weight` 1, 3으로 loss 균형 검증, (b) 모든 feasible pair에 coarse-stage action target 부여(`pair_action`)로 정렬 문제 해결, (c) 항목별 ablation(3만: global softmax + outcome-grounded pair).
