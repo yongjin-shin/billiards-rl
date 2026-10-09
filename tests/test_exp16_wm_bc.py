@@ -197,3 +197,33 @@ class TestWithinRate:
         with pytest.raises(ValueError):
             train_bc(make_agent(3), data, tr, ~tr, "teacher", epochs=1, batch=16, lr=1e-3,
                      patience=1, seed=0, log_every=0, select="median")
+
+
+class TestLrSchedule:
+    def _toy(self):
+        rng = np.random.default_rng(0)
+        n = 64
+        data = {"obs": rng.uniform(0, 1, (n, 23)).astype(np.float32),
+                "action": np.tile(np.array([[0.3, 4.0]], np.float32), (n, 1)),
+                "good_actions": np.tile(np.array([[[0.3, 4.0]]], np.float32), (n, 1, 1))}
+        return data, np.arange(n) < 48
+
+    def test_cosine_anneals_to_the_floor_and_const_stays(self):
+        data, tr = self._toy()
+        torch.manual_seed(0)
+        fit = train_bc(make_agent(3), data, tr, ~tr, "nearest_good", epochs=10, batch=16, lr=1e-3,
+                       patience=10, seed=0, log_every=0, lr_schedule="cosine", lr_final_frac=0.01)
+        assert fit["final_lr"] == pytest.approx(1e-5, rel=1e-3)
+        torch.manual_seed(0)
+        fit = train_bc(make_agent(3), data, tr, ~tr, "nearest_good", epochs=10, batch=16, lr=1e-3,
+                       patience=10, seed=0, log_every=0, lr_schedule="const")
+        assert fit["final_lr"] == pytest.approx(1e-3)
+
+    def test_unknown_schedule_raises_and_one_epoch_is_fine(self):
+        data, tr = self._toy()
+        with pytest.raises(ValueError):
+            train_bc(make_agent(3), data, tr, ~tr, "teacher", epochs=1, batch=16, lr=1e-3,
+                     patience=1, seed=0, log_every=0, lr_schedule="step")
+        fit = train_bc(make_agent(3), data, tr, ~tr, "teacher", epochs=1, batch=16, lr=1e-3,
+                       patience=1, seed=0, log_every=0, lr_schedule="cosine")
+        assert fit["epochs_run"] == 1

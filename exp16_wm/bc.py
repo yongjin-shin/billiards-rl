@@ -225,11 +225,14 @@ def as_model(agent: "VanillaSAC | PairGNNPolicy", loss: str) -> "MLPModel | GNNM
 def train_bc(agent: VanillaSAC, data: dict[str, np.ndarray], train: np.ndarray, val: np.ndarray,
              loss: str, epochs: int, batch: int, lr: float, patience: int, seed: int,
              log_every: int = 10, w: torch.Tensor | None = None,
-             select: str = "loss", select_thresh_deg: float = 0.2) -> dict:
+             select: str = "loss", select_thresh_deg: float = 0.2,
+             lr_schedule: str = "const", lr_final_frac: float = 0.01) -> dict:
     """select: 'loss' keeps the lowest val loss; 'within' the highest val within-threshold rate
     (the val loss is dominated by a few far-off predictions and can disagree with it)."""
     if select not in ("loss", "within"):
         raise ValueError(f"unknown select: {select}")
+    if lr_schedule not in ("const", "cosine"):
+        raise ValueError(f"unknown lr_schedule: {lr_schedule}")
     torch.manual_seed(seed)
     rng = np.random.default_rng(seed)
     model = as_model(agent, loss)
@@ -237,6 +240,9 @@ def train_bc(agent: VanillaSAC, data: dict[str, np.ndarray], train: np.ndarray, 
     t_u   = torch.as_tensor(to_unit(data["action"]).astype(np.float32))
     g_u   = torch.as_tensor(to_unit(data["good_actions"]).astype(np.float32))
     opt = torch.optim.Adam(model.params(), lr=lr)
+    # constant lr plateaus ~1e-3 of the action range above the precision a pocket needs (~0.1°); anneal it
+    sched = (torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=max(1, epochs), eta_min=lr * lr_final_frac)
+             if lr_schedule == "cosine" else None)
     tr_idx, va_idx = np.where(train)[0], np.where(val)[0]
 
     best_score, best_val, best_state, best_epoch, history = -float("inf"), float("inf"), None, -1, []
@@ -258,6 +264,8 @@ def train_bc(agent: VanillaSAC, data: dict[str, np.ndarray], train: np.ndarray, 
             va_loss = float(model.train_loss(obs[va_idx], t_u[va_idx], g_u[va_idx], w))
             va_within = within_rate(pred_va, g_u[va_idx], select_thresh_deg)
         history.append((ep, tr_loss, va_loss, va_within))
+        if sched is not None:
+            sched.step()
         score = -va_loss if select == "loss" else (va_within if va_within == va_within else -float("inf"))
         if score > best_score:
             best_score, best_val, best_epoch = score, va_loss, ep
@@ -270,7 +278,7 @@ def train_bc(agent: VanillaSAC, data: dict[str, np.ndarray], train: np.ndarray, 
     model.module.load_state_dict(best_state)
     model.module.eval()
     return {"best_val_loss": best_val, "best_epoch": best_epoch, "epochs_run": len(history),
-            "select": select, "best_score": best_score, "history": history}
+            "select": select, "best_score": best_score, "final_lr": opt.param_groups[0]["lr"], "history": history}
 
 
 def val_metrics(agent: "VanillaSAC | PairGNNPolicy", data: dict[str, np.ndarray], val: np.ndarray) -> dict:
@@ -323,6 +331,9 @@ def parse_args():
     p.add_argument("--epochs",     type=int, default=300)
     p.add_argument("--batch",      type=int, default=512)
     p.add_argument("--lr",         type=float, default=3e-4)
+    p.add_argument("--lr-schedule", type=str, default="cosine", choices=["const", "cosine"],
+                   help="cosine anneals lr to lr * --lr-final-frac over --epochs (all runs before 2026-10-09 17:50 used const)")
+    p.add_argument("--lr-final-frac", type=float, default=0.01)
     p.add_argument("--patience",   type=int, default=50)
     p.add_argument("--angle-scale-deg", type=float, default=0.2,
                    help="angle error (deg) that counts as 1 in the loss")
@@ -362,7 +373,8 @@ def main():
             ("" if args.hidden is None else "_h" + "x".join(map(str, args.hidden))) + \
             ("" if args.obs_transform == "raw" else f"_{args.obs_transform}") + \
             ("" if args.augment == "none" else f"_{args.augment}") + \
-            ("" if args.data_frac >= 1.0 else f"_frac{args.data_frac:g}")
+            ("" if args.data_frac >= 1.0 else f"_frac{args.data_frac:g}") + \
+            ("" if args.lr_schedule == "const" else "_cos")
     name = (f"exp16_bc_{teacher}_{args.loss}{h_tag}_a{args.angle_scale_deg:g}_v{args.speed_scale:g}"
             f"_s{args.seed}_{time.strftime('%Y-%m-%d@%H%M')}")
     out_dir = os.path.join(args.out_root, name)
@@ -378,7 +390,7 @@ def main():
     t0 = time.time()
     fit = train_bc(agent, data, train, val, args.loss, args.epochs, args.batch, args.lr,
                    args.patience, args.seed, w=dim_weights(args.angle_scale_deg, args.speed_scale),
-                   select=args.select)
+                   select=args.select, lr_schedule=args.lr_schedule, lr_final_frac=args.lr_final_frac)
     vm = val_metrics(agent, data, val)
     print(f"  trained {fit['epochs_run']} epochs ({time.time()-t0:.0f}s), best ({args.select}) @{fit['best_epoch']}"
           f" val loss {fit['best_val_loss']:.6f}  |  {json.dumps({k: round(v, 4) for k, v in vm.items()})}", flush=True)
