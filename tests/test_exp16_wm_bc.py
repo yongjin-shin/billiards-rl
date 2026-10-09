@@ -12,7 +12,7 @@ import numpy as np
 import pytest
 import torch
 
-from exp16_wm.bc import (to_unit, bc_loss, dim_weights, split_by_game, angle_err_deg, nearest_good_angle_err_deg,
+from exp16_wm.bc import (to_unit, bc_loss, dim_weights, TransformedPolicy, split_by_game, angle_err_deg, nearest_good_angle_err_deg,
                          load_teacher_data, make_agent, train_bc, evaluate_policy)
 from exp16_wm.train import ACT_LOW, ACT_HIGH
 from exp16_wm.teacher_data import collect, save, CLEAR_ENV
@@ -122,6 +122,12 @@ class TestPipeline:
         n = lambda a: sum(p.numel() for p in a.actor.parameters())
         assert n(small) != n(big)
         assert big.actor(torch.zeros(4, 23))[0].shape == (4, 2)
+
+    def test_relative_policy_runs_in_env(self):
+        from exp16_wm.obs_transform import REL_DIM
+        pol = TransformedPolicy(make_agent(3, obs_dim=REL_DIM), "relative")
+        out = evaluate_policy(pol, seed=0, n_games=1, env_kw={**CLEAR_ENV, "max_steps": 2})
+        assert 1 <= out["mean_shots"] <= 2
 
     def test_evaluate_policy_smoke(self):
         out = evaluate_policy(make_agent(3), seed=0, n_games=1,

@@ -34,6 +34,7 @@ from exp16_wm.sac import VanillaSAC
 from exp16_wm.train import ACTION_DIM, ACT_LOW, ACT_HIGH, get_obs_dim, summarize_final_eval
 from exp16_wm.planner import wrap_angle
 from exp16_wm.teacher_data import CLEAR_ENV
+from exp16_wm.obs_transform import TRANSFORMS, OBS_DIMS
 
 LOSSES = ("teacher", "nearest_good")
 
@@ -121,11 +122,22 @@ def nearest_good_angle_err_deg(pred: np.ndarray, good: np.ndarray) -> np.ndarray
 # Train / evaluate
 # ──────────────────────────────────────────────
 
-def make_agent(n_balls: int = 3, hidden: list[int] | None = None) -> VanillaSAC:
+def make_agent(n_balls: int = 3, hidden: list[int] | None = None,
+               obs_dim: int | None = None) -> VanillaSAC:
     """hidden=None keeps VanillaSAC's default (same as SAC runs, so BC can seed SAC)."""
     kw = {} if hidden is None else {"hidden": hidden}
-    return VanillaSAC(obs_dim=get_obs_dim(n_balls), action_dim=ACTION_DIM,
+    return VanillaSAC(obs_dim=obs_dim or get_obs_dim(n_balls), action_dim=ACTION_DIM,
                       act_low=ACT_LOW, act_high=ACT_HIGH, **kw)
+
+
+class TransformedPolicy:
+    """Env-facing policy: applies the obs transform the actor was trained on."""
+
+    def __init__(self, agent: VanillaSAC, transform: str):
+        self.agent, self.fn = agent, TRANSFORMS[transform]
+
+    def act(self, obs: np.ndarray, deterministic: bool = True) -> np.ndarray:
+        return self.agent.act(self.fn(obs), deterministic=deterministic)
 
 
 def deterministic_unit(agent: VanillaSAC, obs: torch.Tensor) -> torch.Tensor:
@@ -191,7 +203,7 @@ def val_metrics(agent: VanillaSAC, data: dict[str, np.ndarray], val: np.ndarray)
     }
 
 
-def evaluate_policy(agent: VanillaSAC, seed: int, n_games: int, env_kw: dict) -> dict:
+def evaluate_policy(agent: "VanillaSAC | TransformedPolicy", seed: int, n_games: int, env_kw: dict) -> dict:
     """Same protocol as exp16_wm/train.py final eval: reset(seed) once, then n_games resets."""
     env = BilliardsEnv(**env_kw)
     env.reset(seed=seed)
@@ -236,6 +248,7 @@ def parse_args():
     p.add_argument("--eval-seed",  type=int, default=0)
     p.add_argument("--eval-games", type=int, default=500)
     p.add_argument("--threads",    type=int, default=2)
+    p.add_argument("--obs-transform", type=str, default="raw", choices=list(TRANSFORMS))
     p.add_argument("--hidden",     type=int, nargs="+", default=None,
                    help="actor hidden sizes (default: VanillaSAC's, i.e. same as SAC runs)")
     p.add_argument("--out-root",   type=str, default="logs/experiments")
@@ -248,8 +261,10 @@ def main():
     paths = sorted({p for pat in args.data for p in glob.glob(pat)})
     data = load_teacher_data(paths)
     teacher = json.loads(str(np.load(paths[0])["meta"]))["teacher"]
+    data["obs"] = TRANSFORMS[args.obs_transform](data["obs"])
     train, val = split_by_game(data["game"], args.val_frac, args.seed)
-    h_tag = "" if args.hidden is None else "_h" + "x".join(map(str, args.hidden))
+    h_tag = ("" if args.hidden is None else "_h" + "x".join(map(str, args.hidden))) + \
+            ("" if args.obs_transform == "raw" else f"_{args.obs_transform}")
     name = (f"exp16_bc_{teacher}_{args.loss}{h_tag}_a{args.angle_scale_deg:g}_v{args.speed_scale:g}"
             f"_s{args.seed}_{time.strftime('%Y-%m-%d@%H%M')}")
     out_dir = os.path.join(args.out_root, name)
@@ -258,7 +273,7 @@ def main():
           f"(train {train.sum()}, val {val.sum()}), teacher shot success {np.mean(data['pocketed'] > 0)*100:.1f}%",
           flush=True)
 
-    agent = make_agent(CLEAR_ENV["n_balls"], args.hidden)
+    agent = make_agent(CLEAR_ENV["n_balls"], args.hidden, OBS_DIMS[args.obs_transform])
     t0 = time.time()
     fit = train_bc(agent, data, train, val, args.loss, args.epochs, args.batch, args.lr,
                    args.patience, args.seed, w=dim_weights(args.angle_scale_deg, args.speed_scale))
@@ -267,7 +282,7 @@ def main():
           f"@{fit['best_epoch']}  |  {json.dumps({k: round(v, 4) for k, v in vm.items()})}", flush=True)
     agent.save(os.path.join(out_dir, "bc_model.pt"))
 
-    ev = evaluate_policy(agent, args.eval_seed, args.eval_games, CLEAR_ENV)
+    ev = evaluate_policy(TransformedPolicy(agent, args.obs_transform), args.eval_seed, args.eval_games, CLEAR_ENV)
     print(f"  policy alone ({args.eval_games} games): {json.dumps({k: (round(v, 3) if v is not None else None) for k, v in ev.items()})}",
           flush=True)
     results = {"name": name, "teacher": teacher, "loss": args.loss, "data": paths,
