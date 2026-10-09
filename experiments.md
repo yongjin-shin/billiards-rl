@@ -3753,3 +3753,15 @@ obs에서 테이블을 복원해(포켓된 공은 pooltool의 pocketed 상태로
 - 이전 loss로 seed를 달리한 결과(4.32~4.76)가 고정 전 단일 실행(4.35 robust, 4.41 margin, 4.34 geom32)과 같은 범위 → 그 숫자들은 신뢰할 만하다.
 - **가설(검증 중)**: 이전 loss의 spike(1e6)가 Adam의 second-moment 추정을 키워 실효 learning rate를 낮추는 브레이크로 작용했다 → wrap으로 spike가 사라지면 같은 lr이 사실상 커져 정밀도가 떨어진다. 검증: wrap loss에서 lr 3e-4, 1e-4 (seed 0~2).
 - **seed 간 std**: shots/game ~0.2-0.3, success ~3%p. 이 크기보다 작은 단일 실행 차이(예: robust 4.35 vs margin 4.41 vs geom32 4.34)는 label 효과로 해석할 수 없다.
+
+**lr 검증 결과** (wrap-aware loss, robust, seed 0/1/2):
+
+| | shots/game | success | val within 0.2° |
+|---|---|---|---|
+| wrap, lr 1e-3 | 5.59 ± 0.33 | 53.5% | 35.0% |
+| wrap, lr 3e-4 | **4.94 ± 0.08** | 60.3% | 42.1% |
+| wrap, lr 1e-4 | 6.30 ± 0.33 | 47.3% | 29.1% |
+| no-wrap, lr 1e-3 | **4.51 ± 0.23** | 66.2% | 50.7% |
+
+- lr은 비단조(3e-4가 최적, 1e-4는 500 epoch에 비해 느림). 그러나 어떤 lr에서도 wrap이 no-wrap(lr 1e-3)을 넘지 못했다 → "spike가 Adam의 브레이크" 가설은 lr을 낮추면 개선된다는 부분만 지지되고 완전히 설명하지 못한다.
+- 결정: 학습 loss 기본값은 raw(no-wrap) 유지(`--angle-wrap`은 opt-in). val loss를 읽을 때는 median 또는 wrap-aware 값을 따로 계산한다. no-wrap에서 lr 3e-4 등과 wrap + grad clipping은 미검증(roadmap 1b).

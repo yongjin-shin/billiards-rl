@@ -478,14 +478,15 @@ policy의 shot 실패 분해(robust+pairs, val): chosen pair miss ~24%, chosen p
 
 | # | 항목 | 이유 | 비용 | 의존 |
 |---|---|---|---|---|
-| 1 | **Seed 반복** (pair supervision 3개 label × seed ≥3) | 지금까지 전부 seed 1회. 4.34~4.41 차이는 판단 불가 | BC 20분/run | – |
+| 1 | **Seed 반복** (pair supervision 3개 label × seed ≥3) | **seed 버그 수정 후** robust label은 3 seeds 완료: shots 4.51±0.23, success 66±3%. margin, geom32는 아직 1회 → seed std ~0.2-0.3 shots 때문에 label 간 4.34~4.41 차이는 판단 불가 | BC 5분/run | – |
+| 1b | **lr/clip 정리**: wrap 없음 + lr 3e-4, wrap + grad clip 등으로 baseline 설정 확정 | wrap 있음에서 lr 1e-3→3e-4가 5.59→4.94 (lr 민감). 1e-4는 6.30. wrap 없음은 lr 1e-3만 해 봄 | 6 runs ~10분 | – |
 | 2 | **coarse_hits (N,18) 저장 + factorized selection** (ball head + per-ball pocket softmax, soft target ∝ coarse hits) | label은 top-2 pair만 → feasible한데 unlabeled인 pair가 false negative (sample 0: (1,2), (2,2)). ball 1은 supervision 없음 | coarse stage만 재계산 ~15-20분 | – |
 | 3 | **Outcome-grounded pair label** (`good_made`로 pair 교체) | geom label의 26%가 intended pair와 다른 outcome | 이미 `good_made` 있음, 코드만 | – |
 | 4 | **Scratch를 별도 target으로** | chosen pair를 넣고도 scratch 8-11% | 낮음 | `good_scratch` 있음 |
 | 5 | **Made head** P(made_ij \| e_ij, a_ij) → pair 선택 보정(verifier) | selection이 "이 action이 성공할까"를 직접 보지 않음 | 중 | 3 |
 | 6 | **Dense success map** (sims 500만-2,100만 건) + test-time refinement ∇_a P(made) | miss 24%(0.1° 정밀도) 직접 겨냥. 단 sims에 (ball, pocket) identity 없음 → 기록 추가 후 재simulation 또는 angle matching(purity 72-99%) | 높음 | 5 |
 | 7 | **pair supervision 조건으로 이전 비교 재실행**: MLP vs GNN, augmentation(flip4는 pocket 순열 필요), data 8×, model size | 이전 모든 GNN 수치는 WTA 학습 | BC 여러 번 | 1 |
-| 8 | **robust+pairs의 val loss 이상(train 45, val 2990-3300)** 원인 조사 | outlier state가 val loss를 지배; label/pair 매핑 버그 가능성 배제 필요 | 낮음 | – |
+| 8 | ~~robust+pairs의 val loss 이상~~ **완료 (2026-10-09)**: 원인 = ±180° seam에서 각도 loss 폭발(label의 1.3%가 backward shot, val 5개 state가 loss의 99%). pair 매핑 버그 아님. wrap-aware로 고치면 val loss는 정상이 되나 **policy는 악화**(4.51→5.59 shots, lr 3e-4에서도 4.94) → 기본값은 raw loss 유지(`--angle-wrap` opt-in). 이유 미규명 | – | – |
 | 9 | **Checkpoint 선택 잡음**: val within-0.2° 비율이 epoch마다 ±8%p 흔들림 → 최댓값 선택은 낙관적 | EMA weights / 더 큰 val / 마지막 epoch 평균 | 낮음 | – |
 | 10 | **DAgger**: policy가 가는 state에서 teacher에게 다시 label | train/val은 teacher states만. policy rollout은 다른 분포 | 중 | 1 |
 | 11 | **Multi-ball / position play**: robust teacher는 1.0m/s 1-ball shot을 골라 2.98 shots (geom 2.24) | "창이 충분히 넓은 shot 중 more balls" 기준 | 중 | – |
