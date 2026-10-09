@@ -3719,3 +3719,17 @@ obs에서 테이블을 복원해(포켓된 공은 pooltool의 pocketed 상태로
 - 모델은 이미 pair slot ↔ action을 일관되게 묶고 있다: shot이 clean하게 들어갈 때 94~98%는 선택한 pair가 made된 것이다 (intent-action consistency는 병목이 아님).
 - 실패의 대부분은 **chosen pair를 못 넣는 것**(robust+pairs 24%, geom32+pairs 31%)이고, **chosen pair를 넣었지만 scratch**가 8~11%다(made − clean). 다른 pair를 넣은 clean pocket은 1~4%.
 - 따라서 (i,j) intent label을 더 명시적으로 만드는 것의 가치는 "intent 일관성 개선"이 아니라 (a) geom label의 26% impure pair 정리, (b) pair별 P(made)를 verifier로 써서 선택/action 보정에 활용, (c) scratch를 별도 target으로 분리하는 데 있다.
+
+**Label incompleteness (sample 0, robust v1 label)**: 18개 pair를 teacher와 같은 방식(coarse 15 sims + 2D margin scan)으로 전부 scan해 보니 feasible pair가 6개이고, 그중 4개가 거의 동일한 품질이다.
+
+| (ball, pocket) | cut° | coarse hits/15 | 2D margin | in label | model p |
+|---|---|---|---|---|---|
+| (3,2) | 3.9 | 9 | 1.41 | yes | 0.299 |
+| (2,5) | 34.1 | 8 | 1.41 | yes | 0.219 |
+| (2,2) | 20.9 | 8 | 1.41 | **no** | 0.204 |
+| (1,2) | 23.8 | 8 | 1.41 | **no** | 0.139 |
+| (2,1) | 77.1 | 1 | 1.00 | no | 0.120 |
+
+- teacher는 coarse hit 수 상위 **2개 pair만** 정밀 scan하고 label로 남기므로, 동점(8 hits)인 (2,2), (1,2)는 배열 순서에 따라 빠진다. selection CE는 이들을 **false negative**로 취급한다 — 그래도 model은 0.14~0.20을 준다(geometry가 positive와 비슷해서).
+- 2D margin이 이산화 때문에 1.41 같은 값에 몰려 이 state에서는 네 pair를 구분하지 못한다(tie).
+- 개선 후보: 상위 2개가 아니라 feasible한 모든 pair(coarse hit > 0 또는 margin ≥ 임계)를 positive로 label (scan 비용 ~3배), selection target을 coarse hit/margin에 비례한 soft distribution으로.
