@@ -33,7 +33,9 @@ Experiment plans and next directions. For completed experiment results, see [exp
 [-] 행동 재파라미터화 — (공, 포켓) 선택 + ghost-ball 보정각 + 속도 — 보류 (2026-10-09, bitter lesson: 도메인 지식 주입)
 [~] 탐색 + 학습 (expert iteration) — 시뮬레이터 탐색이 찾은 샷을 정책이 배우고, 정책이 탐색 후보를 제안 (2026-10-09 제안)
              └─ [~] 0단계: 모방학습(behaviour cloning) — 기하 플래너 교사로 빠른 검증 → 무작위 탐색 교사로
-                    └─ raw 좌표로는 과적합(정책 단독 9~11샷) → 입력 표현: 상대 좌표(행동 기준틀) → GNN(공·포켓 관계, N-ball 일반화)
+                    └─ [x] raw 좌표로는 과적합(정책 단독 9~11샷) → relative obs → GNN(공·포켓 pair, N-ball 일반화)
+                    └─ [x] robust/margin teacher label, overfit test로 학습 결함 발견 → pair supervision: 3개 label 모두 ~4.35 shots/game (SAC 7.89)
+                    └─ [ ] 후속 TODO 12개 → 아래 "Next: BC 후속 작업" 참고 (현재 실행 중인 실험 없음, 2026-10-09 22:30)
 [ ] Exp-17   Phase 1 HRL — System 2 (ball selection discrete 3) + System 1 (Phase 1 Exp-10 freeze)
 
 [ ] cushion / bank shots
@@ -455,6 +457,46 @@ rssm_v5 재학습 시 이 `--batch-size` 옵션을 쓸 것. 단, 이 모델 크�
 - ~~SAC(엔트로피 낮춤) 결과와의 관계~~ → 답 나옴(2026-10-09, seed 0): 조준 흔들림을 0.34°까지 줄여도 정책은 세게 치기에서
   벗어나지 못했다(조준 오차 2.08° 그대로, 7.89 → 7.39샷). 학습 신호 문제가 노이즈보다 근본적이라는 근거 → 정답을 직접 주는
   모방학습(0단계)부터 진행 중.
+
+---
+
+## Next: BC 후속 작업 (pair supervision 이후, 2026-10-09)
+
+### 현재까지의 결과 (GNN, relative obs, 증강 없음, 1.67만 states, policy alone 500 games, seed 0 1회)
+
+| label | WTA, const lr (이전) | **pair supervision, cosine lr** | intended pair made (label 기준) |
+|---|---|---|---|
+| robust teacher v1 | 6.18 shots/game | **4.35** | 97.7% |
+| margin teacher v2 (각도×속도 2D margin) | (미실행) | **4.41** | 95.5% |
+| geom teacher (32 cand.) | 9.48 | **4.34** | 73.5% |
+
+SAC 7.89, 엔트로피 낮춘 SAC 7.39, teacher 자체: geom 2.24 / random search 2.50 / robust 2.98. **label 종류의 차이는 pair supervision에서 사라졌다** (이전 6.18 vs 9.48은 WTA 불안정성의 산물).
+policy의 shot 실패 분해(robust+pairs, val): chosen pair miss ~24%, chosen pair made지만 scratch 8%, 다른 pair를 clean하게 넣음 1~4%.
+선택한 pair와 action의 일관성(clean pocket 중 chosen pair였던 비율)은 94~98%.
+
+### TODO (우선순위순)
+
+| # | 항목 | 이유 | 비용 | 의존 |
+|---|---|---|---|---|
+| 1 | **Seed 반복** (pair supervision 3개 label × seed ≥3) | 지금까지 전부 seed 1회. 4.34~4.41 차이는 판단 불가 | BC 20분/run | – |
+| 2 | **coarse_hits (N,18) 저장 + factorized selection** (ball head + per-ball pocket softmax, soft target ∝ coarse hits) | label은 top-2 pair만 → feasible한데 unlabeled인 pair가 false negative (sample 0: (1,2), (2,2)). ball 1은 supervision 없음 | coarse stage만 재계산 ~15-20분 | – |
+| 3 | **Outcome-grounded pair label** (`good_made`로 pair 교체) | geom label의 26%가 intended pair와 다른 outcome | 이미 `good_made` 있음, 코드만 | – |
+| 4 | **Scratch를 별도 target으로** | chosen pair를 넣고도 scratch 8-11% | 낮음 | `good_scratch` 있음 |
+| 5 | **Made head** P(made_ij \| e_ij, a_ij) → pair 선택 보정(verifier) | selection이 "이 action이 성공할까"를 직접 보지 않음 | 중 | 3 |
+| 6 | **Dense success map** (sims 500만-2,100만 건) + test-time refinement ∇_a P(made) | miss 24%(0.1° 정밀도) 직접 겨냥. 단 sims에 (ball, pocket) identity 없음 → 기록 추가 후 재simulation 또는 angle matching(purity 72-99%) | 높음 | 5 |
+| 7 | **pair supervision 조건으로 이전 비교 재실행**: MLP vs GNN, augmentation(flip4는 pocket 순열 필요), data 8×, model size | 이전 모든 GNN 수치는 WTA 학습 | BC 여러 번 | 1 |
+| 8 | **robust+pairs의 val loss 이상(train 45, val 2990-3300)** 원인 조사 | outlier state가 val loss를 지배; label/pair 매핑 버그 가능성 배제 필요 | 낮음 | – |
+| 9 | **Checkpoint 선택 잡음**: val within-0.2° 비율이 epoch마다 ±8%p 흔들림 → 최댓값 선택은 낙관적 | EMA weights / 더 큰 val / 마지막 epoch 평균 | 낮음 | – |
+| 10 | **DAgger**: policy가 가는 state에서 teacher에게 다시 label | train/val은 teacher states만. policy rollout은 다른 분포 | 중 | 1 |
+| 11 | **Multi-ball / position play**: robust teacher는 1.0m/s 1-ball shot을 골라 2.98 shots (geom 2.24) | "창이 충분히 넓은 shot 중 more balls" 기준 | 중 | – |
+| 12 | **SAC fine-tune from BC init** (엔트로피 낮춤) | BC 4.3 shots → teacher 2.2~3.0 격차, position play는 RL이 필요할 수 있음 | 중 | 1, 8 |
+
+실행 순서 제안: 1(seed) → 8(val loss 이상) → 2+3+4(label/selection 개선, 한 번에) → 5 → 7 → (6, 10, 11, 12는 결과 보고 결정).
+
+### 보류/기각
+- 행동 재파라미터화(ghost-ball 보정각): bitter lesson, 아래 보류 섹션.
+- lr decay 단독: 전체 데이터에서 도움 없음(robust 6.18 → 12.25).
+- margin v2 no-pairs(WTA) baseline: queue script 오류로 미실행, pair supervision이 대체해서 필요하면 나중에.
 
 ---
 

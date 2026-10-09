@@ -3678,6 +3678,7 @@ obs에서 테이블을 복원해(포켓된 공은 pooltool의 pocketed 상태로
 - **진짜 원인은 WTA의 moving-target selection**이었다. pair supervision이 두 label 모두 ~4.3 shots/game로 올렸다(SAC 7.89 대비 −45%).
 - **Correction**: 이전의 "robust teacher label이 geom label보다 훨씬 낫다"(6.18 vs 9.48)는 결론은 **WTA 학습의 불안정성이 만든 격차**였다. pair supervision 하에서는 두 label이 같다(4.35 vs 4.34 shots). 그 전에 낸 모든 GNN 수치(총정리 표 포함)는 WTA + const lr로 학습된 값이라, 같은 조건으로 다시 비교해야 한다.
 - 이상한 점: robust+pairs의 val loss가 2990(train 44.8)으로 매우 크다. within 0.2° 54.7%, 게임 성적은 좋아서 일부 outlier states(CE가 큰 states)가 val loss를 지배하는 것으로 보이지만 확인하지 않았다. orig32+pairs는 train 121 / val 146로 정상.
+- **margin teacher v2 + pair supervision** (같은 설정, 이후 추가): 4.41 shots/game, success 67.7%, pocket_rate_at5 91.0%, within 0.2° 44.8% — robust(4.35), geom32(4.34)와 같은 수준. 세 label 모두 ~4.3-4.4. 여기서도 val loss가 큼(train 45.6 / val 3308): label이 ≤2 candidate인 robust, margin에서만 보이는 현상. (no-pairs baseline은 queue script 오류로 미실행)
 - Caveat: seed 1개, run 1회. pair label은 teacher가 ghost-ball aim으로 만든 candidate에서 복원하므로 "(ball, pocket) pair 단위"라는 prior가 label에 들어간다(architecture의 pair slot과 같은 prior).
 
 ### Intent는 verify되는가? label의 (ball, pocket) pair vs simulator outcome (2026-10-09)
