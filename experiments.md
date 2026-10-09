@@ -3765,3 +3765,33 @@ obs에서 테이블을 복원해(포켓된 공은 pooltool의 pocketed 상태로
 
 - lr은 비단조(3e-4가 최적, 1e-4는 500 epoch에 비해 느림). 그러나 어떤 lr에서도 wrap이 no-wrap(lr 1e-3)을 넘지 못했다 → "spike가 Adam의 브레이크" 가설은 lr을 낮추면 개선된다는 부분만 지지되고 완전히 설명하지 못한다.
 - 결정: 학습 loss 기본값은 raw(no-wrap) 유지(`--angle-wrap`은 opt-in). val loss를 읽을 때는 median 또는 wrap-aware 값을 따로 계산한다. no-wrap에서 lr 3e-4 등과 wrap + grad clipping은 미검증(roadmap 1b).
+
+### Pair-level outcome 통계로 selection 개선: TODO 2+3+4 (2026-10-09 계획)
+
+**기준(baseline A)**: robust label, GNN, relative obs, pair supervision(angle matching + 전체 18개 softmax), raw angle loss, lr 1e-3 cosine, 500 epochs, `--select within`, seed 0/1/2 → **4.51 ± 0.23 shots/game, success 66.2 ± 3.3%** (seed std 이내 차이는 효과로 읽지 않는다).
+
+**문제 (이전 분석)**:
+- 한 state에서 feasible한 pair가 여러 개인데 teacher는 상위 2개만 label → 나머지는 selection CE의 false negative (sample 0: (1,2), (2,2)). 특히 ball 1은 supervision이 없다.
+- label → pair 매핑이 angle matching이라 geom label은 26%가 intended pair와 다른 outcome을 만든다.
+- policy가 chosen pair를 넣고도 cue ball이 빠지는 scratch가 8~11%.
+
+**데이터** (`exp16_wm/pair_stats.py`, state 단위라 label 종류와 무관): 각 state에서 cut ≤ 80°인 **모든 pair**에 대해 ghost-ball aim 주변 coarse candidate 20개(offset {±0.4, ±0.2, 0}° × speed {0.75, 1.5, 3, 5}m/s)를 simulation하고 event log(BALL_POCKET)로 읽어 pair p=(ball i, pocket j)마다 저장:
+- `pair_n (N,18)`: 시도한 candidate 수(20, cut 초과/포켓된 ball은 0)
+- `pair_made (N,18)`: pair p의 candidate 중 **intended (i,j)를 실제로 made하고 scratch가 없는** 횟수 (intent verified, 3·4번)
+- `pair_any (N,18)`: 아무 ball이라도 clean하게 넣은 횟수 (이전 teacher의 feasibility 정의, 비교용)
+- `pair_scratch (N,18)`: cue ball이 빠진 횟수 (4번)
+비용: 상태당 최대 360 sims(평균 ~150) → 1.67만 states 8조각 병렬 ~10-15분. 결과를 robust/margin/orig32 shard에 같은 key로 붙인다.
+
+**Model** (`--selection factorized`, `PairGNNPolicy(factorized=True)`):
+- ball head `b_i = Linear([h_i, max_j e_ij])`, pocket logit `l_ij = Linear(e_ij)`(per-ball softmax), scratch head `s_ij = Linear(e_ij)`. `forward`는 joint log p(i,j) = log softmax(b)_i + log softmax(l_i)_j 를 logits로 반환 → 기존 argmax inference/분석 코드 호환.
+- Loss = reg + 10·(ball CE + pocket CE) + 10·scratch BCE
+  - reg(3번): label candidate k의 action이 실제로 made한 모든 pair p(`good_made[k,p]`, scratch 없는 candidate만)에 대해 `‖(a_p − a_k)·w‖²`의 평균. (한 action이 두 pair를 made하면 두 head 모두 target)
+  - ball CE(2번): target_i ∝ max_j pair_made[i,j] (feasible한 ball만), pocket CE: ball i마다 target_j ∝ pair_made[i,j] (합 > 0인 ball만). 둘 다 soft CE.
+  - scratch BCE(4번): feasible pair에 대해 target = pair_scratch / pair_n.
+- Inference: argmax of joint − λ·σ(s_ij); λ=0 기본, λ=3 평가를 추가(4번 효과 분리).
+
+**실험**: robust label, factorized + outcome-grounded + scratch, seed 0/1/2 vs baseline A. 지표: shots/game, success, clean pocket 중 chosen pair 비율, chosen pair 미made율(miss), made지만 scratch 비율(label_gap 방식, val 1,697 states), selection이 고른 pair의 pair_made 순위. ablation(각 항목 기여 분리)은 효과가 보이면 그 다음.
+
+**판단 기준**: A(4.51 ± 0.23)보다 shots가 seed std 이상 확실히 줄고(예: < 4.2) miss/scratch 비율이 줄면 → 채택. 아니면 어느 항목이 손해인지 ablation.
+
+**결과**: TBD
