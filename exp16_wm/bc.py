@@ -1,0 +1,263 @@
+"""
+exp16_wm/bc.py — behaviour cloning of a search-planner teacher (Exp-16 imitation).
+
+Trains the same TanhGaussian actor SAC uses (so the result can seed SAC later)
+on data from exp16_wm/teacher_data.py, then evaluates the policy alone — no
+search, no simulator at decision time — on the clear-speed task.
+
+Losses (on the deterministic action tanh(mean), in [-1, 1] units per dim):
+  teacher       MSE to the teacher's chosen action
+  nearest_good  MSE to the nearest stored pocketing candidate (set loss: any
+                pocketing shot is a right answer — guards against averaging
+                two good aims into a miss); teacher action if none pocketed
+
+Usage:
+    python -m exp16_wm.bc --data logs/teacher_data/ghost_s100*.npz --loss teacher
+"""
+
+import argparse
+import glob
+import json
+import os
+import sys
+import time
+
+import numpy as np
+import torch
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from simulator import BilliardsEnv
+from exp16_wm.sac import VanillaSAC
+from exp16_wm.train import ACTION_DIM, ACT_LOW, ACT_HIGH, get_obs_dim, summarize_final_eval
+from exp16_wm.planner import wrap_angle
+from exp16_wm.teacher_data import CLEAR_ENV
+
+LOSSES = ("teacher", "nearest_good")
+
+
+# ──────────────────────────────────────────────
+# Data
+# ──────────────────────────────────────────────
+
+def to_unit(action: np.ndarray) -> np.ndarray:
+    """Env action → [-1, 1] per dim (the actor's post-tanh space)."""
+    return (action - (ACT_HIGH + ACT_LOW) / 2.0) / ((ACT_HIGH - ACT_LOW) / 2.0)
+
+
+def load_teacher_data(paths: list[str]) -> dict[str, np.ndarray]:
+    """Concatenate teacher_data files; game ids are made unique across files."""
+    parts = [dict(np.load(p)) for p in sorted(paths)]
+    if not parts:
+        raise FileNotFoundError("no teacher data files")
+    out = {k: np.concatenate([d[k] for d in parts]) for k in
+           ["obs", "action", "good_actions", "n_good", "pocketed", "shot"]}
+    offset, games = 0, []
+    for d in parts:
+        games.append(d["game"].astype(np.int64) + offset)
+        offset += int(d["game"].max()) + 1 if len(d["game"]) else 0
+    out["game"] = np.concatenate(games)
+    return out
+
+
+def split_by_game(game: np.ndarray, val_frac: float, seed: int) -> tuple[np.ndarray, np.ndarray]:
+    """Boolean train/val masks; whole games go to one side so shots of a game don't leak."""
+    ids = np.unique(game)
+    rng = np.random.default_rng(seed)
+    n_val = max(1, int(round(len(ids) * val_frac))) if len(ids) > 1 else 0
+    val_ids = rng.choice(ids, size=n_val, replace=False) if n_val else np.array([], dtype=ids.dtype)
+    val = np.isin(game, val_ids)
+    return ~val, val
+
+
+# ──────────────────────────────────────────────
+# Losses / metrics
+# ──────────────────────────────────────────────
+
+def bc_loss(pred_unit: torch.Tensor, teacher_unit: torch.Tensor, good_unit: torch.Tensor,
+            loss: str) -> torch.Tensor:
+    """
+    pred_unit (B,2), teacher_unit (B,2), good_unit (B,K,2) NaN-padded.
+    Returns the mean per-sample squared error under the chosen loss.
+    """
+    if loss == "teacher":
+        return ((pred_unit - teacher_unit) ** 2).sum(-1).mean()
+    if loss == "nearest_good":
+        valid = ~torch.isnan(good_unit[..., 0])                          # (B,K)
+        d = ((pred_unit.unsqueeze(1) - torch.nan_to_num(good_unit)) ** 2).sum(-1)
+        d = torch.where(valid, d, torch.full_like(d, float("inf")))
+        nearest = d.min(dim=1).values
+        fallback = ((pred_unit - teacher_unit) ** 2).sum(-1)
+        return torch.where(valid.any(dim=1), nearest, fallback).mean()
+    raise ValueError(f"unknown loss: {loss}")
+
+
+def angle_err_deg(pred: np.ndarray, target: np.ndarray) -> np.ndarray:
+    """|wrapped delta_angle difference| in degrees, per sample."""
+    return np.degrees(np.abs([wrap_angle(float(p - t)) for p, t in zip(pred, target)]))
+
+
+def nearest_good_angle_err_deg(pred: np.ndarray, good: np.ndarray) -> np.ndarray:
+    """Per sample: angle error (deg) to the nearest pocketing candidate; NaN if none."""
+    out = np.full(len(pred), np.nan)
+    for i, (p, g) in enumerate(zip(pred, good)):
+        g = g[~np.isnan(g[:, 0])]
+        if len(g):
+            out[i] = np.degrees(min(abs(wrap_angle(float(p - a))) for a in g[:, 0]))
+    return out
+
+
+# ──────────────────────────────────────────────
+# Train / evaluate
+# ──────────────────────────────────────────────
+
+def make_agent(n_balls: int = 3) -> VanillaSAC:
+    return VanillaSAC(obs_dim=get_obs_dim(n_balls), action_dim=ACTION_DIM,
+                      act_low=ACT_LOW, act_high=ACT_HIGH)
+
+
+def deterministic_unit(agent: VanillaSAC, obs: torch.Tensor) -> torch.Tensor:
+    """tanh(mean) — the deterministic action in [-1, 1] units, differentiable."""
+    return torch.tanh(agent.actor._dist(obs).mean)
+
+
+def train_bc(agent: VanillaSAC, data: dict[str, np.ndarray], train: np.ndarray, val: np.ndarray,
+             loss: str, epochs: int, batch: int, lr: float, patience: int, seed: int,
+             log_every: int = 10) -> dict:
+    torch.manual_seed(seed)
+    rng = np.random.default_rng(seed)
+    obs   = torch.as_tensor(data["obs"])
+    t_u   = torch.as_tensor(to_unit(data["action"]).astype(np.float32))
+    g_u   = torch.as_tensor(to_unit(data["good_actions"]).astype(np.float32))
+    params = list(agent.actor.trunk.parameters()) + list(agent.actor.mean_layer.parameters())
+    opt = torch.optim.Adam(params, lr=lr)
+    tr_idx, va_idx = np.where(train)[0], np.where(val)[0]
+
+    best_val, best_state, best_epoch, history = float("inf"), None, -1, []
+    for ep in range(epochs):
+        agent.actor.train()
+        perm = rng.permutation(tr_idx)
+        tr_loss = 0.0
+        for i in range(0, len(perm), batch):
+            b = perm[i:i + batch]
+            l = bc_loss(deterministic_unit(agent, obs[b]), t_u[b], g_u[b], loss)
+            opt.zero_grad()
+            l.backward()
+            opt.step()
+            tr_loss += float(l) * len(b)
+        tr_loss /= max(1, len(perm))
+        agent.actor.eval()
+        with torch.no_grad():
+            va_loss = float(bc_loss(deterministic_unit(agent, obs[va_idx]), t_u[va_idx], g_u[va_idx], loss))
+        history.append((ep, tr_loss, va_loss))
+        if va_loss < best_val:
+            best_val, best_epoch = va_loss, ep
+            best_state = {k: v.clone() for k, v in agent.actor.state_dict().items()}
+        if log_every and ep % log_every == 0:
+            print(f"  epoch {ep:>4}  train {tr_loss:.6f}  val {va_loss:.6f}  best {best_val:.6f}@{best_epoch}",
+                  flush=True)
+        if ep - best_epoch >= patience:
+            break
+    agent.actor.load_state_dict(best_state)
+    agent.actor.eval()
+    return {"best_val_loss": best_val, "best_epoch": best_epoch, "epochs_run": len(history),
+            "history": history}
+
+
+def val_metrics(agent: VanillaSAC, data: dict[str, np.ndarray], val: np.ndarray) -> dict:
+    with torch.no_grad():
+        u = deterministic_unit(agent, torch.as_tensor(data["obs"][val])).numpy()
+    pred = u * (ACT_HIGH - ACT_LOW) / 2.0 + (ACT_HIGH + ACT_LOW) / 2.0
+    e_t = angle_err_deg(pred[:, 0], data["action"][val, 0])
+    e_g = nearest_good_angle_err_deg(pred[:, 0], data["good_actions"][val])
+    return {
+        "angle_err_teacher_median_deg": float(np.median(e_t)),
+        "angle_err_teacher_within_0.2deg": float(np.mean(e_t < 0.2)),
+        "angle_err_nearest_good_median_deg": float(np.nanmedian(e_g)),
+        "angle_err_nearest_good_within_0.2deg": float(np.nanmean(e_g < 0.2)),
+        "speed_err_teacher_median": float(np.median(np.abs(pred[:, 1] - data["action"][val, 1]))),
+    }
+
+
+def evaluate_policy(agent: VanillaSAC, seed: int, n_games: int, env_kw: dict) -> dict:
+    """Same protocol as exp16_wm/train.py final eval: reset(seed) once, then n_games resets."""
+    env = BilliardsEnv(**env_kw)
+    env.reset(seed=seed)
+    lens, pocketed, at5, rewards, succ = [], [], [], [], 0
+    for _ in range(n_games):
+        obs, _ = env.reset()
+        done, k, ep_r, p5 = False, 0, 0.0, 0
+        while not done:
+            obs, r, term, trunc, info = env.step(agent.act(obs, deterministic=True))
+            done, k, ep_r = term or trunc, k + 1, ep_r + r
+            succ += int(info["pocketed_this_step"] > 0)
+            if k <= 5:
+                p5 = info["total_pocketed"]
+        lens.append(k); pocketed.append(info["total_pocketed"]); at5.append(p5); rewards.append(ep_r)
+    env.close()
+    n_balls = env_kw["n_balls"]
+    speed = summarize_final_eval(lens, pocketed, at5, n_balls)
+    return {
+        "clear_rate":         float(np.mean(np.array(pocketed) == n_balls)) * 100,
+        "mean_shots":         speed["mean_shots"],
+        "mean_shots_cleared": speed["mean_shots_cleared"],
+        "pocket_rate_at5":    speed["pocket_rate_at5"] * 100,
+        "final_mean_reward":  float(np.mean(rewards)),
+        "shot_success_rate":  succ / sum(lens) * 100,
+    }
+
+
+def parse_args():
+    p = argparse.ArgumentParser()
+    p.add_argument("--data",       type=str, nargs="+", required=True)
+    p.add_argument("--loss",       type=str, default="teacher", choices=list(LOSSES))
+    p.add_argument("--epochs",     type=int, default=300)
+    p.add_argument("--batch",      type=int, default=512)
+    p.add_argument("--lr",         type=float, default=3e-4)
+    p.add_argument("--patience",   type=int, default=30)
+    p.add_argument("--val-frac",   type=float, default=0.1)
+    p.add_argument("--seed",       type=int, default=0)
+    p.add_argument("--eval-seed",  type=int, default=0)
+    p.add_argument("--eval-games", type=int, default=500)
+    p.add_argument("--threads",    type=int, default=2)
+    p.add_argument("--out-root",   type=str, default="logs/experiments")
+    return p.parse_args()
+
+
+def main():
+    args = parse_args()
+    torch.set_num_threads(args.threads)
+    paths = sorted({p for pat in args.data for p in glob.glob(pat)})
+    data = load_teacher_data(paths)
+    teacher = json.loads(str(np.load(paths[0])["meta"]))["teacher"]
+    train, val = split_by_game(data["game"], args.val_frac, args.seed)
+    name = f"exp16_bc_{teacher}_{args.loss}_s{args.seed}_{time.strftime('%Y-%m-%d@%H%M')}"
+    out_dir = os.path.join(args.out_root, name)
+    os.makedirs(out_dir, exist_ok=True)
+    print(f"{name}: {len(paths)} files, {len(data['shot'])} shots "
+          f"(train {train.sum()}, val {val.sum()}), teacher shot success {np.mean(data['pocketed'] > 0)*100:.1f}%",
+          flush=True)
+
+    agent = make_agent(CLEAR_ENV["n_balls"])
+    t0 = time.time()
+    fit = train_bc(agent, data, train, val, args.loss, args.epochs, args.batch, args.lr,
+                   args.patience, args.seed)
+    vm = val_metrics(agent, data, val)
+    print(f"  trained {fit['epochs_run']} epochs ({time.time()-t0:.0f}s), best val {fit['best_val_loss']:.6f}"
+          f"@{fit['best_epoch']}  |  {json.dumps({k: round(v, 4) for k, v in vm.items()})}", flush=True)
+    agent.save(os.path.join(out_dir, "bc_model.pt"))
+
+    ev = evaluate_policy(agent, args.eval_seed, args.eval_games, CLEAR_ENV)
+    print(f"  policy alone ({args.eval_games} games): {json.dumps({k: (round(v, 3) if v is not None else None) for k, v in ev.items()})}",
+          flush=True)
+    results = {"name": name, "teacher": teacher, "loss": args.loss, "data": paths,
+               "n_shots": int(len(data["shot"])), "n_train": int(train.sum()), "n_val": int(val.sum()),
+               "train": {k: v for k, v in fit.items() if k != "history"}, "val": vm, "eval": ev,
+               "args": vars(args)}
+    with open(os.path.join(out_dir, "results.json"), "w") as f:
+        json.dump(results, f, indent=2)
+    np.save(os.path.join(out_dir, "history.npy"), np.array(fit["history"]))
+    print(f"  saved → {out_dir}", flush=True)
+
+
+if __name__ == "__main__":
+    main()
