@@ -11,7 +11,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import numpy as np
 import pytest
 
-from exp16_wm.label_gap import unit_to_env, nearest_good_idx, err_stats
+from exp16_wm.label_gap import unit_to_env, nearest_good_idx, err_stats, pick_rows
 from exp16_wm.bc import dim_weights, to_unit
 from exp16_wm.train import ACT_LOW, ACT_HIGH
 
@@ -52,3 +52,19 @@ class TestErrStats:
     def test_zero_label_speed_does_not_divide_by_zero(self):
         s = err_stats(np.array([0.0]), np.array([0.1]), np.array([0.0]))
         assert np.isfinite(s["speed_rel_median"])
+
+
+class TestPickRows:
+    MASK = np.array([0, 1, 1, 0, 1, 1, 1, 0, 1, 1], dtype=bool)
+
+    def test_no_limit_returns_all_masked_rows(self):
+        np.testing.assert_array_equal(pick_rows(self.MASK, 0, "val"), [1, 2, 4, 5, 6, 8, 9])
+        np.testing.assert_array_equal(pick_rows(self.MASK, 100, "train"), [1, 2, 4, 5, 6, 8, 9])
+
+    def test_val_takes_the_first_n(self):
+        np.testing.assert_array_equal(pick_rows(self.MASK, 3, "val"), [1, 2, 4])
+
+    def test_train_sample_is_seeded_sorted_and_inside_the_mask(self):
+        a, b = pick_rows(self.MASK, 4, "train", seed=0), pick_rows(self.MASK, 4, "train", seed=0)
+        np.testing.assert_array_equal(a, b)
+        assert len(a) == 4 and (np.diff(a) > 0).all() and self.MASK[a].all()

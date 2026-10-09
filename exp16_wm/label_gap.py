@@ -72,15 +72,27 @@ def clean_pocket(env: BilliardsEnv, raw_obs: np.ndarray, action: np.ndarray) -> 
     return bool(n >= 1 and not scratch)
 
 
-def analyse_run(run_dir: str, limit: int = 0) -> dict:
+def pick_rows(mask: np.ndarray, limit: int, split: str, seed: int = 0) -> np.ndarray:
+    """
+    Row indices of a boolean split mask. With a limit: the first N for val (as before),
+    a seeded random sample for train (the first N train rows are only the first games).
+    """
+    idx = np.where(mask)[0]
+    if not limit or limit >= len(idx):
+        return idx
+    if split == "train":
+        return np.sort(np.random.default_rng(seed).choice(idx, size=limit, replace=False))
+    return idx[:limit]
+
+
+def analyse_run(run_dir: str, limit: int = 0, split: str = "val") -> dict:
     res = json.load(open(os.path.join(run_dir, "results.json")))
     a = res["args"]
     assert a["model"] == "gnn", "label_gap currently reloads the GNN policy only"
     paths = sorted({p for pat in a["data"] for p in glob.glob(pat)})
-    data, _, val = build_split(load_teacher_data(paths), a["val_frac"], a["seed"], a.get("data_frac", 1.0), "none")
-    idx = np.where(val)[0]
-    if limit:
-        idx = idx[:limit]
+    assert split in ("val", "train")
+    data, train, val = build_split(load_teacher_data(paths), a["val_frac"], a["seed"], a.get("data_frac", 1.0), "none")
+    idx = pick_rows(val if split == "val" else train, limit, split)
     raw = data["obs"][idx]
     model = PairGNNPolicy(a["gnn_hidden"], a["wta_eps"], a["sel_weight"])
     model.load_state_dict(torch.load(os.path.join(run_dir, "bc_model.pt"))["gnn"])
@@ -95,7 +107,7 @@ def analyse_run(run_dir: str, limit: int = 0) -> dict:
         return err_stats(ang, np.abs(pred[rows, 1] - target[rows, 1]), target[rows, 1])
 
     allrows = np.arange(len(idx))
-    out = {"run": os.path.basename(run_dir), "label_set": a["data"][0].split("/")[-2], "n_val": int(len(idx)),
+    out = {"run": os.path.basename(run_dir), "label_set": a["data"][0].split("/")[-2], "split": split, "n_val": int(len(idx)),
            "vs_teacher_action": stats(label, allrows)}
     ng = nearest_good_idx(pred, good, dim_weights(0.2, 0.5).numpy())
     has = ng >= 0
@@ -121,7 +133,7 @@ def analyse_run(run_dir: str, limit: int = 0) -> dict:
 
 def print_report(results: list[dict]) -> None:
     for r in results:
-        print(f"\n== {r['run']}  (labels: {r['label_set']}, {r['n_val']} val states)")
+        print(f"\n== {r['run']}  (labels: {r['label_set']}, {r['n_val']} {r.get('split', 'val')} states)")
         for name in ("vs_teacher_action", "vs_nearest_good"):
             s = r[name]
             print(f"  {name:<18} angle: median {s['angle_median_deg']:.3f}°  p90 {s['angle_p90_deg']:.2f}°  "
@@ -138,14 +150,15 @@ def print_report(results: list[dict]) -> None:
 def parse_args():
     p = argparse.ArgumentParser()
     p.add_argument("--runs", type=str, nargs="+", required=True)
-    p.add_argument("--limit", type=int, default=0, help="only the first N validation states")
+    p.add_argument("--split", type=str, default="val", choices=["val", "train"])
+    p.add_argument("--limit", type=int, default=0, help="only N states (val: the first N; train: a seeded sample)")
     p.add_argument("--out", type=str, default="")
     return p.parse_args()
 
 
 def main():
     args = parse_args()
-    results = [analyse_run(r, args.limit) for r in args.runs]
+    results = [analyse_run(r, args.limit, args.split) for r in args.runs]
     print_report(results)
     if args.out:
         os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
