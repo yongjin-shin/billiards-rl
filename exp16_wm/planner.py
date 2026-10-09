@@ -132,25 +132,28 @@ def pick_best(results: list[ShotResult]) -> int:
                key=lambda i: (candidate_score(results[i][0], results[i][1]), -results[i][2]))
 
 
-def ghost_candidates(env: BilliardsEnv, phi_ref: float, offsets_deg: list[float],
-                     speeds: list[float], max_cut_deg: float) -> list[np.ndarray]:
-    """Ghost-ball aims for every remaining ball × pocket, × offsets × speeds."""
+def ghost_aims(env: BilliardsEnv, max_cut_deg: float) -> list[tuple[str, int, float]]:
+    """(ball id, pocket index, absolute ghost-ball phi in rad) for every remaining ball × pocket within max_cut."""
     cue_xy = env.system.balls["cue"].state.rvw[0, :2]
     radius = env.system.balls["cue"].params.R
     max_cut = np.radians(max_cut_deg)
-    actions = []
+    out = []
     for bid in env._ball_ids:
         if env._pocketed[bid] or bid not in env.system.balls:
             continue
         ball_xy = env.system.balls[bid].state.rvw[0, :2]
-        for pocket_xy in env._pocket_centers:
+        for j, pocket_xy in enumerate(env._pocket_centers):
             aim = ghost_ball_aim(cue_xy, ball_xy, pocket_xy, radius)
-            if aim is None or aim[1] > max_cut:
-                continue
-            for off in offsets_deg:
-                for v in speeds:
-                    actions.append(action_from_phi(aim[0] + np.radians(off), phi_ref, v))
-    return actions
+            if aim is not None and aim[1] <= max_cut:
+                out.append((bid, j, aim[0]))
+    return out
+
+
+def ghost_candidates(env: BilliardsEnv, phi_ref: float, offsets_deg: list[float],
+                     speeds: list[float], max_cut_deg: float) -> list[np.ndarray]:
+    """Ghost-ball aims for every remaining ball × pocket, × offsets × speeds."""
+    return [action_from_phi(phi + np.radians(off), phi_ref, v)
+            for _, _, phi in ghost_aims(env, max_cut_deg) for off in offsets_deg for v in speeds]
 
 
 def plan_shot(env: BilliardsEnv, rng: np.random.Generator, offsets_deg: list[float],

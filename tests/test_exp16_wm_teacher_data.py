@@ -12,8 +12,12 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import json
 
 import numpy as np
+import pytest
 
-from exp16_wm.teacher_data import pack_good_actions, collect, save, to_arrays, CLEAR_ENV
+from simulator import BilliardsEnv
+from exp16_wm.teacher_data import (pack_good_actions, collect, save, to_arrays, CLEAR_ENV,
+                                     widest_window, robust_shot, TEACHERS)
+from exp16_wm.planner import aim_reference, simulate_candidate
 
 A = [np.array([0.1 * i, 3.0], dtype=np.float32) for i in range(5)]
 
@@ -64,3 +68,44 @@ class TestCollect:
         z = np.load(path)
         assert json.loads(str(z["meta"]))["teacher"] == "ghost"
         np.testing.assert_array_equal(z["action"], data["action"])
+
+
+class TestWidestWindow:
+    OFFS = np.round(np.arange(-0.2, 0.2 + 1e-9, 0.04), 4)       # 11 points
+
+    def test_picks_widest_run_and_its_centre(self):
+        hits = np.array([1, 0, 0, 1, 1, 1, 0, 1, 1, 0, 0], bool)
+        w, c = widest_window(hits, self.OFFS)
+        assert w == pytest.approx(0.12) and c == pytest.approx(-0.04)   # cells 3..5 = -0.08..0.00
+
+    def test_tie_keeps_first_run(self):
+        hits = np.array([1, 1, 0, 0, 0, 0, 0, 0, 0, 1, 1], bool)
+        w, c = widest_window(hits, self.OFFS)
+        assert w == pytest.approx(0.08) and c == pytest.approx(-0.18)
+
+    def test_none_and_all(self):
+        w, c = widest_window(np.zeros(11, bool), self.OFFS)
+        assert w == 0.0 and np.isnan(c)
+        w, c = widest_window(np.ones(11, bool), self.OFFS)
+        assert w == pytest.approx(0.44) and c == pytest.approx(0.0, abs=1e-9)
+
+
+class TestRobustTeacher:
+    def test_chosen_shot_pockets_without_scratch(self):
+        env = BilliardsEnv(**CLEAR_ENV)
+        env.reset(seed=31)
+        rng = np.random.default_rng(0)
+        for _ in range(2):
+            env.reset()
+            action, good, n_good, width = robust_shot(env, rng, TEACHERS["robust"], max_good=4)
+            n, scratch, _ = simulate_candidate(env, aim_reference(env), action)
+            if width > 0:
+                assert n >= 1 and not scratch and n_good >= 1
+                np.testing.assert_allclose(good[0], action)
+            assert 0.5 <= action[1] <= 8.0
+        env.close()
+
+    def test_collect_records_window_width(self):
+        data = collect(seed=32, n_games=1, teacher="robust", env_kw=CLEAR_ENV, max_good=4, log_every=0)
+        assert len(data["win_width"]) == len(data["shot"]) >= 1
+        assert (data["win_width"] >= 0).all()
