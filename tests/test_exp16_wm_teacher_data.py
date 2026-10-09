@@ -16,7 +16,7 @@ import pytest
 
 from simulator import BilliardsEnv
 from exp16_wm.teacher_data import (pack_good_actions, collect, save, to_arrays, CLEAR_ENV,
-                                     widest_window, robust_shot, TEACHERS)
+                                     widest_window, robust_shot, TEACHERS, best_margin_cell, margin_shot)
 from exp16_wm.planner import aim_reference, simulate_candidate
 
 A = [np.array([0.1 * i, 3.0], dtype=np.float32) for i in range(5)]
@@ -109,3 +109,60 @@ class TestRobustTeacher:
         data = collect(seed=32, n_games=1, teacher="robust", env_kw=CLEAR_ENV, max_good=4, log_every=0)
         assert len(data["win_width"]) == len(data["shot"]) >= 1
         assert (data["win_width"] >= 0).all()
+
+
+class TestBestMarginCell:
+    ARGS = dict(angle_step_deg=0.1, ln_speed_step=0.2, angle_scale_deg=0.2, speed_scale_ln=0.2)
+
+    def _rect(self, rows, cols, shape=(21, 9)):
+        h = np.zeros(shape, bool)
+        h[rows[0]:rows[1], cols[0]:cols[1]] = True
+        return h
+
+    def test_centre_of_rectangle_has_largest_margin(self):
+        m, (i, j) = best_margin_cell(self._rect((6, 15), (2, 7)), **self.ARGS)
+        assert (i, j) == (10, 4) and m > 0
+
+    def test_prefers_the_speed_direction_when_speed_is_the_tight_axis(self):
+        # wide in angle (21 cells = 2°), narrow in speed (3 cells): margin is limited by speed, not angle
+        h = self._rect((0, 21), (3, 6))
+        m, (i, j) = best_margin_cell(h, **self.ARGS)
+        assert j == 4
+        assert m == pytest.approx(2.0, abs=0.01)        
+
+    def test_tied_ridge_picks_its_centre(self):
+        h = self._rect((2, 19), (3, 6))
+        _, (i, j) = best_margin_cell(h, **self.ARGS)
+        assert j == 4 and abs(i - 10) <= 1
+
+    def test_no_hits_and_all_hits(self):
+        assert best_margin_cell(np.zeros((5, 5), bool), **self.ARGS) == (0.0, (-1, -1))
+        m, (i, j) = best_margin_cell(np.ones((5, 5), bool), **self.ARGS)
+        assert m > 0 and (i, j) == (2, 2)
+
+    def test_angle_grid_edge_is_not_a_wall(self):
+        # a window touching the angle edge looks wider than the same window floating inside
+        edge = np.zeros((21, 9), bool); edge[0:8, 2:7] = True
+        inner = np.zeros((21, 9), bool); inner[6:14, 2:7] = True
+        assert best_margin_cell(edge, **self.ARGS)[0] >= best_margin_cell(inner, **self.ARGS)[0]
+
+
+class TestMarginTeacher:
+    def test_shot_pockets_cleanly_and_reports_margin(self):
+        env = BilliardsEnv(**CLEAR_ENV)
+        env.reset(seed=51)
+        rng = np.random.default_rng(0)
+        env.reset()
+        rec: list = []
+        action, good, n_good, margin = margin_shot(env, rng, TEACHERS["margin"], max_good=4, record=rec)
+        n, scratch, _ = simulate_candidate(env, aim_reference(env), action)
+        assert len(rec) > 1000                                  # the full 2D scan was recorded
+        assert 0.5 - 1e-6 <= action[1] <= 8.0 + 1e-6
+        if margin > 0:
+            assert n >= 1 and not scratch and n_good >= 1
+            np.testing.assert_allclose(good[0], action)
+        env.close()
+
+    def test_collect_with_margin_teacher(self):
+        data = collect(seed=52, n_games=1, teacher="margin", env_kw=CLEAR_ENV, max_good=4, log_every=0)
+        assert len(data["win_width"]) == len(data["shot"]) >= 1 and (data["win_width"] >= 0).all()

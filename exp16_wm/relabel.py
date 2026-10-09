@@ -34,7 +34,9 @@ import pooltool as pt
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from simulator import BilliardsEnv
 from exp16_wm.networks import TABLE_W, TABLE_L
-from exp16_wm.teacher_data import TEACHERS, CLEAR_ENV, robust_shot
+from exp16_wm.teacher_data import TEACHERS, CLEAR_ENV, robust_shot, margin_shot
+
+SHOT_FNS = {"robust": robust_shot, "margin": margin_shot}
 
 _POCKETED_POS = [-0.0295, -0.0295, -0.08]     # below the table, where pooltool parks pocketed balls
 KEYS = ["obs", "action", "good_actions", "n_good", "pocketed", "game", "shot", "win_width"]
@@ -68,21 +70,21 @@ def shard_rows(game: np.ndarray, shard: int, n_shards: int) -> np.ndarray:
 
 
 def relabel_rows(data: dict[str, np.ndarray], rows: np.ndarray, seed: int, max_good: int,
-                 log_every: int = 500) -> dict[str, np.ndarray]:
+                 log_every: int = 500, teacher: str = "robust") -> dict[str, np.ndarray]:
     env = BilliardsEnv(**CLEAR_ENV)
     env.reset(seed=seed)
     rng = np.random.default_rng(seed)
     out = {"action": [], "good_actions": [], "n_good": [], "win_width": [], "pocketed": []}
-    sim_state, sim_action, sim_pocketed, sim_scratch = [], [], [], []
+    sim_state, sim_action, sim_pocketed, sim_scratch = [], [], [], []   # per-state numpy chunks
     t0 = time.time()
     for n, r in enumerate(rows):
         restore_state(env, data["obs"][r])
         record: list = []
-        action, good, n_good, width = robust_shot(env, rng, TEACHERS["robust"], max_good, record=record)
-        sim_state.extend([n] * len(record))
-        sim_action.extend(a for a, _, _ in record)
-        sim_pocketed.extend(p for _, p, _ in record)
-        sim_scratch.extend(sc for _, _, sc in record)
+        action, good, n_good, width = SHOT_FNS[teacher](env, rng, TEACHERS[teacher], max_good, record=record)
+        sim_state.append(np.full(len(record), n, np.int32))
+        sim_action.append(np.asarray([a for a, _, _ in record], np.float32).reshape(-1, 2))
+        sim_pocketed.append(np.asarray([p for _, p, _ in record], np.int8))
+        sim_scratch.append(np.asarray([sc for _, _, sc in record], bool))
         out["action"].append(action)
         out["good_actions"].append(good)
         out["n_good"].append(n_good)
@@ -100,10 +102,10 @@ def relabel_rows(data: dict[str, np.ndarray], rows: np.ndarray, seed: int, max_g
         "win_width": np.asarray(out["win_width"], np.float32),
         "pocketed": np.asarray(out["pocketed"], np.int32),
         "sims": {
-            "sim_state":    np.asarray(sim_state, np.int32),
-            "sim_action":   np.asarray(sim_action, np.float32).reshape(-1, 2),
-            "sim_pocketed": np.asarray(sim_pocketed, np.int8),
-            "sim_scratch":  np.asarray(sim_scratch, bool),
+            "sim_state":    np.concatenate(sim_state) if sim_state else np.zeros(0, np.int32),
+            "sim_action":   np.concatenate(sim_action) if sim_action else np.zeros((0, 2), np.float32),
+            "sim_pocketed": np.concatenate(sim_pocketed) if sim_pocketed else np.zeros(0, np.int8),
+            "sim_scratch":  np.concatenate(sim_scratch) if sim_scratch else np.zeros(0, bool),
         },
     }
 
@@ -131,6 +133,8 @@ def parse_args():
     p.add_argument("--n-shards", type=int, default=1)
     p.add_argument("--max-good", type=int, default=8)
     p.add_argument("--out-dir",  type=str, required=True)
+    p.add_argument("--teacher",  type=str, default="robust", choices=list(SHOT_FNS))
+    p.add_argument("--limit",    type=int, default=0, help="only the first N states of the shard (pilot)")
     return p.parse_args()
 
 
@@ -140,21 +144,27 @@ def main():
     rows = shard_rows(data["game"], args.shard, args.n_shards)
     print(f"relabel {args.data}  shard {args.shard}/{args.n_shards}: {len(rows)} states", flush=True)
     src = json.loads(str(data["meta"]))
-    new = relabel_rows(data, rows, seed=10_000 + args.shard, max_good=args.max_good)
+    if args.limit:
+        rows = rows[:args.limit]
+    new = relabel_rows(data, rows, seed=10_000 + args.shard, max_good=args.max_good, teacher=args.teacher)
     sims = new.pop("sims")
     base = os.path.splitext(os.path.basename(args.data))[0]
-    write(os.path.join(args.out_dir, "sims", f"{base}_shard{args.shard}.npz"),
+    sims_dir = "sims" if args.teacher == "robust" else f"sims_{args.teacher}"
+    plan = TEACHERS[args.teacher]
+    write(os.path.join(args.out_dir, sims_dir, f"{base}_shard{args.shard}.npz"),
           {"obs": new["obs"], "game": new["game"], **sims},
-          {"source": args.data, "shard": args.shard, "plan": TEACHERS["robust"], "env": src.get("env")})
-    write(os.path.join(args.out_dir, "robust", f"{base}_shard{args.shard}.npz"), new,
-          {"teacher": "robust_relabel", "source": args.data, "plan": TEACHERS["robust"], "env": src.get("env")})
-    write(os.path.join(args.out_dir, "orig", f"{base}_shard{args.shard}.npz"),
-          original_rows(data, rows, args.max_good),
-          {"teacher": f"{src.get('teacher')}_same_states", "source": args.data, "env": src.get("env")})
+          {"source": args.data, "shard": args.shard, "plan": plan, "env": src.get("env")})
+    write(os.path.join(args.out_dir, args.teacher, f"{base}_shard{args.shard}.npz"), new,
+          {"teacher": f"{args.teacher}_relabel", "source": args.data, "plan": plan, "env": src.get("env"),
+           "win_width_is": "margin (angle 0.2 deg / speed 20% units)" if args.teacher == "margin" else "window width (deg)"})
+    if args.teacher == "robust":
+        write(os.path.join(args.out_dir, "orig", f"{base}_shard{args.shard}.npz"),
+              original_rows(data, rows, args.max_good),
+              {"teacher": f"{src.get('teacher')}_same_states", "source": args.data, "env": src.get("env")})
     w = new["win_width"]
     print(f"done: {len(rows)} states, {len(sims['sim_state'])} sims "
           f"({np.mean((sims['sim_pocketed'] > 0) & ~sims['sim_scratch']) * 100:.1f}% pocket clean), "
-          f"window median {np.median(w):.3f}°, "
+          f"{'margin' if args.teacher == 'margin' else 'window'} median {np.median(w):.3f}, "
           f"speed median {np.median(new['action'][:, 1]):.2f} (orig {np.median(data['action'][rows, 1]):.2f}) m/s",
           flush=True)
 

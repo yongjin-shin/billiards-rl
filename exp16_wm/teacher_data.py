@@ -11,6 +11,8 @@ Plays the clear-speed task with exp16_wm/planner.py and records, for every shot:
 Teachers differ in where candidates come from and which one is chosen:
   ghost   ghost-ball aims × offsets × speeds (geometry), random fallback
   random  uniform-random actions only (no human knowledge)
+  margin  like robust, but scans angle × speed over the whole action range and picks the
+          cell farthest from any non-pocketing cell (2D margin: angle 0.2° = 1, speed 20% = 1)
   robust  ghost candidates find the pocketing (ball, pocket) pairs; the top pairs are
           then scanned densely (angle × speed) and the shot is the centre of the
           widest pocketing angle window — the most forgiving shot, not just any
@@ -28,6 +30,7 @@ import sys
 import time
 
 import numpy as np
+from scipy.ndimage import distance_transform_edt
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from simulator import BilliardsEnv
@@ -41,7 +44,38 @@ TEACHERS: dict[str, dict] = {
 }
 TEACHERS["robust"] = {**TEACHERS["ghost"], "scan_offsets_deg": [round(-0.5 + 0.04 * i, 4) for i in range(26)],
                       "scan_speeds": [1.0, 2.0, 3.0, 4.0, 5.0], "top_pairs": 2}
+TEACHERS["margin"] = {**TEACHERS["ghost"], "speeds": [0.75, 1.5, 3.0, 5.0], "top_pairs": 2,
+                      "scan_span_deg": 2.0, "scan_n_angles": 41,
+                      "scan_speed_lo": 0.5, "scan_speed_hi": 8.0, "scan_n_speeds": 15,
+                      "angle_scale_deg": 0.2, "speed_scale_ln": 0.2}
 CLEAR_ENV = {"n_balls": 3, "max_steps": 30, "step_penalty": 1.0, "trunc_penalty": 0.0}
+
+
+def best_margin_cell(hits: np.ndarray, angle_step_deg: float, ln_speed_step: float,
+                     angle_scale_deg: float, speed_scale_ln: float,
+                     pad: int = 12) -> tuple[float, tuple[int, int]]:
+    """
+    hits (n_angles, n_speeds) bool. Returns (margin, (i, j)): the hit cell farthest from any
+    non-hit cell, distance measured in units where angle_scale_deg degrees and a speed_scale_ln
+    log-speed step are both 1. The grid edge is not a wall (the outside is assumed to look
+    like the edge: the angle span is artificial, and a speed beyond the action bounds is
+    clipped to the bound). Ties go to the cell nearest the centroid of the tied set.
+    (0, (-1, -1)) if nothing hit.
+    """
+    hits = np.asarray(hits, dtype=bool)
+    if not hits.any():
+        return 0.0, (-1, -1)
+    sa, sv = angle_step_deg / angle_scale_deg, ln_speed_step / speed_scale_ln
+    if hits.all():                                            # no failure anywhere: cap at the pad
+        return float(pad * min(sa, sv)), (hits.shape[0] // 2, hits.shape[1] // 2)
+    dist = distance_transform_edt(np.pad(hits, pad, mode="edge"), sampling=(sa, sv))
+    core = np.where(hits, dist[pad:-pad, pad:-pad], 0.0)
+    top = float(core.max())
+    cells = np.argwhere(core >= top - 1e-6)
+    centroid = cells.mean(axis=0)
+    scaled = (cells - centroid) * np.array([sa, sv])
+    i, j = cells[int(np.argmin((scaled ** 2).sum(axis=1)))]
+    return top, (int(i), int(j))
 
 
 def widest_window(hits: np.ndarray, offsets: np.ndarray) -> tuple[float, float]:
@@ -65,6 +99,60 @@ def widest_window(hits: np.ndarray, offsets: np.ndarray) -> tuple[float, float]:
         else:
             i += 1
     return best_len * step, float((offsets[best_lo] + offsets[best_lo + best_len - 1]) / 2)
+
+
+def margin_shot(env: BilliardsEnv, rng: np.random.Generator, plan_kw: dict,
+                max_good: int, record: list | None = None) -> tuple[np.ndarray, np.ndarray, int, float]:
+    """
+    The shot with the largest 2D margin (angle and speed together). Same return shape as
+    robust_shot, but the last value is the margin (angle 0.2° / speed 20% units), not a width.
+    """
+    phi_ref = aim_reference(env)
+
+    def sim(a: np.ndarray) -> ShotResult:
+        r = simulate_candidate(env, phi_ref, a)
+        if record is not None:
+            record.append((a, r[0], r[1]))
+        return r
+
+    aims = ghost_aims(env, plan_kw["max_cut_deg"])
+    counts = []
+    for _, _, phi in aims:
+        n = 0
+        for off in plan_kw["offsets_deg"]:
+            for v in plan_kw["speeds"]:
+                r = sim(action_from_phi(phi + np.radians(off), phi_ref, v))
+                n += int(r[0] > 0 and not r[1])
+        counts.append(n)
+    top = [k for k in np.argsort(counts)[::-1][:plan_kw["top_pairs"]] if counts[k] > 0]
+    offs = np.linspace(-plan_kw["scan_span_deg"], plan_kw["scan_span_deg"], plan_kw["scan_n_angles"])
+    speeds = np.geomspace(plan_kw["scan_speed_lo"], plan_kw["scan_speed_hi"], plan_kw["scan_n_speeds"])
+    a_step = float(offs[1] - offs[0])
+    v_step = float(np.log(speeds[1] / speeds[0]))
+    per_pair = []                                   # (margin, action)
+    for k in top:
+        phi = aims[k][2]
+        hits = np.zeros((len(offs), len(speeds)), dtype=bool)
+        for j, v in enumerate(speeds):
+            for i, o in enumerate(offs):
+                r = sim(action_from_phi(phi + np.radians(o), phi_ref, float(v)))
+                hits[i, j] = r[0] > 0 and not r[1]
+        margin, (i, j) = best_margin_cell(hits, a_step, v_step, plan_kw["angle_scale_deg"],
+                                          plan_kw["speed_scale_ln"])
+        if margin > 0:
+            per_pair.append((margin, action_from_phi(phi + np.radians(offs[i]), phi_ref, float(speeds[j]))))
+    good = np.full((max_good, 2), np.nan, dtype=np.float32)
+    if not per_pair:
+        ghost_kw = {k: plan_kw[k] for k in ["offsets_deg", "speeds", "max_cut_deg", "n_random"]}
+        action, meta = plan_shot(env, rng, **ghost_kw)
+        if record is not None:
+            record.extend((a, r[0], r[1]) for a, r in zip(meta["candidates"], meta["results"]))
+        g, n_good = pack_good_actions(meta["candidates"], meta["results"], max_good)
+        return action, g, n_good, 0.0
+    per_pair.sort(key=lambda ma: ma[0], reverse=True)
+    for i, (_, a) in enumerate(per_pair[:max_good]):
+        good[i] = a
+    return per_pair[0][1], good, len(per_pair), float(per_pair[0][0])
 
 
 def robust_shot(env: BilliardsEnv, rng: np.random.Generator, plan_kw: dict,
@@ -152,8 +240,9 @@ def collect(seed: int, n_games: int, teacher: str, env_kw: dict, max_good: int =
         obs, _ = env.reset()
         done, k = False, 0
         while not done:
-            if teacher == "robust":
-                action, good, n_good, width = robust_shot(env, rng, plan_kw, max_good)
+            if teacher in ("robust", "margin"):
+                shot_fn = robust_shot if teacher == "robust" else margin_shot
+                action, good, n_good, width = shot_fn(env, rng, plan_kw, max_good)
             else:
                 action, meta = plan_shot(env, rng, **plan_kw)
                 good, n_good = pack_good_actions(meta["candidates"], meta["results"], max_good)
