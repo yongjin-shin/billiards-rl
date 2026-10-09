@@ -21,6 +21,7 @@ Usage:
 import argparse
 import glob
 import json
+import random
 import os
 import sys
 import time
@@ -39,6 +40,13 @@ from exp16_wm.augment import augment_flip4
 from exp16_wm.gnn_policy import PairGNNPolicy, action_diff
 
 LOSSES = ("teacher", "nearest_good")
+
+
+def seed_everything(seed: int) -> None:
+    """Seed before the model is built: weights are initialised at construction, not in train_bc."""
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
 
 
 # ──────────────────────────────────────────────
@@ -359,6 +367,8 @@ def parse_args():
     p.add_argument("--augment",    type=str, default="none", choices=["none", "flip4"])
     p.add_argument("--pair-supervision", action="store_true",
                    help="GNN: train each pair head on the pair that produced the label (needs exp16_wm.pair_labels)")
+    p.add_argument("--no-angle-wrap", action="store_true",
+                   help="reproduce the pre-2026-10-09 raw angle difference in the loss (±180° seam)")
     p.add_argument("--select",     type=str, default="within", choices=["loss", "within"],
                    help="best checkpoint: lowest val loss or highest val within-0.2° rate")
     p.add_argument("--data-frac",  type=float, default=1.0, help="fraction of train games used")
@@ -375,6 +385,9 @@ def main():
     if args.model == "gnn" and args.obs_transform != "relative":
         raise SystemExit("--model gnn takes the relative observation: add --obs-transform relative")
     torch.set_num_threads(args.threads)
+    seed_everything(args.seed)
+    import exp16_wm.gnn_policy as _gp
+    _gp.ANGLE_WRAP = not args.no_angle_wrap
     paths = sorted({p for pat in args.data for p in glob.glob(pat)})
     data = load_teacher_data(paths)
     teacher = json.loads(str(np.load(paths[0])["meta"]))["teacher"]
@@ -385,7 +398,8 @@ def main():
             ("" if args.obs_transform == "raw" else f"_{args.obs_transform}") + \
             ("" if args.augment == "none" else f"_{args.augment}") + \
             ("" if args.data_frac >= 1.0 else f"_frac{args.data_frac:g}") + \
-            ("" if args.lr_schedule == "const" else "_cos") + ("_pairs" if args.pair_supervision else "") + "_wrap"
+            ("" if args.lr_schedule == "const" else "_cos") + ("_pairs" if args.pair_supervision else "") + \
+            ("_nowrap" if args.no_angle_wrap else "_wrap")
     name = (f"exp16_bc_{teacher}_{args.loss}{h_tag}_a{args.angle_scale_deg:g}_v{args.speed_scale:g}"
             f"_s{args.seed}_{time.strftime('%Y-%m-%d@%H%M')}")
     out_dir = os.path.join(args.out_root, name)

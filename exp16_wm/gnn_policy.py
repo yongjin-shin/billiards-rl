@@ -39,10 +39,13 @@ def wrap_angle_unit(x: torch.Tensor) -> torch.Tensor:
     return x - 2.0 * torch.round(x / 2.0)
 
 
+ANGLE_WRAP = True        # set False only to reproduce runs from before the wrap fix (bc.py --no-angle-wrap)
+
+
 def action_diff(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
     """a − b for (…, 2) actions in [-1, 1] units; the angle is circular, so its difference is wrapped."""
     d = a - b
-    return torch.stack([wrap_angle_unit(d[..., 0]), d[..., 1]], dim=-1)
+    return torch.stack([wrap_angle_unit(d[..., 0]) if ANGLE_WRAP else d[..., 0], d[..., 1]], dim=-1)
 
 
 def _mlp(i: int, h: int, o: int) -> nn.Sequential:

@@ -12,7 +12,7 @@ import numpy as np
 import pytest
 import torch
 
-from exp16_wm.bc import (to_unit, bc_loss, dim_weights, TransformedPolicy, build_split, within_rate, split_by_game, angle_err_deg, nearest_good_angle_err_deg,
+from exp16_wm.bc import (seed_everything, to_unit, bc_loss, dim_weights, TransformedPolicy, build_split, within_rate, split_by_game, angle_err_deg, nearest_good_angle_err_deg,
                          load_teacher_data, make_agent, train_bc, evaluate_policy)
 from exp16_wm.train import ACT_LOW, ACT_HIGH
 from exp16_wm.teacher_data import collect, save, CLEAR_ENV
@@ -259,3 +259,32 @@ class TestBcLossWrap:
         for loss in ("nearest_good", "teacher"):
             l = float(bc_loss(across, teacher, good, loss, w))
             assert l < 40.0                                       # ≈ (1°/0.2°)² = 25, not (359°/0.2°)² ≈ 3e6
+
+
+class TestSeeding:
+    def test_same_seed_gives_identical_initial_weights_and_different_seed_does_not(self):
+        def weights(seed):
+            seed_everything(seed)
+            return torch.cat([p.flatten() for p in make_agent(3).actor.parameters()])
+        assert torch.equal(weights(0), weights(0))
+        assert not torch.equal(weights(0), weights(1))
+
+    def test_gnn_init_is_seeded_too(self):
+        from exp16_wm.gnn_policy import PairGNNPolicy
+        def weights(seed):
+            seed_everything(seed)
+            return torch.cat([p.flatten() for p in PairGNNPolicy(16).parameters()])
+        assert torch.equal(weights(3), weights(3))
+
+
+class TestAngleWrapToggle:
+    def test_toggle_switches_between_wrapped_and_raw_difference(self):
+        import exp16_wm.gnn_policy as gp
+        a, b = torch.tensor([[0.999, 0.0]]), torch.tensor([[-0.999, 0.0]])
+        try:
+            gp.ANGLE_WRAP = True
+            assert abs(float(gp.action_diff(a, b)[0, 0])) < 0.01
+            gp.ANGLE_WRAP = False
+            assert abs(float(gp.action_diff(a, b)[0, 0])) > 1.9
+        finally:
+            gp.ANGLE_WRAP = True
