@@ -117,6 +117,12 @@ class TestPipeline:
         first_val = fit["history"][0][2]
         assert fit["best_val_loss"] < first_val * 0.25
 
+    def test_make_agent_hidden_sizes(self):
+        small, big = make_agent(3), make_agent(3, [64, 64, 64])
+        n = lambda a: sum(p.numel() for p in a.actor.parameters())
+        assert n(small) != n(big)
+        assert big.actor(torch.zeros(4, 23))[0].shape == (4, 2)
+
     def test_evaluate_policy_smoke(self):
         out = evaluate_policy(make_agent(3), seed=0, n_games=1,
                               env_kw={**CLEAR_ENV, "max_steps": 3})

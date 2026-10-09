@@ -121,9 +121,11 @@ def nearest_good_angle_err_deg(pred: np.ndarray, good: np.ndarray) -> np.ndarray
 # Train / evaluate
 # ──────────────────────────────────────────────
 
-def make_agent(n_balls: int = 3) -> VanillaSAC:
+def make_agent(n_balls: int = 3, hidden: list[int] | None = None) -> VanillaSAC:
+    """hidden=None keeps VanillaSAC's default (same as SAC runs, so BC can seed SAC)."""
+    kw = {} if hidden is None else {"hidden": hidden}
     return VanillaSAC(obs_dim=get_obs_dim(n_balls), action_dim=ACTION_DIM,
-                      act_low=ACT_LOW, act_high=ACT_HIGH)
+                      act_low=ACT_LOW, act_high=ACT_HIGH, **kw)
 
 
 def deterministic_unit(agent: VanillaSAC, obs: torch.Tensor) -> torch.Tensor:
@@ -234,6 +236,8 @@ def parse_args():
     p.add_argument("--eval-seed",  type=int, default=0)
     p.add_argument("--eval-games", type=int, default=500)
     p.add_argument("--threads",    type=int, default=2)
+    p.add_argument("--hidden",     type=int, nargs="+", default=None,
+                   help="actor hidden sizes (default: VanillaSAC's, i.e. same as SAC runs)")
     p.add_argument("--out-root",   type=str, default="logs/experiments")
     return p.parse_args()
 
@@ -245,7 +249,8 @@ def main():
     data = load_teacher_data(paths)
     teacher = json.loads(str(np.load(paths[0])["meta"]))["teacher"]
     train, val = split_by_game(data["game"], args.val_frac, args.seed)
-    name = (f"exp16_bc_{teacher}_{args.loss}_a{args.angle_scale_deg:g}_v{args.speed_scale:g}"
+    h_tag = "" if args.hidden is None else "_h" + "x".join(map(str, args.hidden))
+    name = (f"exp16_bc_{teacher}_{args.loss}{h_tag}_a{args.angle_scale_deg:g}_v{args.speed_scale:g}"
             f"_s{args.seed}_{time.strftime('%Y-%m-%d@%H%M')}")
     out_dir = os.path.join(args.out_root, name)
     os.makedirs(out_dir, exist_ok=True)
@@ -253,7 +258,7 @@ def main():
           f"(train {train.sum()}, val {val.sum()}), teacher shot success {np.mean(data['pocketed'] > 0)*100:.1f}%",
           flush=True)
 
-    agent = make_agent(CLEAR_ENV["n_balls"])
+    agent = make_agent(CLEAR_ENV["n_balls"], args.hidden)
     t0 = time.time()
     fit = train_bc(agent, data, train, val, args.loss, args.epochs, args.batch, args.lr,
                    args.patience, args.seed, w=dim_weights(args.angle_scale_deg, args.speed_scale))
