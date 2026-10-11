@@ -3901,3 +3901,15 @@ SAC(7.89) 수준으로 악화. 세 항목(2·3·4)을 한꺼번에 바꿔서 어
 ### ①②④ 조합 (2026-10-11 계획)
 
 ①(factorized 구조) + ②(pair_made selection target) + ④(scratch head)를 켜고 ③은 끈다(reg target = angle). seed 0, 나머지는 위 ablation과 동일. 하나씩 켰을 때 셋 다 무해했으므로(4.27 / 4.50 / 4.09), 합쳐도 control(4.37) 수준 이상인지 본다. seed 1개라 control과 0.5 미만 차이는 효과로 읽지 않는다.
+
+**결과 (2026-10-11, seed 0): control과 같다 — 이득 없음.**
+
+| run | shots/game | success | oracle angle err | oracle within 0.2° | top-1 made 가능 |
+|---|---|---|---|---|---|
+| control | 4.37 | 68.0% | 0.186° | 52.9% | 91.8% |
+| ①②④ (③ off) | 4.39 | 68.0% | 0.175° | 54.1% | 91.2% |
+| ①②④ + scratch penalty λ=3 | 4.41 | 67.5% | | | |
+
+- 셋을 합쳐도 control과 차이 없음(4.39 vs 4.37). selection(top-1 made 가능 91%)과 regression(oracle 0.18°) 모두 그대로.
+- scratch penalty(λ=3)도 효과 없음. ④만 켰을 때의 4.09는 ①②와 합치면 재현되지 않았다 → seed 잡음이었을 가능성이 높다.
+- 해석: robust label에서는 selection 개선 여지가 작다(top-1이 이미 91% made 가능). 남은 실패는 고른 pair를 정확히 못 치는 것(oracle within 0.2° ~54%) → 다음 개선 대상은 selection이 아니라 regression 정밀도.
