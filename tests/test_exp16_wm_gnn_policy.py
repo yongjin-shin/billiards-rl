@@ -477,6 +477,14 @@ class TestMade2Head:
         v0 = a[0, 1] * m.act_scale[1] + m.act_bias[1]
         assert torch.allclose(torch.unique(torch.round(v / v0 * 100) / 100), torch.tensor([0.8, 1.0, 1.25]))
 
+    def test_absolute_speed_grid_ignores_the_proposals_speed(self):
+        m, _ = self._m()
+        m.refine_speed_abs = (1.0, 2.0, 3.0)
+        c = m._unit_offsets(torch.tensor([[0.1, 0.0], [0.1, 0.5]]))
+        v = c[..., 1] * m.act_scale[1] + m.act_bias[1]
+        assert torch.allclose(torch.unique(torch.round(v * 100) / 100), torch.tensor([1.0, 2.0, 3.0]))
+        assert torch.allclose(c[0], c[1])
+
     def test_infer_modes(self, monkeypatch):
         m, rel = self._m()
         o = m.forward_full(rel)

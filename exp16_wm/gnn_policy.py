@@ -69,7 +69,8 @@ class PairGNNPolicy(nn.Module):
         self.has_made2 = made2_head                     # look-ahead stage 2: P(pair ij made | e_ij, action)
         self.infer = "select"                           # select | verify | refine | verify_refine (needs made2 head)
         self.refine_deg = (-0.3, -0.2, -0.1, -0.05, 0.0, 0.05, 0.1, 0.2, 0.3)
-        self.refine_speed = (0.8, 1.0, 1.25)
+        self.refine_speed = (0.8, 1.0, 1.25)             # × the proposal's speed
+        self.refine_speed_abs: tuple[float, ...] | None = None   # m/s, instead of refine_speed (independent of the proposal)
         self.bb   = _mlp(5 + 2 + 1 + 1, H, H)
         self.ball = _mlp(5 + H, H, H)
         self.pair = _mlp(H + 2 + 2 + 1 + 1, H, H)
@@ -192,10 +193,13 @@ class PairGNNPolicy(nn.Module):
     def _unit_offsets(self, a: torch.Tensor) -> torch.Tensor:
         """(B, 2) actions → (B, C, 2) refinement candidates: angle ± refine_deg × speed × refine_speed."""
         deg = torch.tensor(self.refine_deg, dtype=a.dtype, device=a.device)
-        mul = torch.tensor(self.refine_speed, dtype=a.dtype, device=a.device)
         ang = a[:, None, 0] + deg[None] / 180.0                                    # unit angle: 1 = π rad
-        v = a[:, 1:2] * self.act_scale[1] + self.act_bias[1]                         # m/s
-        spd = ((v * mul[None]) - self.act_bias[1]) / self.act_scale[1]
+        if self.refine_speed_abs is not None:
+            v = torch.tensor(self.refine_speed_abs, dtype=a.dtype, device=a.device)[None].expand(len(a), -1)
+        else:
+            mul = torch.tensor(self.refine_speed, dtype=a.dtype, device=a.device)
+            v = (a[:, 1:2] * self.act_scale[1] + self.act_bias[1]) * mul[None]       # m/s
+        spd = (v - self.act_bias[1]) / self.act_scale[1]
         grid = torch.stack(torch.broadcast_tensors(ang[:, :, None], spd[:, None, :]), dim=-1)   # (B, A, S, 2)
         return grid.reshape(len(a), -1, 2).clamp(-1.0, 1.0)
 
