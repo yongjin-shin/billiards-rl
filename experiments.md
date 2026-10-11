@@ -4191,3 +4191,13 @@ control(`mod-gla`) seed 0/1/2, val, label pair(candidate 0) 기준.
 
 - 지금까지 기각: 일반화(train도 나쁨), 데이터 양(3.7배 추가에도 불변), 포켓된 공 slot 표현, label 불일치·불규칙, 방해 공, 창 폭/난이도, speed hedging, selection, scatter 구제.
 - 남은 가설(미검증): **이웃 공이 정확히 1개인 regime에서 ball message(sum)가 pair embedding에 섞여 각도 계산을 방해한다.** 각도는 cue–공–포켓 기하만으로 결정되는데(label이 ±0.05°로 기하와 일치) 현재 action head는 이웃 정보가 섞인 `e_ij`에서 나온다. 검증: action head 입력에서 이웃 message를 빼고(selection head는 유지) 2개 state의 각도 오차가 줄어드는지.
+
+### 각도 head에서 이웃 message 빼기 (2026-10-11 계획)
+
+**가설**: 정답 각도는 cue–겨눈 공–포켓 기하만으로 결정된다(label이 순수 기하 조준각의 ±0.05° 안). 그런데 현재 action head는 이웃 공의 ball message(sum)가 섞인 `e_ij`에서 나온다. 이웃이 정확히 1개인 2개 state에서 이 섞임이 각도 계산을 방해해 오차가 2배(0.24° vs 0.13°)라는 가설.
+
+**변경 (`--geom-angle`)**: angle 출력만 이웃 message 없이 계산한다 — ball embedding에 message 대신 0을 넣어(`h⁰ = ball_mlp([ball_feat, 0])`) pair MLP를 한 번 더 통과시킨 `e⁰_ij`에서 별도 Linear head로 각도를 낸다. speed head와 selection head는 기존 그대로(이웃 정보 사용). 파라미터는 Linear(H, 1) 하나만 늘고 pair MLP/ball MLP는 공유.
+
+**실험**: 새 baseline 설정(`--pair-supervision --no-wta-fallback`, 나머지 동일), seed 0/1/2. 같은 batch에 control(`--geom-angle` 없음)도 다시 돌려 재현성과 같은 코드 비교를 확인(기존 4.14 ± 0.14와 같아야 함).
+**지표**: policy alone shots/game, success; 남은 공 1/2/3개별 각도 오차(label pair 기준 중앙값, within 0.2°)와 실제 clean pocket 비율.
+**판단**: 2개 state의 각도 오차가 control(0.24°)에서 1·3개 수준(0.11~0.13°)으로 줄면 이웃 message 간섭이 원인. 2개 state만 그대로고 1·3개만 변하면 원인 아님(각도가 이웃 정보 없이도 같은 정확도) → 모델 구조가 아니라 optimization/표현 쪽.
