@@ -3969,3 +3969,13 @@ SAC(7.89) 수준으로 악화. 세 항목(2·3·4)을 한꺼번에 바꿔서 어
 - 교훈: 효과를 볼 때는 같은 코드·같은 seed의 control을 반드시 함께 돌린다.
 - 결론: robust label에서 selection 쪽 변경(①②)과 보조 head(④⑤)는 모두 무의미. 병목은 regression 정밀도(oracle within ~60%)이고 이 변경들로는 움직이지 않는다.
 - 다음 후보: (a) WTA fallback 효과를 old code에서 fallback만 끈 run으로 확인(맞으면 baseline을 4.08로 갱신), (b) regression 정밀도 직접 공략 — action-conditional made head(2단계)를 보조 target이 아니라 inference 시 action 미세조정(∇_a P(made), roadmap #6)에 쓰기.
+
+### WTA fallback 검증 (2026-10-11 계획)
+
+**질문**: new-code control(4.08 ± 0.28)이 baseline A(4.51 ± 0.23)보다 좋은 이유가 label pair가 없는 row(robust 16,748 중 1.6%)의 처리 차이인가? baseline A(`--pair-supervision`, `_pair_loss`)는 이 row를 WTA loss(가장 가까운 pair head가 학습, 매 step 바뀔 수 있음)로 학습하고, modular loss는 loss에서 제외(gradient 0)한다.
+
+**실험**: 이전 코드 경로(`--pair-supervision`)에 `--no-wta-fallback`(label pair 없는 row 제외) 스위치만 추가. 같은 batch에서 seed 0/1/2:
+- old code 그대로 (baseline A 재현 확인 겸)
+- old code + `--no-wta-fallback`
+
+**판단**: fallback 끈 쪽이 ~4.1, 그대로가 ~4.5면 → WTA fallback이 원인, baseline을 fallback 없는 설정으로 갱신. 둘이 같으면 → 차이는 다른 곳(재현성 등).
