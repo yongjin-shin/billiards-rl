@@ -4040,3 +4040,18 @@ SAC(7.89) 수준으로 악화. 세 항목(2·3·4)을 한꺼번에 바꿔서 어
 **검증 후보**:
 1. **증강**: 3개 state에서 겨누지 않은 공 하나를 포켓 처리해 2개 state를 만들고, label action을 다시 쳐서 여전히 들어가는 것만 추가(simulation ~1ms/샷이라 수 초). 2개 state 정확도가 올라가면 데이터 부족이 원인.
 2. aggregation을 sum → mean(+ 이웃 수 feature)으로 바꿔 이웃 수 regime 차이를 줄이기.
+
+### 공 2개로 시작하는 데이터 추가 (2026-10-11 계획)
+
+**왜**: 남은 공 2개 state가 train에서도 부정확(within 0.2° 51%, 실제 성공률 57%)하고, 남은 가설은 "live 이웃 공 1개" regime의 데이터 부족(2,745 states, 16%)이다. 사용자 제안: 공 2개로 시작하는 게임을 만들고, 하나가 포켓되면(1개 남으면) 다시 생성 → 2개 state를 원하는 만큼 만든다. teacher가 첫 샷에 거의 항상 넣으므로 사실상 state마다 독립적인 무작위 2-ball 시작 배치다.
+
+**주의(분포)**: env의 시작 배치는 테이블 안쪽(공 x 15~85%, y 30~85%; cue y 15~40%)뿐이라 cushion 근처 공이 0%다. 실제 2개 state는 첫 샷 이후라 겨눈 공의 38%가 cushion 0.1m 이내이고 포켓에 가깝다(중앙값 0.27m). 그래서 두 버전을 만든다:
+- **A (env 기본 배치)**: env.reset() 배치에서 무작위 slot 하나를 포켓 처리 → "이웃 1개 데이터 부족" 가설만 검증.
+- **B (테이블 전체 균일)**: cue와 공 2개를 테이블 전체(cushion에서 공 반지름 이상, 포켓 중심에서 일정 거리 이상, 공끼리 겹치지 않게)에 균일 배치 → cushion·포켓 근처의 어려운 배치까지 포함.
+
+**생성** (`exp16_wm/two_ball_states.py`): 각 7,500 states, 포켓 처리할 slot은 무작위(slot별 균등). 이후 기존과 같은 파이프라인: robust relabel(`relabel.py`) → `pair_labels` → `outcomes` → `pair_stats`. 저장 위치 `logs/teacher_data/two_ball_{A,B}/`.
+
+**학습**: 새 baseline 설정(`--pair-supervision --no-wta-fallback`, 기타 동일), seed 0/1/2. 새 데이터는 **train에만** 추가(`--train-only-data`) — 기존 데이터의 train/val split과 val set을 그대로 유지해서 기존 결과와 직접 비교. 비교: 기존 데이터만(이미 있음, 4.14 ± 0.14) / +A / +B.
+지표: policy alone shots/game, success, val 2개 state의 within 0.2°와 실제 clean pocket 비율, 1개/3개 state에 손해가 없는지.
+
+**판단**: +A에서 2개 state 정확도가 오르면 데이터 부족이 원인. +B만 오르면 어려운 배치(cushion·포켓 근처) 데이터가 원인. 둘 다 그대로면 데이터가 아니라 모델/표현 문제.
