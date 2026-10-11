@@ -92,12 +92,13 @@ def parse_args():
     p.add_argument("--dirs", type=str, nargs="+", required=True)
     p.add_argument("--shard", type=int, required=True)
     p.add_argument("--n-shards", type=int, default=8)
+    p.add_argument("--base", type=str, default="ghost_s1000", help="shard files are <base>_shard<i>.npz")
     return p.parse_args()
 
 
 def main():
     args = parse_args()
-    name = f"ghost_s1000_shard{args.shard}.npz"
+    name = f"{args.base}_shard{args.shard}.npz"
     ref = dict(np.load(os.path.join(args.root, args.dirs[0], name)))
     print(f"shard {args.shard}: {len(ref['obs'])} states", flush=True)
     stats = stats_for_obs(ref["obs"], log_every=500)
