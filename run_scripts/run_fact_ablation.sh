@@ -6,6 +6,13 @@ COMMON=(--data "logs/teacher_data/relabel_s1000/robust/*.npz" --loss nearest_goo
         --lr-schedule cosine --patience 500 --model gnn --obs-transform relative --sel-weight 10
         --select within --seed 0 --threads 2)
 run() { local tag=$1; shift; nohup .venv/bin/python -u -m exp16_wm.bc "${COMMON[@]}" "$@" > "logs/run_logs/ablate_${tag}_${TS}.log" 2>&1 & }
+if [ "$1" = "wtafb" ]; then              # WTA fallback 검증: old code(--pair-supervision) 그대로 vs fallback 끔, seed 0/1/2
+  for sd in 0 1 2; do
+    run oldA_s$sd    --pair-supervision --seed $sd
+    run oldA_nofb_s$sd --pair-supervision --no-wta-fallback --seed $sd
+  done
+  wait; exit
+fi
 if [ "$1" = "control12" ]; then          # new-code control, seed 1/2 (baseline A는 이전 코드)
   for sd in 1 2; do run control_s$sd --selection global --sel-target label --reg-target angle --seed $sd; done
   wait; exit

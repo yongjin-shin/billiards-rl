@@ -63,6 +63,7 @@ class PairGNNPolicy(nn.Module):
         self.fact_terms = ("reg", "sel", "scratch")     # factorized loss terms that are switched on (ablations)
         self.mod: tuple[str, str, bool] | None = None   # modular loss (sel_target, reg_target, use_scratch); see _mod_loss
         self.has_scratch = factorized or scratch_head
+        self.wta_fallback = True                        # pair supervision: rows with no labelled pair use WTA (False → left out)
         self.has_made = made_head                       # auxiliary only (modular loss): P(pair made) from pair_stats
         self.bb   = _mlp(5 + 2 + 1 + 1, H, H)
         self.ball = _mlp(5 + H, H, H)
@@ -176,6 +177,8 @@ class PairGNNPolicy(nn.Module):
         rows = (pairs >= 0).any(dim=1)
         if bool(rows.all()):
             return self._pair_loss(rel, good_u, pairs, w)
+        if not self.wta_fallback:
+            return self._pair_loss(rel[rows], good_u[rows], pairs[rows], w) if bool(rows.any()) else rel.new_zeros(())
         loss, n = rel.new_zeros(()), len(rel)
         if bool(rows.any()):
             loss = loss + self._pair_loss(rel[rows], good_u[rows], pairs[rows], w) * int(rows.sum())

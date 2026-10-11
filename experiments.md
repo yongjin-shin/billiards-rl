@@ -3972,7 +3972,7 @@ SAC(7.89) 수준으로 악화. 세 항목(2·3·4)을 한꺼번에 바꿔서 어
 
 ### WTA fallback 검증 (2026-10-11 계획)
 
-**질문**: new-code control(4.08 ± 0.28)이 baseline A(4.51 ± 0.23)보다 좋은 이유가 label pair가 없는 row(robust 16,748 중 1.6%)의 처리 차이인가? baseline A(`--pair-supervision`, `_pair_loss`)는 이 row를 WTA loss(가장 가까운 pair head가 학습, 매 step 바뀔 수 있음)로 학습하고, modular loss는 loss에서 제외(gradient 0)한다.
+**질문**: new-code control(4.08 ± 0.28)이 baseline A(4.51 ± 0.23)보다 좋은 이유가 label pair가 없는 row(robust 16,748 중 230개, 1.37%)의 처리 차이인가? baseline A(`--pair-supervision`, `_pair_loss`)는 이 row를 WTA loss(가장 가까운 pair head가 학습, 매 step 바뀔 수 있음)로 학습하고, modular loss는 loss에서 제외(gradient 0)한다.
 
 **실험**: 이전 코드 경로(`--pair-supervision`)에 `--no-wta-fallback`(label pair 없는 row 제외) 스위치만 추가. 같은 batch에서 seed 0/1/2:
 - old code 그대로 (baseline A 재현 확인 겸)

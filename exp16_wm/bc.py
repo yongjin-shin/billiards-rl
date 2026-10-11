@@ -424,6 +424,8 @@ def parse_args():
                    help="factorized: extra evaluation with score −= λ·σ(scratch logit)")
     p.add_argument("--pair-supervision", action="store_true",
                    help="GNN: train each pair head on the pair that produced the label (needs exp16_wm.pair_labels)")
+    p.add_argument("--no-wta-fallback", action="store_true",
+                   help="--pair-supervision: leave rows with no labelled pair out of the loss instead of training them with WTA")
     p.add_argument("--angle-wrap", action="store_true",
                    help="wrap the angle difference in the training loss (±180° seam). Off by default: with 3 seeds "
                         "it was worse for the policy at every lr tried (experiments.md, 2026-10-09)")
@@ -464,7 +466,7 @@ def main():
             ("" if args.data_frac >= 1.0 else f"_frac{args.data_frac:g}") + \
             ("" if args.lr_schedule == "const" else "_cos") + \
             (f"_mod-{args.selection[0]}{args.sel_target[0]}{dict(angle='a', made='m', made_same='M')[args.reg_target]}{'s' if args.scratch_head else ''}{'_mh' if args.made_head else ''}" if modular else
-             ("_pairs" if args.pair_supervision else "") + ("_fact" + ("" if len(args.fact_terms) == 3 else "-" + "".join(t[0] for t in args.fact_terms))
+             ("_pairs" + ("-nofb" if args.no_wta_fallback else "") if args.pair_supervision else "") + ("_fact" + ("" if len(args.fact_terms) == 3 else "-" + "".join(t[0] for t in args.fact_terms))
                                                             if args.selection == "factorized" else "")) + \
             ("_wrap" if args.angle_wrap else "_nowrap")
     name = (f"exp16_bc_{teacher}_{args.loss}{h_tag}_a{args.angle_scale_deg:g}_v{args.speed_scale:g}"
@@ -480,6 +482,7 @@ def main():
                               factorized=args.selection == "factorized", scratch_head=args.scratch_head,
                               made_head=args.made_head)
         agent.fact_terms = tuple(args.fact_terms)
+        agent.wta_fallback = not args.no_wta_fallback
         if modular:
             agent.mod = (args.sel_target, args.reg_target, args.scratch_head)
     else:

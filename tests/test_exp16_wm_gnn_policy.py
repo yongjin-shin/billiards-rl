@@ -410,3 +410,23 @@ class TestModularLoss:
         with pytest.raises(ValueError):
             mh.train_loss(rel, good[:, 0], good, pairs=pairs, extras=None)
         assert "made_logit" not in m.forward_full(rel)
+
+
+class TestWtaFallbackSwitch:
+    def test_without_fallback_unlabelled_rows_are_left_out(self):
+        torch.manual_seed(0)
+        m = PairGNNPolicy(hidden=16)
+        rel, good = TestPairSupervision()._batch(4)
+        pairs = torch.tensor([[4, -1, -1], [-1, -1, -1], [9, 4, -1], [-1, -1, -1]])
+        m.wta_fallback = False
+        loss = m.train_loss(rel, good[:, 0], good, pairs=pairs)
+        lab = torch.tensor([0, 2])
+        assert torch.allclose(loss, m._pair_loss(rel[lab], good[lab], pairs[lab], None))
+        m.wta_fallback = True
+        assert not torch.allclose(m.train_loss(rel, good[:, 0], good, pairs=pairs), loss)
+
+    def test_without_fallback_no_labelled_rows_gives_zero(self):
+        m = PairGNNPolicy(hidden=16)
+        m.wta_fallback = False
+        rel, good = TestPairSupervision()._batch(4)
+        assert float(m.train_loss(rel, good[:, 0], good, pairs=torch.full((4, 3), -1))) == 0.0
