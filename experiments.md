@@ -3897,3 +3897,7 @@ SAC(7.89) 수준으로 악화. 세 항목(2·3·4)을 한꺼번에 바꿔서 어
 - 즉 "실제로 넣은 pair"로 target을 붙이는 아이디어 자체는 무해하지만 이득도 없다(robust label에서는 같은 공 안에서 angle matching과 거의 같은 target).
 - 결론: pair head가 학습할 target은 **겨눈 공의 pair**여야 한다. combination shot은 별도 처리(제외 또는 겨눈 공 head에 귀속)가 필요하다.
 - 다음: ①②④ + (angle 또는 made_same) 조합을 seed 0/1/2로 baseline A(4.51 ± 0.23)와 비교, ④(seed 0 4.09)가 실제 개선인지 확인.
+
+### ①②④ 조합 (2026-10-11 계획)
+
+①(factorized 구조) + ②(pair_made selection target) + ④(scratch head)를 켜고 ③은 끈다(reg target = angle). seed 0, 나머지는 위 ablation과 동일. 하나씩 켰을 때 셋 다 무해했으므로(4.27 / 4.50 / 4.09), 합쳐도 control(4.37) 수준 이상인지 본다. seed 1개라 control과 0.5 미만 차이는 효과로 읽지 않는다.
