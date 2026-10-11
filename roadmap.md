@@ -485,6 +485,7 @@ policy의 shot 실패 분해(robust+pairs, val): chosen pair miss ~24%, chosen p
 | **BC 새 baseline** (`--no-wta-fallback`) | **4.14 ± 0.14** | 71.9% | 그 row를 loss에서 제외 |
 | + made head(look-ahead 2단계) select | 4.11 ± 0.20 | 72.5% | action을 받는 made head를 학습(칠 때는 안 씀) → 해롭지 않음 |
 | + verify + refine(각도 31 × 절대 speed 7) | **3.90 ± 0.21** | 76.7% | made head로 pair 재선택 + action 후보 평가(시뮬레이터 없이) |
+| **+ encoder 깊이 4**(2층 → 4층, made head 포함, verify+refine) | **3.55 ± 0.10** | 84.2% | encoder MLP를 깊게(기하 입력 없이 학습만으로) — pair head 각도 오차 −24%, 창 적중 81 → 86.5% |
 | (진단 전용) + 기하 조준각 차이 입력 | 3.46 ± 0.12 | 86.4% | made head에 ghost-ball 조준각과의 차이를 입력 — **상한 참고, 최종 모델이 아님** |
 | teacher (robust / geom) | 2.98 / 2.24 | – | – |
 
@@ -500,7 +501,7 @@ policy의 shot 실패 분해(robust+pairs, val): chosen pair miss ~24%, chosen p
 
 | 지금 | 결과 | 다음 |
 |---|---|---|
-| encoder 용량(폭 256 / 깊이 4) 실험 | 정밀도 ↑(argmax ≥ 88%, 각도 오차 ≤ 0.095°) | 폭+깊이 결합, 포화점 탐색 → 학습만으로 상한에 근접하면 기하 입력 불필요 |
+| encoder 용량(폭 256 / 깊이 4) 실험 — **결과: 깊이 4 효과 큼(판단표 C, 각도 −24%·적중 +5.5%p), 폭 256은 작음** | 깊이 6/8 시도(experiments.md "encoder 깊이 스케일링"의 판단표 A~E) | 포화하면 폭·sin/cos·학습 순서로, 계속 오르면 더 깊게 |
 | | 소폭 ↑ | sin/cos(Fourier) 좌표 표현을 같은 지표로 시험 |
 | | 변화 없음 | 학습 쪽(긴 학습, lr, EMA/마지막 epoch checkpoint = #9, loss 스케일 `--angle-scale-deg` 0.1) |
 | | train ↑ val ↓ | 데이터/정규화 |
@@ -523,7 +524,7 @@ policy의 shot 실패 분해(robust+pairs, val): chosen pair miss ~24%, chosen p
 
 | # | 항목 | 이유 | 비용 | 의존 |
 |---|---|---|---|---|
-| 13 | **encoder 용량**: 폭 256 / 깊이 4, 이어서 결합 | 정밀도 병목이 용량인지 | BC ~1시간(병렬 6 runs) | – |
+| 13 | **encoder 용량**: **깊이 4 완료(3.90 → 3.55)**, 폭 256은 효과 작음(3.84, 보류). **깊이 6/8 진행 중(2026-10-12)** → 포화 확인 후 폭 결합 | 정밀도 병목이 용량(특히 깊이)인지 | BC ~1시간(병렬 6 runs) | – |
 | 14 | **좌표 sin/cos(Fourier) 표현** | 작은 각도 차이를 더 잘 구분하도록 | BC | 13 결과에 따라 |
 | 15 | **gradient refine** `∇_a P(made)` | 후보 격자 없이 연속 탐색. 단 head 기울기가 정확해야 의미 | 낮음(추론) | 13/14로 argmax ≥ 90% |
 | 16 | **게임 vs val 격차 확인**: made head 이득이 val(+2.8%p)보다 게임(+0.8%p)에서 작은 이유 | policy가 가는 state는 teacher state와 분포가 다름 | 낮음 | – |

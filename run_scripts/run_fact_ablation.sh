@@ -13,6 +13,13 @@ if [ "$1" = "geoang" ]; then             # 각도 head에서 이웃 message 빼�
   done
   wait; exit
 fi
+if [ "$1" = "depth" ]; then              # encoder 깊이 스케일링: 6층 / 8층, made2 head 포함, seed 0/1/2
+  for sd in 0 1 2; do
+    run depth_L6_s$sd --pair-supervision --no-wta-fallback --made2-head --gnn-layers 6 --seed $sd
+    run depth_L8_s$sd --pair-supervision --no-wta-fallback --made2-head --gnn-layers 8 --seed $sd
+  done
+  wait; exit
+fi
 if [ "$1" = "capacity" ]; then           # encoder 용량: 폭 256 / 깊이 4, made2 head 포함, seed 0/1/2
   for sd in 0 1 2; do
     run cap_H256_s$sd --pair-supervision --no-wta-fallback --made2-head --gnn-hidden 256 --seed $sd
