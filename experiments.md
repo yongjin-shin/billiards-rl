@@ -3878,3 +3878,9 @@ SAC(7.89) 수준으로 악화. 세 항목(2·3·4)을 한꺼번에 바꿔서 어
 **다음**:
 - ③을 고치려면 `good_made` target에서 **겨눈 공과 다른 공의 pair를 빼거나**(made ∩ 같은 공), angle matching을 유지하고 made는 selection/verifier에만 쓴다. 위 가설은 "made ∩ 같은 공" run이 control 수준으로 돌아오면 검증된다.
 - ①②④는 무해하므로, ③을 빼고 ①②④를 켠 조합을 seed 0/1/2로 돌려 baseline A(4.51 ± 0.23)와 비교. ④(4.09)가 실제 개선인지도 여기서 3 seed로 확인.
+
+### ③ 원인 검증: 겨눈 공과 다른 공의 target 제거 (2026-10-11 계획)
+
+**가설**: ③이 망가지는 이유는 combination shot target(공 A를 겨눈 action이 공 B를 넣음 → 공 B의 pair head가 공 A를 겨누는 action을 학습)이다.
+**검증**: `--reg-target made_same` = `good_made` target 중 **겨눈 공(angle-matched pair의 공)과 같은 공의 pair만** 남긴다. angle pair가 없는 candidate는 제외. 나머지는 ③만 run과 동일 (global, label sel target, scratch off, seed 0).
+**판단**: oracle 각도 오차가 control(0.19°) 근처, shots가 control(4.37)에서 ~0.5 이내로 돌아오면 가설 채택. ③만(0.56°, 7.63) 근처면 기각 → 다른 원인(같은 공 다른 포켓 target, scratch candidate 제외 등) 조사.
