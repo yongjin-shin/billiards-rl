@@ -20,6 +20,13 @@ if [ "$1" = "depth" ]; then              # encoder 깊이 스케일링: 6층 / 8
   done
   wait; exit
 fi
+if [ "$1" = "long" ]; then               # 학습 길이 3배(1500 epoch, cosine도 1500): 깊이 4 vs 깊이 6, made2 head 포함, seed 0/1/2 (experiments.md 2026-10-12)
+  for sd in 0 1 2; do                    # 출력 이름에 epoch 수가 없어서 기존 500 epoch run과 glob가 겹치지 않도록 --out-root를 따로 둔다
+    run long_L4_s$sd --epochs 1500 --patience 1500 --out-root logs/experiments_long --pair-supervision --no-wta-fallback --made2-head --gnn-layers 4 --seed $sd
+    run long_L6_s$sd --epochs 1500 --patience 1500 --out-root logs/experiments_long --pair-supervision --no-wta-fallback --made2-head --gnn-layers 6 --seed $sd
+  done
+  wait; exit
+fi
 if [ "$1" = "capacity" ]; then           # encoder 용량: 폭 256 / 깊이 4, made2 head 포함, seed 0/1/2
   for sd in 0 1 2; do
     run cap_H256_s$sd --pair-supervision --no-wta-fallback --made2-head --gnn-hidden 256 --seed $sd
