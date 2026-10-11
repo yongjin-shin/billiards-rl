@@ -4619,3 +4619,42 @@ select 대비 개선(seed별 0 / 1 / 2): verify+refine 1개 +3.6%p(+3.7, +4.0, +
 - **policy gradient**는 같은 샘플을 reward로 직접 업데이트하는 대안이다. reset이 되는 1-step 문제라 둘은 거의 같은 일을 한다(창 밖 proposal의 tail state에서 노이즈 샘플 중 창에 들어간 것이 mean을 창 쪽으로 이동). 검증하지 않은 가설이다. from-scratch SAC는 7.89 shots로 실패했지만 BC init은 proposal이 이미 창 근처라 sparse reward 문제가 훨씬 작을 것으로 기대한다(마찬가지로 미검증).
 - **열린 결정**: 다음 단계를 (1) search → distill(TODO 19)로 갈지, (2) residual/LayerNorm 깊이 재시도(TODO 18)와 학습 길이 실험을 먼저 볼지. 현재 학습 길이 3배 실험이 돌고 있다.
 - 별개의 작은 실험 후보: 제곱 오차 대신 Laplace NLL(L1 계열)을 robust loss로 쓰기. 이전 분석에서 train loss의 66%가 label 없는 1.4% row에서 나왔다. 단 샘플별 scale을 학습하면 어려운 2개 state를 덜 보게 될 위험이 있어 scale은 고정하는 쪽이 안전하다.
+
+### 진단 두 가지 (학습 없음): oracle 교체, 정책이 가는 state (2026-10-12 계획)
+
+학습 길이 3배 실험이 도는 동안 할 수 있는 학습 없는 진단. 둘 다 다음 결정을 바꾼다. 도구는 `exp16_wm/diagnose_action.py`(`--parts oracle visited`). 판단표는 결과를 보기 전에 정한다.
+
+#### 1. oracle 교체: 정밀도 실패가 각도 때문인가 speed 때문인가
+
+**질문**: 깊이 4에서 label pair를 줘도 select에서 18.4%p, verify+refine에서 13.7%p가 실패한다. 그 실패는 각도 오차, speed 오차, 둘의 결합 중 무엇인가. 앞선 분해에서 "각도만 고치는 refine은 이득 0, speed 격자를 넣으면 +4.8%p"를 봤지만, 각도와 speed 중 어느 쪽이 얼마나 틀리는지는 직접 안 쟀다. 답에 따라 mode-aware speed head를 올릴지 접을지가 정해진다.
+**방법**: 깊이 4(대조로 control), seed 0/1/2, label이 있는 모든 val state에서 label pair(후보 0)의 **pair head 출력**(select, made head 없이)을 기준으로 실제로 친다(clean = pocket + scratch 없음).
+- M = 모델 각도 + 모델 speed (기준, 81.6%)
+- Ls = 모델 각도 + **label speed**, La = **label 각도** + 모델 speed, L = label 각도 + label speed(= teacher action, 성공률이 teacher의 99.8% 근처여야 한다: 하네스 검증)
+- 격자 oracle(시뮬레이터가 고름, seed당 300 state 표본): 모델 각도에서 speed 7개(0.75~5 m/s) 중 하나라도 성공 / 모델 speed에서 각도 31개(±0.3°) 중 하나라도 성공 / 각도 31 × speed 7 중 하나라도 성공. 비교용으로 같은 표본에서 M과 made head verify+refine(같은 label pair).
+
+**판단표**: r_a = La − M, r_s = Ls − M (%p). 표본 오차가 약 ±1%p이므로 2%p 미만의 차이는 같다고 본다. 위에서부터 먼저 맞는 행.
+
+| # | 관측 | 해석 | 다음 행동 |
+|---|---|---|---|
+| A | L < 97% | 하네스(label 행동 재현)에 문제 | 해석 보류, 원인부터 찾는다 |
+| B | r_a + r_s < 0.5 · (L − M) | 각도와 speed가 **함께** 맞아야 한다(결합 오차) | 각도·speed를 따로 고치는 방법은 효과가 작다. 결합을 다루는 쪽(joint 모델링, 탐색 TODO 19) |
+| C | r_a ≥ 2 · r_s (그리고 r_a − r_s ≥ 2%p) | 각도 오차가 지배 | mode-aware speed head는 접는다. 깊이·loss 스케일·탐색 계속 |
+| D | r_s ≥ 2 · r_a (그리고 r_s − r_a ≥ 2%p) | speed 오차가 지배 | mode-aware speed head, speed 표현/loss를 올린다 |
+| E | 그 외 | 둘 다 기여 | 병행 |
+
+격자 oracle 보조 해석: (각도 31 × speed 7 oracle) − (같은 표본의 verify+refine) ≥ 3%p이면 같은 격자에서 verifier(made head)의 선택 손실이 크다 → 시뮬레이터 검증·탐색의 가치(TODO 19). 3%p 미만이면 격자 안에서는 made head가 이미 거의 최선이고 남은 실패는 격자 밖(큰 오차)이다.
+
+#### 2. 정책이 가는 state vs teacher state (TODO 16)
+
+**질문**: 게임에서 정책이 만나는 state는 teacher state와 다른가. 다르면 정책이 가는 state에서 label을 받는 방법(DAgger, TODO 10)과 search → distill(TODO 19)의 가치가 커지고, 같으면 teacher state만으로 충분하다. 앞서 "val에서 +2.8%p 이득이 게임에서는 +0.8%p"였던 격차의 원인도 이것일 수 있다.
+**방법**: 깊이 4(대조로 control), seed 0/1/2, 각 모델로 500 games(verify+refine 31×7, `eval_by_balls`의 게임과 같은 프로토콜: `reset(seed=0)` 후 reset). 매 샷의 (남은 공 수, 직전 샷 결과{첫 샷 / 직전 적중 / 직전 miss / 직전 scratch}, clean 여부)를 기록한다. 게임의 `shot_success_rate`는 scratch를 무시하고 pocket만 세므로 **clean으로 다시 센다**(val 지표와 같은 정의). val 기준은 같은 모델이 label이 있는 val state에서 verify+refine으로 고른 pair의 clean(깊이 4: 84.8 / 74.9 / 82.6%, 전체 82.2%).
+**비교**: (i) 남은 공 수별 clean 성공률 게임 vs val, (ii) 게임에서 남은 공 수 분포, (iii) 직전 샷 결과별 성공률(teacher state에는 거의 없는 "실패 직후 state"가 얼마나 어려운가).
+
+| # | 관측 | 해석 | 다음 행동 |
+|---|---|---|---|
+| A | 남은 공 수별 게임 성공률이 val과 5%p 이내이고 실패 직후 state도 정상 state와 3%p 이내 | 분포 이동이 작다 | DAgger·정책 state distill의 기대 이득이 작다. TODO 19는 teacher state에서 진행 |
+| B | 실패 직후(miss·scratch) state의 성공률이 첫 샷·적중 직후보다 5%p 이상 낮음 | 정책이 스스로 만드는 어려운 state가 있다 | 정책이 가는 state에서 label을 받는 방법(TODO 10)·distill의 우선순위를 올린다 |
+| C | 게임 성공률이 남은 공 수별로 val보다 5%p 이상 낮음(전반적) | train/val teacher state와의 분포 차이 또는 평가 방식 차이 | 원인 분리(첫 state vs 이후 state, ball-in-hand 위치) |
+| D | 게임 성공률이 val보다 5%p 이상 높음 | val의 teacher state가 더 어렵다 | teacher의 state 선택 편향 가능성, 해석 주의 |
+
+표본: 게임 성공률의 표준오차는 샷 수 약 1,700/seed로 약 ±1%p, 실패 직후 state는 수가 적어 표본 수를 함께 적는다.
