@@ -3949,3 +3949,23 @@ SAC(7.89) 수준으로 악화. 세 항목(2·3·4)을 한꺼번에 바꿔서 어
 - ⑤만이 baseline A보다 seed std 이상 좋고 oracle within이 오르면 → "보조 과제가 encoder를 개선" 가설 지지.
 - ④+⑤가 ④만보다 좋으면 → 이득이 더해짐, 2단계(action-conditional made head)로.
 - ⑤만이 baseline 수준이면 → ④의 이득은 scratch 정보 고유의 것(cue ball 경로)이고 일반적인 보조 과제 효과가 아님.
+
+**결과 (2026-10-11): 모든 변경이 new-code control과 같다 — ④ "개선"은 비교 기준 오류였다 (정정).**
+
+| (robust, seed 0 / 1 / 2) | shots/game | success | oracle within 0.2° |
+|---|---|---|---|
+| baseline A (이전 코드, 10-09) | 4.32 / 4.45 / 4.76 → 4.51 ± 0.23 | 66.2% | 50.7 / 54.8 / 48.8% |
+| **control (new code, 변경 없음)** | 4.37 / 4.06 / 3.82 → **4.08 ± 0.28** | 72.9% | 52.9 / 60.4 / 64.0% |
+| ① 구조만 | 4.27 / 4.18 / 3.95 → 4.13 ± 0.16 | 72.1% | 54.6 / 60.6 / 60.8% |
+| ② sel target만 | 4.50 / 4.35 / 3.83 → 4.23 ± 0.35 | 70.8% | 50.9 / 57.8 / 63.4% |
+| ④ scratch만 | 4.09 / 4.23 / 3.89 → 4.07 ± 0.17 | 73.3% | 57.9 / 60.1 / 65.2% |
+| ①②④ | 4.39 / 3.93 / 4.12 → 4.15 ± 0.23 | 72.0% | 54.1 / 61.5 / 57.3% |
+| ⑤ made head만 | 4.40 / 4.21 / 3.84 → 4.15 ± 0.28 | 71.8% | 54.1 / 55.1 / 64.4% |
+| ④+⑤ | 4.45 / 4.15 / 3.88 → 4.16 ± 0.29 | 71.8% | 50.2 / 59.4 / 63.8% |
+
+- **①②④⑤ 어느 것도, 어떤 조합도 control(4.08)과 차이가 없다** (전부 4.07~4.23, seed std 안). seed별 패턴도 같다(seed 2가 항상 가장 좋음 → split 난이도).
+- 앞에서 "④는 3 seed 모두 baseline A보다 좋다 — 채택 후보"라고 쓴 것은 **틀렸다**: 비교 대상이 이전 코드의 baseline A였고, control을 seed 0에서만(4.37 vs 4.32) 검증했다. 같은 코드의 control 3 seed와 비교하면 ④의 효과는 0이다. 보조 과제가 encoder를 개선한다는 가설도 근거가 없어졌다(⑤ made head도 효과 0).
+- **새 코드 control 자체가 baseline A보다 좋다**(4.08 vs 4.51, seed별 +0.05 / −0.39 / −0.94, oracle within 51% → 59%). 두 코드의 유일한 학습 차이는 label pair가 없는 row(1.6%)를 baseline A는 WTA loss로 학습하고 modular loss는 제외한다는 점 → **WTA fallback이 regression을 해치고 있었을 가능성**(미검증; seed 0에서는 차이가 없어 잡음일 수도 있다).
+- 교훈: 효과를 볼 때는 같은 코드·같은 seed의 control을 반드시 함께 돌린다.
+- 결론: robust label에서 selection 쪽 변경(①②)과 보조 head(④⑤)는 모두 무의미. 병목은 regression 정밀도(oracle within ~60%)이고 이 변경들로는 움직이지 않는다.
+- 다음 후보: (a) WTA fallback 효과를 old code에서 fallback만 끈 run으로 확인(맞으면 baseline을 4.08로 갱신), (b) regression 정밀도 직접 공략 — action-conditional made head(2단계)를 보조 target이 아니라 inference 시 action 미세조정(∇_a P(made), roadmap #6)에 쓰기.
