@@ -6,6 +6,10 @@ COMMON=(--data "logs/teacher_data/relabel_s1000/robust/*.npz" --loss nearest_goo
         --lr-schedule cosine --patience 500 --model gnn --obs-transform relative --sel-weight 10
         --select within --seed 0 --threads 2)
 run() { local tag=$1; shift; nohup .venv/bin/python -u -m exp16_wm.bc "${COMMON[@]}" "$@" > "logs/run_logs/ablate_${tag}_${TS}.log" 2>&1 & }
+if [ "$1" = "control12" ]; then          # new-code control, seed 1/2 (baseline A는 이전 코드)
+  for sd in 1 2; do run control_s$sd --selection global --sel-target label --reg-target angle --seed $sd; done
+  wait; exit
+fi
 if [ "$1" = "madehead" ]; then           # look-ahead 1단계: ⑤ made head만, ④+⑤ — seed 0/1/2
   for sd in 0 1 2; do
     run c5_made_s$sd  --selection global --sel-target label --reg-target angle --made-head --seed $sd
