@@ -516,6 +516,8 @@ def parse_args():
                    help="GNN: the angle output comes from a pair embedding without the ball-ball message (geometry only)")
     p.add_argument("--made2-head", action="store_true",
                    help="look-ahead stage 2: action-conditional made head trained on teacher sims (--sims)")
+    p.add_argument("--made2-geom", action="store_true",
+                   help="diagnostic: the made2 head also gets (action angle − geometric aim)/0.2° (needs --made2-head)")
     p.add_argument("--made2-weight", type=float, default=1.0)
     p.add_argument("--sims", type=str, nargs="+", default=["logs/teacher_data/relabel_s1000/sims/*.npz"])
     p.add_argument("--sims-batch", type=int, default=1024)
@@ -554,6 +556,8 @@ def main():
     data = load_teacher_data(paths)
     teacher = json.loads(str(np.load(paths[0])["meta"]))["teacher"]
     sims = None
+    if args.made2_geom and not args.made2_head:
+        raise SystemExit("--made2-geom needs --made2-head")
     if args.made2_head:
         if args.data_frac < 1.0 or args.augment != "none" or args.model != "gnn":
             raise SystemExit("--made2-head needs --model gnn, --data-frac 1, --augment none")
@@ -576,7 +580,7 @@ def main():
             (f"_mod-{args.selection[0]}{args.sel_target[0]}{dict(angle='a', made='m', made_same='M')[args.reg_target]}{'s' if args.scratch_head else ''}{'_mh' if args.made_head else ''}" if modular else
              ("_pairs" + ("-nofb" if args.no_wta_fallback else "") if args.pair_supervision else "") + ("_fact" + ("" if len(args.fact_terms) == 3 else "-" + "".join(t[0] for t in args.fact_terms))
                                                             if args.selection == "factorized" else "")) + \
-            ("_geoang" if args.geom_angle else "") + extra_tag + (f"_m2w{args.made2_weight:g}" if args.made2_head else "") + ("_wrap" if args.angle_wrap else "_nowrap")
+            ("_geoang" if args.geom_angle else "") + extra_tag + (f"_m2w{args.made2_weight:g}" if args.made2_head else "") + ("geo" if args.made2_geom else "") + ("_wrap" if args.angle_wrap else "_nowrap")
     name = (f"exp16_bc_{teacher}_{args.loss}{h_tag}_a{args.angle_scale_deg:g}_v{args.speed_scale:g}"
             f"_s{args.seed}_{time.strftime('%Y-%m-%d@%H%M')}")
     out_dir = os.path.join(args.out_root, name)
@@ -589,7 +593,7 @@ def main():
         agent = PairGNNPolicy(args.gnn_hidden, args.wta_eps, args.sel_weight,
                               factorized=args.selection == "factorized", scratch_head=args.scratch_head,
                               made_head=args.made_head, made2_head=args.made2_head,
-                              geom_angle=args.geom_angle)
+                              geom_angle=args.geom_angle, made2_geom=args.made2_geom)
         agent.fact_terms = tuple(args.fact_terms)
         agent.wta_fallback = not args.no_wta_fallback
         if modular:

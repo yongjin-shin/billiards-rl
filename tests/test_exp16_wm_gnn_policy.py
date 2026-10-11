@@ -552,3 +552,57 @@ class TestGeomAngle:
         loss.backward()
         assert torch.isfinite(loss) and m.head_ang.weight.grad.abs().sum() > 0
         assert m.predict_unit(rel).shape == (4, 2)
+
+
+class TestMade2Geom:
+    def test_ball_radius_matches_the_env(self):
+        from exp16_wm.gnn_policy import BALL_RADIUS
+        from exp16_wm.teacher_data import CLEAR_ENV
+        from simulator import BilliardsEnv
+        env = BilliardsEnv(**CLEAR_ENV); env.reset(seed=0)
+        assert abs(env.system.balls["cue"].params.R - BALL_RADIUS) < 1e-9
+
+    def test_aim_is_zero_for_a_straight_shot_and_feature_counts_in_0p2_degrees(self):
+        torch.manual_seed(0)
+        m = PairGNNPolicy(hidden=16, made2_head=True, made2_geom=True)
+        r = REL.copy(); r[0:3] = (0.5, 0.0, 0.0); r[3:6] = (0.0, 0.0, 1.0); r[6:9] = (0.0, 0.0, 1.0)
+        r[9 + 2 * 3: 9 + 2 * 3 + 2] = (1.5, 0.0)               # pocket 3 straight beyond ball 0, on the +x axis
+        o = m.forward_full(torch.as_tensor(r[None]))
+        assert abs(float(o["aim"][0, 3])) < 1e-6
+        a = torch.tensor([[np.radians(0.4) / np.pi, 0.0]])    # +0.4° in unit angle
+        g = m._geom_feature(o["aim"][:, 3], a[:, 0])
+        assert abs(float(g) - 2.0) < 1e-3
+
+    def test_feature_wraps_across_the_seam(self):
+        m = PairGNNPolicy(hidden=16, made2_head=True, made2_geom=True)
+        g = m._geom_feature(torch.tensor([np.pi - 0.001]), torch.tensor([-1.0 + 0.001 / np.pi]))
+        assert abs(float(g) - 0.573) < 0.01                    # 0.002 rad = 0.115° = 0.57 units, not ~1800
+
+    def test_geom_head_learns_a_window_from_the_feature_alone(self):
+        # every pair is "made" within ±0.3° of its own geometric aim: the head only has to use the feature
+        torch.manual_seed(0)
+        m = PairGNNPolicy(hidden=16, made2_head=True, made2_geom=True)
+        m.made2_scale.zero_()               # an untrained pair head's proposal is far off; mute the offset-from-proposal input
+        rel = torch.as_tensor(np.stack([REL] * 64))
+        opt = torch.optim.Adam(m.parameters(), lr=3e-3)
+        g = torch.Generator().manual_seed(0)
+        for _ in range(600):
+            with torch.no_grad():
+                aim = m.forward_full(rel)["aim"]
+            off = (torch.rand(64, generator=g) - 0.5) * np.radians(1.2)               # ±0.6° around the geometric aim
+            a = torch.stack([(aim + off[:, None]) / np.pi, torch.zeros_like(aim)], dim=-1)      # (64, 18, 2)
+            made = (off.abs() < np.radians(0.3))[:, None].expand(-1, N_PAIRS)
+            loss = m.made2_loss(rel, a, made, torch.zeros(64, dtype=torch.bool))
+            opt.zero_grad(); loss.backward(); opt.step()
+        o = m.forward_full(rel[:2])
+        aim = o["aim"].detach()
+        d = torch.deg2rad(torch.tensor([0.1, 0.45]))[:, None]
+        p = torch.sigmoid(m.made2_logits(o, torch.stack([(aim + d) / np.pi, torch.zeros_like(aim)], dim=-1)))[:, 7]
+        assert float(p[0]) > 0.8 and float(p[1]) < 0.2
+
+    def test_modes_run_with_the_geom_input(self):
+        m = PairGNNPolicy(hidden=16, made2_head=True, made2_geom=True)
+        rel = torch.as_tensor(np.stack([REL] * 3))
+        for mode in ("select", "verify", "refine", "verify_refine"):
+            m.infer = mode
+            assert m.predict_unit(rel).shape == (3, 2)

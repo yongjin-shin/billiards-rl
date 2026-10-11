@@ -30,6 +30,7 @@ from exp16_wm.train import ACT_LOW, ACT_HIGH
 from exp16_wm.obs_transform import N_BALLS, N_POCKETS, REL_DIM
 
 N_PAIRS = N_BALLS * N_POCKETS
+BALL_RADIUS = 0.028575          # m (pooltool default; test_exp16_wm_gnn_policy checks it against the env)
 SIDE_POCKETS = (1, 4)            # obs pocket order: (0,0) (0,½) (0,1) (1,0) (1,½) (1,1)
 _NEG = -1e9
 
@@ -55,7 +56,7 @@ def _mlp(i: int, h: int, o: int) -> nn.Sequential:
 class PairGNNPolicy(nn.Module):
     def __init__(self, hidden: int = 128, wta_eps: float = 0.05, sel_weight: float = 10.0,
                  factorized: bool = False, scratch_head: bool = False, made_head: bool = False,
-                 made2_head: bool = False, geom_angle: bool = False):
+                 made2_head: bool = False, geom_angle: bool = False, made2_geom: bool = False):
         super().__init__()
         H = hidden
         self.wta_eps, self.sel_weight = wta_eps, sel_weight
@@ -66,6 +67,7 @@ class PairGNNPolicy(nn.Module):
         self.has_scratch = factorized or scratch_head
         self.wta_fallback = True                        # pair supervision: rows with no labelled pair use WTA (False → left out)
         self.has_made = made_head                       # auxiliary only (modular loss): P(pair made) from pair_stats
+        self.made2_geom = made2_geom                    # diagnostic: made2 head also gets (action angle − geometric aim) / 0.2°
         self.has_made2 = made2_head                     # look-ahead stage 2: P(pair ij made | e_ij, action)
         self.infer = "select"                           # select | verify | refine | verify_refine (needs made2 head)
         self.refine_deg = (-0.3, -0.2, -0.1, -0.05, 0.0, 0.05, 0.1, 0.2, 0.3)
@@ -86,7 +88,7 @@ class PairGNNPolicy(nn.Module):
         if made_head:
             self.head_made = nn.Linear(H, 1)      # can this pair be made (coarse-scan success rate) — look-ahead auxiliary
         if made2_head:
-            self.head_made2 = _mlp(H + 4, H, 1)   # [e_ij, a, (a − a_ij)·scale] → will action a pocket pair ij
+            self.head_made2 = _mlp(H + 4 + int(made2_geom), H, 1)   # [e_ij, a, (a − a_ij)·scale] → will action a pocket pair ij
         side = torch.zeros(N_POCKETS)
         side[list(SIDE_POCKETS)] = 1.0
         self.register_buffer("side", side)
@@ -146,6 +148,8 @@ class PairGNNPolicy(nn.Module):
         if e_geo is not None:
             means = torch.cat([torch.tanh(self.head_ang(e_geo)), means[..., 1:]], dim=-1)
         out = {"means": means, "valid": valid, "e": e}
+        if self.made2_geom:
+            out["aim"] = self._geometric_aim(rel)
         pocket = self.head_s(e).squeeze(-1)
         if self.has_scratch:
             out["scratch_logit"] = self.head_scratch(e).squeeze(-1)
@@ -171,6 +175,16 @@ class PairGNNPolicy(nn.Module):
 
     # ── look-ahead stage 2: action-conditional made head ──
 
+    @staticmethod
+    def _geometric_aim(rel: torch.Tensor) -> torch.Tensor:
+        """(B, 18) direction (rad, in the relative frame = delta_angle) from the cue to the ghost-ball point of each pair."""
+        B = rel.shape[0]
+        b = rel[:, :3 * N_BALLS].reshape(B, N_BALLS, 3)[..., :2]
+        p = rel[:, 3 * N_BALLS:].reshape(B, N_POCKETS, 2)
+        d = p[:, None, :, :] - b[:, :, None, :]                                       # (B, 3, 6, 2) ball → pocket
+        ghost = b[:, :, None, :] - 2 * BALL_RADIUS * d / d.norm(dim=-1, keepdim=True).clamp(min=1e-9)
+        return torch.atan2(ghost[..., 1], ghost[..., 0]).reshape(B, N_PAIRS)
+
     def made2_logits(self, o: dict[str, torch.Tensor], a: torch.Tensor) -> torch.Tensor:
         """
         o = forward_full(rel); a (B, 2) one action for every pair or (B, 18, 2) one per pair, in [-1, 1].
@@ -178,8 +192,17 @@ class PairGNNPolicy(nn.Module):
         """
         e, means = o["e"], o["means"].detach()
         a = a[:, None, :].expand_as(means) if a.dim() == 2 else a
-        z = self.head_made2(torch.cat([e, a, action_diff(a, means) * self.made2_scale], dim=-1)).squeeze(-1)
+        feats = [e, a, action_diff(a, means) * self.made2_scale]
+        if self.made2_geom:
+            feats.append(self._geom_feature(o["aim"], a[..., 0]))
+        z = self.head_made2(torch.cat(feats, dim=-1)).squeeze(-1)
         return z.masked_fill(~o["valid"], _NEG)
+
+    def _geom_feature(self, aim: torch.Tensor, a_angle_unit: torch.Tensor) -> torch.Tensor:
+        """(…, 1): wrap(action angle − aim) in units of 0.2° (a_angle_unit in [-1, 1], 1 = π rad)."""
+        d = a_angle_unit * float(self.act_scale[0]) + float(self.act_bias[0]) - aim
+        d = torch.atan2(torch.sin(d), torch.cos(d))
+        return (torch.rad2deg(d) / 0.2)[..., None]
 
     def made2_loss(self, rel: torch.Tensor, a: torch.Tensor, made: torch.Tensor,
                    scratch: torch.Tensor) -> torch.Tensor:
@@ -229,8 +252,10 @@ class PairGNNPolicy(nn.Module):
         cand = self._unit_offsets(a)                                                  # (B, C, 2)
         C = cand.shape[1]
         e_k = o["e"][rows, k][:, None].expand(-1, C, -1)
-        z = self.head_made2(torch.cat([e_k, cand, action_diff(cand, a[:, None].expand(-1, C, -1)) * self.made2_scale],
-                                      dim=-1)).squeeze(-1)
+        feats = [e_k, cand, action_diff(cand, a[:, None].expand(-1, C, -1)) * self.made2_scale]
+        if self.made2_geom:
+            feats.append(self._geom_feature(o["aim"][rows, k][:, None].expand(-1, C), cand[..., 0]))
+        z = self.head_made2(torch.cat(feats, dim=-1)).squeeze(-1)
         return cand[rows, z.argmax(dim=1)]
 
     def train_loss(self, rel: torch.Tensor, teacher_u: torch.Tensor, good_u: torch.Tensor,
@@ -446,7 +471,7 @@ class PairGNNPolicy(nn.Module):
     def save(self, path: str) -> None:
         torch.save({"gnn": self.state_dict(), "factorized": self.factorized, "has_scratch": self.has_scratch,
                     "has_made": self.has_made, "has_made2": self.has_made2,
-                    "geom_angle": self.geom_angle}, path)
+                    "geom_angle": self.geom_angle, "made2_geom": self.made2_geom}, path)
 
 
 assert REL_DIM == 3 * N_BALLS + 2 * N_POCKETS

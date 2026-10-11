@@ -13,6 +13,10 @@ if [ "$1" = "geoang" ]; then             # 각도 head에서 이웃 message 빼�
   done
   wait; exit
 fi
+if [ "$1" = "made2geo" ]; then           # made head 진단: 기하 조준각 차이를 입력으로(--made2-geom), seed 0/1/2
+  for sd in 0 1 2; do run made2geo_s$sd --pair-supervision --no-wta-fallback --made2-head --made2-geom --seed $sd; done
+  wait; exit
+fi
 if [ "$1" = "made2" ]; then              # look-ahead 2단계: sims identity 복원 후 made2 head 학습, seed 0/1/2
   for f in logs/teacher_data/relabel_s1000/sims/ghost_s1000_shard*.npz; do
     .venv/bin/python -u -m exp16_wm.sim_identity --file "$f" > "logs/run_logs/sim_identity_$(basename "$f" .npz).log" 2>&1 &
