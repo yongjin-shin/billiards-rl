@@ -4114,3 +4114,15 @@ SAC(7.89) 수준으로 악화. 세 항목(2·3·4)을 한꺼번에 바꿔서 어
 
 - 2개 state(n=829)에서 ①②는 control보다 +2%p(57.8 → 60.0 / 60.2), selection 손실 −1~2%p로 방향은 개선이지만 표본 오차(~±1.7%p)와 비슷한 크기라 효과로 읽기 어렵다. 1개/3개 state는 같거나 약간 나빠졌다.
 - **결론**: ①②는 2개 state의 selection 약점(손실 ~9~11%p)과 regression 약점(label pair 성공 68~69%, 1개 72~74% / 3개 78~80%)을 해결하지 못한다. 구조/target 변경으로는 안 움직인다.
+
+### label이 갈려서(flip) gradient가 상쇄되나? (2026-10-11, 학습 없음)
+
+**가설(사용자)**: 2개 state에서 label이 이쪽/저쪽으로 갈려 loss를 반대 방향으로 받아 한쪽으로 못 배운다.
+
+**1. pair 선택 label의 우열**: 남은 공 1/2/3개별로 label pair 2개(candidate 0/1)의 다른 공 비율 0% / 77% / 80%, coarse 성공 횟수 차이 ≤2/20(우열 없음) 25 / 24 / 28%, candidate 0이 argmax(pair_made)인 비율 95 / 88 / 86%. 2개 state가 3개 state보다 더 갈리지 않는다.
+
+**2. label speed가 두 모드**: 모든 공 개수에서 label speed ≈1.0 m/s 76~77%, ≥2 m/s 23~24%(중간 값 거의 없음). control 모델이 label pair에 내는 speed: 1.1~1.4 32%, **1.4~2.0 63%**, 1.0 m/s 0% → 지배 모드(1.0)를 내지 않고 두 모드 사이로 평균을 낸다(MSE regression의 hedging). 공 개수별 차이는 없음(모드 사이 68 / 71 / 68%).
+
+**3. hedging이 성공을 해치는가**: 정책 선택 action의 실제 clean 성공률 — speed ≤1.4 69.9%, 1.4~2.6 71.1%. 해치지 않는다(speed 창이 넓음). 2개 state만: ≤1.4 50.4%, 1.4~2.6 61.3%(비율 32 / 68%).
+
+**결론**: label flip(speed 두 모드)은 실제로 있고 모델은 평균으로 hedge하지만, 모든 공 개수에서 같고 성공률에도 영향이 없어 **2개 state의 약점을 설명하지 못한다**. 같은 speed 모드로 맞춰도 2개 state의 angle 정확도는 낮다(label low·모델 low일 때 within 0.2°: 1개 84.4%, 2개 47.5%, 3개 66.3%). 미확인: 2개 state에서 angle label 자체가 flip하는지(같은 geometry의 비슷한 state끼리 label angle이 갈리는지).
