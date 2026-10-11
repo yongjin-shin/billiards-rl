@@ -3917,3 +3917,16 @@ SAC(7.89) 수준으로 악화. 세 항목(2·3·4)을 한꺼번에 바꿔서 어
 ### ④ scratch head만, seed 3개 (2026-10-11 계획)
 
 ④만 켠 run(seed 0)이 4.09로 control(4.37)보다 좋았지만 ①②와 합치면 재현되지 않았다. seed 1, 2를 추가해(seed 0은 기존 run 재사용) baseline A(4.51 ± 0.23, 같은 설정 seed 0/1/2)와 비교한다. 판단: 평균 차이가 seed std(~0.3) 이상이면 개선, 아니면 잡음.
+
+**결과 (2026-10-11): ④ scratch head는 seed 3개 모두에서 baseline A보다 좋다 — 채택 후보.**
+
+| (robust, seed 0 / 1 / 2) | shots/game | success | oracle angle err | oracle within 0.2° | top-1 made 가능 |
+|---|---|---|---|---|---|
+| baseline A | 4.32 / 4.45 / 4.76 → 4.51 ± 0.23 | 66.2 ± 3.3% | 0.196 / 0.176 / 0.207° | 50.7 / 54.8 / 48.8% | 91.5 / 93.0 / 90.7% |
+| ④ scratch head | 4.09 / 4.23 / 3.89 → **4.07 ± 0.17** | **73.3 ± 3.3%** | 0.162 / 0.154 / 0.133° | **57.9 / 60.1 / 65.2%** | 92.0 / 91.6 / 91.6% |
+
+- seed별로 짝지으면 3개 모두 개선(−0.23, −0.22, −0.87 shots), 평균 차이 0.44는 seed std(0.17~0.23)의 2배 이상. success +7%p.
+- inference에서 scratch penalty를 써서 좋아진 것이 아니다: penalty 없이(λ=0) 측정한 결과이고, λ=3은 오히려 같거나 약간 나쁨(4.12 / 4.17 / 3.97).
+- 개선은 **regression 정밀도**에서 온다: oracle within 0.2°가 51% → 61%, selection(top-1 made 가능)은 그대로. scratch BCE가 auxiliary task로 공유 encoder `e`에 cue ball 경로 정보를 학습시켜 action head의 feature가 좋아진 것으로 추정(미검증).
+- 주의: ①②④ 조합(seed 0)은 4.39로 이 개선이 보이지 않았다 → ①(factorized) 또는 ②(made selection target)가 ④의 이득을 상쇄할 가능성. seed 1개라 확정은 아님.
+- 다음: (a) ④를 baseline에 기본 채택할지 결정, (b) 개선 메커니즘 확인 — scratch 대신 다른 auxiliary target(예: pair_made 회귀)으로도 regression이 좋아지는지, (c) ①②④ 조합 seed 1, 2.
