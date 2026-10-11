@@ -4534,3 +4534,88 @@ select 대비 개선(seed별 0 / 1 / 2): verify+refine 1개 +3.6%p(+3.7, +4.0, +
 | D | 깊이 6이 여전히 깊이 4보다 나쁨, 또는 train loss 폭주 재발 | 깊이 > 4의 최적화 불안정은 길이로 안 풀린다 | residual 또는 LayerNorm + lr 3e-4(TODO 18) |
 | E | 깊이 4가 1500 epoch에서 500 epoch보다 나빠짐 | 길게 돌리면 과적합 | 500 epoch 유지. 정규화·checkpoint 선택(#9) 검토 |
 | F | 위 중 seed 하나만 반대 방향 | 불확실 | 결론 보류, seed 5개 |
+
+
+### 깊이 4에서 남은 실패는 어디서 오는가 (2026-10-12, 학습 없음)
+
+**질문** (깊이 4 결과를 보고 사용자가): 깊이 4에서도 샷 성공률이 아직 낮은 것은 (a) pair를 잘못 골라서인가, (b) 고른 pair의 action 정밀도가 모자라서인가, (c) made head의 gradient로 action을 찾으면 되는가.
+**왜 다시 쟀나**: 2026-10-11의 "selection vs regression 분리"는 control(2층) 모델 기준이었고 깊이 4에는 없었다. 또 용량 실험 판단표는 "스캔 argmax가 창 안" 비율을 made head의 해상도로 읽었는데, 그 값을 기준선(우연, pair head 자신의 proposal)과 대조한 적이 없었다.
+**방법**: `exp16_wm/diagnose_action.py`(테스트 있음), control·깊이 4·6·8 × seed 0/1/2, val state 중 label pair가 있는 것(남은 공 1/2/3개: 1910 / 829 / 2250, 3 seed 합침)을 **실제로 쳐서** 측정. clean = pocket이 들어가고 scratch 없음(`eval_by_balls`와 같은 정의). 임시 스크립트로 먼저 낸 수치(깊이 4, control, 깊이 6)와 저장소 도구 결과가 소수점까지 같음을 확인했다.
+
+**1. pair 선택 vs action 정밀도** (남은 공 전체; 같은 모델의 action으로, 정책이 고른 pair와 label pair[후보 0]를 비교)
+
+| 모델 | select: 정책이 고른 pair | select: label pair로 고정 | 선택 손실 | verify+refine: 정책이 고른 pair | verify+refine: label pair로 고정 | 선택 손실 | label pair를 줘도 실패 (정밀도) |
+|---|---|---|---|---|---|---|---|
+| control (2층) | 71.5% | 77.2% | 5.8%p | 78.3% | 81.8% | **3.5%p** | **18.2%p** |
+| **깊이 4** | 75.3% | 81.6% | 6.3%p | 82.2% | 86.3% | **4.2%p** | **13.7%p** |
+| 깊이 6 | 71.7% | 77.0% | 5.3%p | 78.1% | 81.0% | **2.9%p** | **19.0%p** |
+| 깊이 8 | 71.4% | 77.8% | 6.4%p | 77.5% | 82.0% | **4.5%p** | **18.0%p** |
+
+남은 공 2개 state만:
+
+| 모델 | select: 정책이 고른 pair | select: label pair로 고정 | 선택 손실 | verify+refine: 정책이 고른 pair | verify+refine: label pair로 고정 | 선택 손실 | label pair를 줘도 실패 (정밀도) |
+|---|---|---|---|---|---|---|---|
+| control (2층) | 58.7% | 72.3% | 13.5%p | 66.8% | 73.9% | **7.1%p** | **26.1%p** |
+| **깊이 4** | 64.5% | 74.5% | 10.0%p | 74.9% | 77.8% | **2.9%p** | **22.2%p** |
+| 깊이 6 | 63.6% | 71.3% | 7.7%p | 71.3% | 74.1% | **2.8%p** | **25.9%p** |
+| 깊이 8 | 64.4% | 71.0% | 6.6%p | 70.4% | 72.9% | **2.4%p** | **27.1%p** |
+
+- **깊이 4: 선택 손실은 4.2%p, label pair를 정확히 줘도 13.7%p가 실패한다.** 남은 실패의 약 77%가 선택이 아니라 그 pair를 정확히 치지 못하는 데서 온다. 남은 공 2개 state도 같다(선택 손실 2.9%p, 정밀도 실패 22.2%p).
+- **선택 손실은 모든 모델에서 비슷하다**(verify+refine에서 2.9~4.5%p). 깊이의 이득은 **label pair를 줬을 때의 정밀도**에서 나온다: 81.8% / 86.3% / 81.0% / 82.0% (control / 4 / 6 / 8층). 깊이 6·8은 control 수준이다.
+- 남은 공 3개 state의 선택은 깊이가 4를 넘으면 나빠진다(정책 pair가 label의 상위 2개 pair 안인 비율 control 81.7% / 깊이 4 82.8% / 깊이 6 78.6% / 깊이 8 73.6%).
+
+**2. 각도만 고치는 refine: made head 격자 vs gradient** (label pair, speed는 proposal 그대로, 각도만 변경; 남은 공 전체 clean)
+
+| 모델 | proposal 그대로 | made head 격자 ±0.3° × 31 | gradient ascent (12 × 0.04°) | gradient ascent (24 × 0.01°) |
+|---|---|---|---|---|
+| control (2층) | 77.2% | 76.8% | 76.9% | 76.6% |
+| **깊이 4** | 81.6% | 81.6% | 81.5% | 81.5% |
+| 깊이 6 | 77.0% | 76.3% | 76.6% | 76.4% |
+| 깊이 8 | 77.8% | 77.6% | 77.5% | 77.5% |
+
+- 어느 모델에서도 **각도만 조정해서는 이득이 없다**(proposal 대비 −0.7 ~ 0%p). 격자도 gradient도 같다.
+- 같은 label pair에 verify+refine(각도 31 × 절대 speed 7)을 하면 깊이 4가 81.6% → 86.3%로 오른다. 각도만으로는 0인데 speed 격자를 넣으면 +4.8%p이므로, refine의 이득은 각도가 아니라 **speed**에서 나온다(각도와 speed의 결합 효과는 따로 분리하지 않았다).
+
+**3. made head 스캔의 기준선** (label action을 ±0.6°, 0.05° 간격으로 옮겨 실제로 침. 창이 스캔 범위의 일부인 state 326개)
+
+| 모델 | made head argmax가 창 안 | 우연(아무 offset) | pair head 자신의 proposal에 가장 가까운 offset | offset 0(label) | proposal이 창 밖인 state | 그때 head가 창 안으로 옮김 | proposal이 창 안일 때 head가 유지 | gradient 방향이 창 쪽(창 밖 offset) |
+|---|---|---|---|---|---|---|---|---|
+| control (2층) | 81.0% | 53.8% | 78.8% | 98.8% | 69 | 20.3% | 97.3% | 95.6% |
+| **깊이 4** | 86.5% | 53.8% | 86.5% | 98.8% | 44 | 4.5% | 99.3% | 96.5% |
+| 깊이 6 | 82.5% | 53.8% | 83.7% | 98.8% | 53 | 9.4% | 96.7% | 95.1% |
+| 깊이 8 | 81.9% | 53.8% | 83.4% | 98.8% | 54 | 7.4% | 96.7% | 94.9% |
+
+- **made head argmax는 pair head의 proposal 적중률과 거의 같다.** 깊이 4는 정확히 같고(86.5% = 86.5%), proposal이 창 밖인 44개 state에서 head가 창 안으로 옮긴 것은 4.5%(약 2개)뿐이다. control만 +2.1%p, 깊이 6·8은 오히려 낮다. 우연 수준은 53.8%.
+- 그래서 **"argmax가 창 안 86.5%"는 made head의 해상도가 아니라 proposal 자체의 정확도**다. 기하 조준각 차이를 입력으로 준 진단 run의 95.1%만 proposal 밖의 정보를 쓴 값이다. 용량 실험 판단표(위)는 이 값을 made head 지표로 읽었으므로, 그 표에서 argmax 임계값은 사실상 pair head 정밀도의 지표였다. 이전 절은 기록으로 두고 해석만 여기서 정정한다.
+- gradient 방향은 창 밖 offset에서 모델별로 94.9~96.5% 창 쪽을 가리킨다. 해석: made head는 입력으로 받는 `action − proposal` 차이가 0인 곳에서 확률이 가장 높게 학습돼서(proposal에 앵커됨), gradient가 proposal 쪽으로 돌려보낸다. proposal이 대개 창 안이라 "proposal 쪽 = 창 쪽"이 되어 방향은 맞지만 새 정보는 없다. 위 2번의 "이득 0"과 일치한다. 직접 검증한 것은 아니다(입력 차이를 바꿔 확률이 어떻게 변하는지는 따로 재지 않았다).
+
+**한계**: label pair는 teacher가 고른 후보 0뿐이다(다른 pair가 더 쉬울 수 있다). 스캔은 seed당 150 state, 창이 일부인 326개, proposal이 창 밖인 state는 44개로 작아 "4.5%"는 몇 개 차이다. gradient는 sign-step 한 방식, 각도만 시험했다(speed 방향 gradient는 안 함). speed 격자의 효과는 공 개수별로 나누어 보지 않았다.
+
+### head에서 샘플링해서 치면? 분포 head와 RL 대응 (2026-10-12, 학습 없음)
+
+**질문** (사용자): 점추정 대신 head가 분포(Laplace 등)를 내고, scan 샘플을 posterior/likelihood로 보고 샘플링(Thompson 등)해서 치면 샘플 효율이 오르지 않겠느냐. 이것이 RL에서 continuous action을 뽑는 것(policy gradient 계열)과 비슷하지 않느냐.
+**실험**: 위와 같은 설정에서(label pair, speed는 proposal 그대로) 각도 = proposal + Laplace(b)를 실제로 침. 상태당 6개를 뽑아 (i) 샘플 하나를 그대로 쳤을 때의 기대 성공률, (ii) 6개 중 하나라도 성공하는 비율(시뮬레이터가 골라 주는 best-of-6)을 잼. seed당 600 state, 3 seed 합침.
+
+| 각도 = proposal + Laplace(b) | 샘플 1개로 침 (깊이 4) | 〃 남은 공 2개 | 6개 중 시뮬레이터가 고름 (깊이 4) | 6개 중 시뮬레이터가 고름 (control / 6 / 8층) |
+|---|---|---|---|---|
+| b = 0 (proposal 그대로) | 81.8% | 72.4% | 81.8% | 77.7% / 75.8% / 76.6% |
+| b = 0.05° | 80.3% | 72.2% | 89.4% | 86.9% / 85.7% / 85.7% |
+| b = 0.10° | 76.6% | 72.0% | 92.6% | 89.6% / 89.7% / 89.6% |
+| b = 0.20° | 68.2% | 66.8% | 93.4% | 92.4% / 91.4% / 91.3% |
+
+- **샘플 하나를 그대로 치면 b가 클수록 나빠진다**(모든 모델). label이 순수 기하 조준각의 ±0.05° 안이라 label noise는 거의 없고, 남은 오차는 무작위성이 아니라 근사 오차(bias)다. proposal이 이미 대부분 창 안이라 노이즈는 손해만 더한다. Laplace NLL로 학습하면 scale은 학습되지만 오차 자체는 줄지 않는다. Thompson sampling은 같은 문제를 반복해 풀며 불확실성을 탐색하는 기법이고, 샷 한 번의 0/1 성공만 보면 가장 확률이 높은 action을 치는 것이 최적이다.
+- **시뮬레이터가 검증해 주면 샘플링이 큰 가치가 있다**: b = 0.10°, 6개 중 best가 깊이 4에서 81.8% → 92.6%(teacher shot 성공은 99.8%). made head는 verifier로 못 쓴다(위 3번, proposal에 앵커).
+- **샷 단위로 보면 이 문제는 SAC를 게임이 아니라 샷에 가져가는 것과 같다.** shots/game ≈ 3 / (샷 성공률)이 모든 모델에서 맞는다(control 3.91 vs 실제 3.90, 깊이 4 3.56 vs 3.55, 깊이 6 3.77 vs 3.77, 깊이 8 3.95 vs 3.94). 정책이 position play를 쓰지 않는 것으로 보이며, 게임 성능은 샷 성공률 하나로 정해진다. 따라서 샷 하나는 reset이 되는 contextual bandit(γ·Q bootstrapping 불필요)이다. 이 틀에서는 position play를 배울 수 없고, 그것은 게임 단위 RL(roadmap #11, #12)의 몫이다.
+
+| 우리가 얘기한 것 | RL에서의 이름 | 이 프로젝트에서 확인한 것 |
+|---|---|---|
+| head가 분포(Laplace)를 내고 샘플링 | stochastic policy(SAC/PPO의 Gaussian policy). 샘플링은 학습 중 exploration용, 평가는 보통 mean | 추론 때 샘플링은 손해 |
+| 샘플 N개를 평가해 best를 침 | CEM / QT-Opt, best-of-N | 시뮬레이터로 6개 중 선택하면 92.6% |
+| P(made)를 likelihood로 써서 샘플을 가중 | MPO / AWR. Thompson sampling은 bandit 쪽 용어 | made head가 proposal에 묶여 못 씀 |
+| ∇ₐ P(made)로 action 미세조정 | DDPG/TD3의 ∇ₐQ | 방향은 맞지만 이득 0 |
+| 샘플 결과(reward)로 policy를 업데이트 | policy gradient(REINFORCE/PPO/SAC) | 아직 안 함. roadmap #12 |
+
+- **search → distill (expert iteration)** = 정책이 각도를 흔들어 샘플 N개를 만들고, 시뮬레이터로 전부 쳐서, 성공한 샘플을 label로 정책을 다시 supervised로 학습한다. 손실은 supervised지만 정답을 고르는 것은 시뮬레이터의 binary reward이므로 reward로 거른 BC(filtered BC, CEM·MPO·AWR 계열)다. SAC로 말하면 actor loss의 Q 자리에 **critic 대신 시뮬레이터의 진짜 1-step return**이 들어간다(critic 근사 오차 없음). SAC의 entropy 항에 해당하는 것은 분포의 폭 b이며, 성공 창 반폭(중앙값 약 0.3°)에 대해 현재 오차 중앙값은 약 0.1°이다. 추론 때는 시뮬레이터 없이 정책만 쓴다. 비용: 시뮬레이터 샷 약 2.5ms(이번 측정에서 역산)이므로 16.7k state × 샘플 6개 ≈ 100k 샷, 약 4분(추정).
+- **policy gradient**는 같은 샘플을 reward로 직접 업데이트하는 대안이다. reset이 되는 1-step 문제라 둘은 거의 같은 일을 한다(창 밖 proposal의 tail state에서 노이즈 샘플 중 창에 들어간 것이 mean을 창 쪽으로 이동). 검증하지 않은 가설이다. from-scratch SAC는 7.89 shots로 실패했지만 BC init은 proposal이 이미 창 근처라 sparse reward 문제가 훨씬 작을 것으로 기대한다(마찬가지로 미검증).
+- **열린 결정**: 다음 단계를 (1) search → distill(TODO 19)로 갈지, (2) residual/LayerNorm 깊이 재시도(TODO 18)와 학습 길이 실험을 먼저 볼지. 현재 학습 길이 3배 실험이 돌고 있다.
+- 별개의 작은 실험 후보: 제곱 오차 대신 Laplace NLL(L1 계열)을 robust loss로 쓰기. 이전 분석에서 train loss의 66%가 label 없는 1.4% row에서 나왔다. 단 샘플별 scale을 학습하면 어려운 2개 state를 덜 보게 될 위험이 있어 scale은 고정하는 쪽이 안전하다.

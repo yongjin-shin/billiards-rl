@@ -486,14 +486,19 @@ policy의 shot 실패 분해(robust+pairs, val): chosen pair miss ~24%, chosen p
 | + made head(look-ahead 2단계) select | 4.11 ± 0.20 | 72.5% | action을 받는 made head를 학습(칠 때는 안 씀) → 해롭지 않음 |
 | + verify + refine(각도 31 × 절대 speed 7) | **3.90 ± 0.21** | 76.7% | made head로 pair 재선택 + action 후보 평가(시뮬레이터 없이) |
 | **+ encoder 깊이 4**(2층 → 4층, made head 포함, verify+refine) | **3.55 ± 0.10** | 84.2% | encoder MLP를 깊게(기하 입력 없이 학습만으로) — pair head 각도 오차 −24%, 창 적중 81 → 86.5% |
+| 깊이 6 / 깊이 8 (층 수만 변경) | 3.77 ± 0.16 / 3.94 ± 0.11 | 79.6% / 76.0% | 깊이 4보다 **나쁨**(8층은 control 수준). train loss가 안 내려간다(seed 2: 25.4 / 20.3 vs 깊이 4 15.7) → 최적화 문제로 읽음, 깊이 자체의 한계는 미확인 |
 | (진단 전용) + 기하 조준각 차이 입력 | 3.46 ± 0.12 | 86.4% | made head에 ghost-ball 조준각과의 차이를 입력 — **상한 참고, 최종 모델이 아님** |
 | teacher (robust / geom) | 2.98 / 2.24 | – | – |
 
 **병목 = `e_ij`(pair embedding)가 각도를 0.1° 정밀도로 담지 못하는 것.** 근거: (1) 남은 공 2개 state는 성공 창 폭이 같은데(0.96° vs 0.92°) 모델 각도 오차가 2배(0.22° vs 0.12°); (2) label은 순수 기하 조준각의 ±0.05° 안이라 깨끗하다; (3) made head는 train과 val 정확도가 같아(AUC 0.831 vs 0.846) 다양성이 아니라 해상도 문제; (4) head에 기하 조준각 차이를 직접 주면 창 위치 적중이 81% → 95%, 2개 state 성공이 66.8% → 76.8%.
 
+**2026-10-12 보강·정정** (experiments.md "깊이 4에서 남은 실패는 어디서 오는가"): (5) 깊이 4에서 label pair를 정확히 줘도 verify+refine이 13.7%p 실패하고 선택 손실은 4.2%p다 → 남은 실패의 약 77%가 선택이 아니라 정밀도다. (6) 각도만 고치는 refine(made head 격자·gradient)은 이득 0이고 refine의 이득은 speed 격자에서 나온다. **정정**: (4)와 용량 실험에서 쓴 "스캔 argmax가 창 안"은 made head의 해상도가 아니라 **pair head proposal의 적중률과 같은 값**이다(깊이 4: 86.5% = 86.5%, 우연 53.8%; proposal이 창 밖인 44개 state에서 head가 창 안으로 옮긴 것은 4.5%). made head는 proposal에 앵커돼 있어 proposal 밖의 창 위치 정보가 없고, 기하 입력(95.1%)만 그 정보를 준다. 이전 서술은 기록으로 두고 해석만 바로잡는다.
+
 **기각된 가설** (전부 실험으로): 일반화/데이터 양(공 2개 데이터 3.7배 추가에도 불변), 포켓된 공 slot 표현, label 불일치·불규칙(flip), 방해 공, 창 폭/난이도, speed hedging(모델이 두 모드 사이로 평균을 내지만 성공에 영향 없음), selection 구조/target(①②), scratch head(④), made head 보조 target(⑤), 이웃 message 간섭(`--geom-angle`), 다른 공의 target(③ `good_made`: combination shot이 pair head 학습을 망가뜨림), scatter 구제(타겟이 아닌 공이 들어가는 비율 ~1%), refine 후보 수/각도 범위(포화).
 
-**열린 결정**: 학습만으로 정밀도를 못 올리면 ghost-ball 기하 조준각 차이를 made head(verifier)에만 입력으로 허용할지. "탐색 + 학습" 방침(bitter lesson)과 충돌하므로 사용자가 정한다 — 용량·표현을 시도한 뒤에 결정.
+**열린 결정** (사용자가 정한다):
+1. 학습만으로 정밀도를 못 올리면 ghost-ball 기하 조준각 차이를 made head(verifier)에만 입력으로 허용할지. "탐색 + 학습" 방침(bitter lesson)과 충돌한다. 단 위 정정대로 "argmax ≥ 90%"는 made head 해상도가 아니라 proposal 정확도의 기준이다.
+2. **다음 단계 (2026-10-12)**: (a) search → distill(TODO 19: 분포 head + 시뮬레이터 best-of-N → 성공 샘플로 재학습), (b) 깊이 > 4 최적화 안정화(TODO 18: residual/LayerNorm). 먼저 **학습 길이 3배(1500 epoch) 실험**(깊이 4 vs 6, 2026-10-12 07:41 시작, 약 3시간)의 결과를 본다.
 
 ### 다음 방향 (판단 트리)
 
@@ -501,12 +506,13 @@ policy의 shot 실패 분해(robust+pairs, val): chosen pair miss ~24%, chosen p
 
 | 지금 | 결과 | 다음 |
 |---|---|---|
-| encoder 용량(폭 256 / 깊이 4) 실험 — **결과: 깊이 4 효과 큼(판단표 C, 각도 −24%·적중 +5.5%p), 폭 256은 작음** | 깊이 6/8 시도(experiments.md "encoder 깊이 스케일링"의 판단표 A~E) | 포화하면 폭·sin/cos·학습 순서로, 계속 오르면 더 깊게 |
-| | 소폭 ↑ | sin/cos(Fourier) 좌표 표현을 같은 지표로 시험 |
+| encoder 용량 — 폭 256: 효과 작음(보류). 깊이 4: 효과 큼(판단표 C, 각도 −24%·적중 +5.5%p). **깊이 6/8: 깊이 4보다 나쁨, train loss가 안 내려감 → 판단표 D(최적화 문제)** | **학습 길이 3배(1500 epoch) 깊이 4 vs 6 — 진행 중**(experiments.md "학습 길이 3배"의 판단표 A~F). 느린 시작(학습량 부족)과 구조적 불안정을 가른다 | A: 깊이 6이 학습량 부족이었음 → 깊이 8도 길게. B/C/D/E/F는 해당 절 참고. D·C이면 residual/LayerNorm + lr 3e-4(TODO 18) |
+| 깊이 4 고정 상태에서 남은 실패 분해(experiments.md "깊이 4에서 남은 실패는 어디서 오는가") — **pair를 맞춰도 13.7%p 실패(선택 손실 4.2%p의 약 3배), 각도만 고치는 refine은 이득 0** | 학습 중 각도 정밀도를 더 짜내는 것 vs 시뮬레이터로 후보를 검증하는 탐색 | **사용자 결정 필요**: search → distill(TODO 19)을 먼저 할지, 깊이 재시도(TODO 18)를 먼저 할지 |
+| 깊이 재시도에서 개선 | 소폭 ↑ | sin/cos(Fourier) 좌표 표현을 같은 지표로 시험 |
 | | 변화 없음 | 학습 쪽(긴 학습, lr, EMA/마지막 epoch checkpoint = #9, loss 스케일 `--angle-scale-deg` 0.1) |
 | | train ↑ val ↓ | 데이터/정규화 |
-| argmax ≥ 90% 달성 후 | – | gradient로 action을 연속 공간에서 조정(`∇_a P(made)`, #6의 남은 부분) |
-| 용량·표현·학습을 다 해도 argmax < 90% | – | **사용자 결정**: made head에만 기하 입력 허용 vs 학습만 계속 |
+| made head가 proposal 밖의 정보를 가질 때(proposal이 창 밖인 state에서 head가 창 안으로 옮기는 비율이 의미 있게 오를 때; 깊이 4는 4.5%) | – | gradient로 action을 연속 공간에서 조정(`∇_a P(made)`, #6의 남은 부분). 지금 구조에서는 각도 gradient/격자 이득 0 |
+| 용량·표현·학습을 다 해도 proposal 정확도(= 스캔 argmax)가 90%에 못 미침 | – | **사용자 결정**: made head에만 기하 입력 허용 vs 학습만 계속 vs 탐색(TODO 19) |
 | 정밀도 병목 해결 후에도 게임(3.90)과 val 격차가 남음 | – | DAgger(#10) |
 
 ### 진행 상태 (2026-10-12, 아래 TODO 표 번호 기준)
@@ -524,11 +530,14 @@ policy의 shot 실패 분해(robust+pairs, val): chosen pair miss ~24%, chosen p
 
 | # | 항목 | 이유 | 비용 | 의존 |
 |---|---|---|---|---|
-| 13 | **encoder 용량**: **깊이 4 완료(3.90 → 3.55)**, 폭 256은 효과 작음(3.84, 보류). **깊이 6/8 진행 중(2026-10-12)** → 포화 확인 후 폭 결합 | 정밀도 병목이 용량(특히 깊이)인지 | BC ~1시간(병렬 6 runs) | – |
+| 13 | **encoder 용량: 완료(2026-10-12).** 깊이 4가 최선(3.90 → 3.55), 폭 256은 효과 작음(3.84, 보류), **깊이 6 / 8은 3.77 / 3.94로 오히려 나쁨**(train loss가 안 내려가는 최적화 문제로 읽음, 판단표 D). 깊이 자체가 병목인지는 **학습 길이 3배(1500 epoch, 깊이 4 vs 6) 실험으로 먼저 확인 — 진행 중(2026-10-12 07:41 시작, 약 3시간)**, 이어서 TODO 18 | 정밀도 병목이 용량(특히 깊이)인지 | BC ~1시간(병렬 6 runs) | – |
 | 14 | **좌표 sin/cos(Fourier) 표현** | 작은 각도 차이를 더 잘 구분하도록 | BC | 13 결과에 따라 |
-| 15 | **gradient refine** `∇_a P(made)` | 후보 격자 없이 연속 탐색. 단 head 기울기가 정확해야 의미 | 낮음(추론) | 13/14로 argmax ≥ 90% |
+| 15 | **gradient refine** `∇_a P(made)` — **2026-10-12: 보류.** 4개 모델 모두 각도 gradient·격자 refine 이득 0(방향은 95~96% 맞지만 proposal로 되돌리는 방향, made head가 proposal에 앵커) | 후보 격자 없이 연속 탐색. 단 head가 proposal 밖의 정보를 가져야 의미 | 낮음(추론) | made head를 proposal 앵커에서 풀기(미착수) 또는 기하 입력 허용(열린 결정 1) |
 | 16 | **게임 vs val 격차 확인**: made head 이득이 val(+2.8%p)보다 게임(+0.8%p)에서 작은 이유 | policy가 가는 state는 teacher state와 분포가 다름 | 낮음 | – |
 | 17 | **2개 state 약점의 구조적 원인** | 용량으로 안 풀리면 입력 분포·최적화 쪽(남은 공 2개 state만 각도 오차 2배) | – | 13 결과에 따라 |
+| 18 | **깊이 > 4 최적화 안정화**: encoder MLP에 residual connection 또는 LayerNorm, lr 3e-4로 6/8층 재시도 (판단표 D에서 사전에 정한 행동) | 깊이 6/8의 train loss가 안 내려가고 seed 2에서 폭주. 깊이 자체가 병목인지는 이것으로 판가름 | BC ~1시간(병렬) + 코드 변경 + 테스트 | 학습 길이 3배 실험 결과 |
+| 19 | **search → distill (expert iteration)**: head가 분포(Laplace/mixture)를 내고, 샘플 N개를 시뮬레이터로 쳐서 성공한 샘플을 label로 재학습(filtered BC). 샷 단위 contextual bandit(shots/game ≈ 3 / 샷 성공률이 모든 모델에서 맞음) | 같은 label pair에서 샘플 6개 중 하나라도 성공하는 비율이 b = 0.10°에서 깊이 4 81.8% → 92.6%. critic이 필요 없고(시뮬레이터가 진짜 1-step return) 추론은 정책 단독. RL 대응은 experiments.md "head에서 샘플링해서 치면?" | 시뮬레이터 약 100k 샷/라운드(약 4분, 추정) + BC | **사용자 결정**(열린 결정 2) |
+| 20 | **Laplace NLL(고정 scale)을 robust loss로**: 제곱 오차 대체 | train loss의 66%가 label 없는 1.4% row에서 나왔고 loss가 소수 row에 지배됨. 샘플별 scale 학습은 어려운 2개 state를 덜 보게 할 위험이 있어 고정 | BC | – |
 
 ### TODO (우선순위순)
 
