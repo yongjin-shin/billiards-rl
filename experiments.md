@@ -3934,3 +3934,18 @@ SAC(7.89) 수준으로 악화. 세 항목(2·3·4)을 한꺼번에 바꿔서 어
 ### ①만 / ②만 / ①②④ seed 3개 (2026-10-11 계획)
 
 ④만 seed 3개와 같은 기준으로 비교하기 위해 seed 1, 2를 추가(seed 0은 기존 run 재사용): ①만(factorized 구조), ②만(made selection target), ①②④. 6 runs 병렬. ①②④가 ④만(4.07 ± 0.17)보다 나쁘면 ① 또는 ②가 ④의 이득을 상쇄하는 것.
+
+### Look-ahead 보조 target 1단계: state-level made head (2026-10-11 계획)
+
+**왜**: ④ scratch head는 inference에 쓰지 않았는데도(λ=0) regression 정밀도를 올렸다(oracle within 0.2° 51% → 61%, 3 seeds). 보조 과제가 공유 encoder `e`를 더 잘 학습시켰다는 가설이 맞다면, 같은 형태의 다른 보조 target으로도 좋아져야 한다. 그중 가장 직접적인 것이 "이 pair가 들어갈 수 있나"(look-ahead)다. 관련 기존 TODO: roadmap #5 Made head(action-conditional verifier) — 그 전 단계로 데이터가 이미 있는 state-level 버전부터 한다.
+
+**설계**: `head_made(e_ij)` → logit, target = `pair_made / pair_n`(pair_stats의 coarse 후보 20개 중 intended pair를 scratch 없이 넣은 비율), 시도한 live pair(`pair_n > 0`)에 BCE × sel_weight. ④ scratch head와 형태·가중치가 같고 target만 다르다. inference에는 쓰지 않는다(보조 target only). `--made-head`.
+
+**실험** (global, label sel target, angle reg target, sel_weight 10, seed 0/1/2):
+- ⑤ made head만
+- ④ + ⑤
+
+**판단**: baseline A(4.51 ± 0.23), ④만(4.07 ± 0.17)과 비교.
+- ⑤만이 baseline A보다 seed std 이상 좋고 oracle within이 오르면 → "보조 과제가 encoder를 개선" 가설 지지.
+- ④+⑤가 ④만보다 좋으면 → 이득이 더해짐, 2단계(action-conditional made head)로.
+- ⑤만이 baseline 수준이면 → ④의 이득은 scratch 정보 고유의 것(cue ball 경로)이고 일반적인 보조 과제 효과가 아님.
