@@ -4055,3 +4055,23 @@ SAC(7.89) 수준으로 악화. 세 항목(2·3·4)을 한꺼번에 바꿔서 어
 지표: policy alone shots/game, success, val 2개 state의 within 0.2°와 실제 clean pocket 비율, 1개/3개 state에 손해가 없는지.
 
 **판단**: +A에서 2개 state 정확도가 오르면 데이터 부족이 원인. +B만 오르면 어려운 배치(cushion·포켓 근처) 데이터가 원인. 둘 다 그대로면 데이터가 아니라 모델/표현 문제.
+
+### Look-ahead 2단계: action-conditional made head (2026-10-11 계획)
+
+**왜**: 1단계(state-level made head)는 보조 target으로 효과가 없었다(4.15 vs control 4.08). 하지만 2단계의 주 목적은 보조 target이 아니라 **칠 때 쓰는 것**이다. 남은 병목은 고른 pair를 정확히 못 치는 것(oracle within 0.2° ~60%, 실제 clean pocket ~70%)이고, "이 pair에 이 action을 치면 들어가나"를 예측할 수 있으면 (a) pair를 고를 때 verifier로, (b) action을 미세조정하는 데 쓸 수 있다. roadmap #5(Made head), #6(∇_a P(made) refinement).
+
+**데이터**: relabel 때 저장한 sims(`relabel_s1000/sims/`, 499.7만 건, state·action·포켓된 공 수·scratch, clean 48.8%)를 재사용. 이 sims는 ghost-ball 조준 주변 + 상위 2개 pair의 정밀 scan(각도 26 × 속도 5)이라 **창 가장자리 근처의 성공/실패가 촘촘하다**(verifier에 필요한 바로 그 영역). 빠진 것은 어느 (ball, pocket)이 들어갔는지(identity) → obs에서 table을 복원해 다시 쳐서 made slot(18)과 scratch를 얻는다(`made_slots`, ~3ms/샷 → 8 cores ~30분).
+
+**Model**: `head_made2(e_ij, a)` = MLP([e_ij, a, a − a_ij]) → logit (a_ij: pair head의 proposal, detach). sample마다 live pair 전부에 BCE, target_ij = 그 action이 pair ij를 scratch 없이 넣었나. 기존 BC loss와 함께 학습(sims batch를 따로 뽑아 더함), 가중치는 sweep 없이 1개로 시작.
+
+**평가**:
+1. verifier 자체: val state의 sims에서 AUC, calibration (trivial baseline = state-level made rate, 1단계 head와 비교).
+2. inference 사용 (같은 모델, 학습 그대로):
+   - (V) pair 선택을 selection logit 대신 P(made | e_ij, a_ij)로 / 또는 둘을 합쳐서
+   - (R) 고른 pair의 a_ij 주변 후보(예: ±0.1°, ±0.2° × 속도 3개)를 head로 평가해 최고를 친다 (gradient 없이 sampling; ∇_a는 그다음)
+   - 지표: policy alone shots/game, success. 같은 모델의 기본 inference가 control.
+3. 학습 영향: made head를 켜도 기본 inference 성능이 control(새 baseline, 같은 코드)과 같은지.
+
+**판단**: (V) 또는 (R)이 기본 inference보다 seed std 이상 좋으면 채택. verifier AUC가 높은데 (R)이 효과 없으면 → head가 0.1° 단위 차이를 구분 못 하는 것(해상도 문제), 창 가장자리 sims의 비중 조정 검토.
+
+**순서**: 공 2개 데이터 학습이 CPU를 쓰는 동안 코드+테스트를 작성하고, sims identity 재simulation은 그 학습이 끝난 뒤 실행.
