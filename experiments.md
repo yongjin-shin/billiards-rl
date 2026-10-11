@@ -3913,3 +3913,7 @@ SAC(7.89) 수준으로 악화. 세 항목(2·3·4)을 한꺼번에 바꿔서 어
 - 셋을 합쳐도 control과 차이 없음(4.39 vs 4.37). selection(top-1 made 가능 91%)과 regression(oracle 0.18°) 모두 그대로.
 - scratch penalty(λ=3)도 효과 없음. ④만 켰을 때의 4.09는 ①②와 합치면 재현되지 않았다 → seed 잡음이었을 가능성이 높다.
 - 해석: robust label에서는 selection 개선 여지가 작다(top-1이 이미 91% made 가능). 남은 실패는 고른 pair를 정확히 못 치는 것(oracle within 0.2° ~54%) → 다음 개선 대상은 selection이 아니라 regression 정밀도.
+
+### ④ scratch head만, seed 3개 (2026-10-11 계획)
+
+④만 켠 run(seed 0)이 4.09로 control(4.37)보다 좋았지만 ①②와 합치면 재현되지 않았다. seed 1, 2를 추가해(seed 0은 기존 run 재사용) baseline A(4.51 ± 0.23, 같은 설정 seed 0/1/2)와 비교한다. 판단: 평균 차이가 seed std(~0.3) 이상이면 개선, 아니면 잡음.

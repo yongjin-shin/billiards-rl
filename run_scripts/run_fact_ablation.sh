@@ -6,6 +6,10 @@ COMMON=(--data "logs/teacher_data/relabel_s1000/robust/*.npz" --loss nearest_goo
         --lr-schedule cosine --patience 500 --model gnn --obs-transform relative --sel-weight 10
         --select within --seed 0 --threads 2)
 run() { local tag=$1; shift; nohup .venv/bin/python -u -m exp16_wm.bc "${COMMON[@]}" "$@" > "logs/run_logs/ablate_${tag}_${TS}.log" 2>&1 & }
+if [ "$1" = "c4seeds" ]; then            # ④만, seed 1/2 (seed 0은 기존 run)
+  for sd in 1 2; do run c4_scratch_s$sd --selection global --sel-target label --reg-target angle --scratch-head --seed $sd; done
+  wait; exit
+fi
 if [ "$1" = "c124" ]; then               # ①②④ 켜고 ③ 끔
   run c124 --selection factorized --sel-target made --reg-target angle --scratch-head
   wait; exit
