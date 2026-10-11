@@ -3979,3 +3979,18 @@ SAC(7.89) 수준으로 악화. 세 항목(2·3·4)을 한꺼번에 바꿔서 어
 - old code + `--no-wta-fallback`
 
 **판단**: fallback 끈 쪽이 ~4.1, 그대로가 ~4.5면 → WTA fallback이 원인, baseline을 fallback 없는 설정으로 갱신. 둘이 같으면 → 차이는 다른 곳(재현성 등).
+
+**결과 (2026-10-11): 가설 채택 — WTA fallback이 baseline A를 끌어내리고 있었다.**
+
+| (robust, seed 0 / 1 / 2) | shots/game | success | oracle within 0.2° |
+|---|---|---|---|
+| baseline A (10-09) | 4.32 / 4.45 / 4.76 → 4.51 ± 0.23 | 66.2% | – |
+| old code 재실행 (fallback 켬) | 4.32 / 4.45 / 4.76 → 4.51 ± 0.23 | 66.2% | 50.7 / 54.8 / 48.8% |
+| **old code + `--no-wta-fallback`** | 4.28 / 4.15 / 4.00 → **4.14 ± 0.14** | **71.9%** | 53.7 / 61.2 / 64.9% |
+| new-code control | 4.37 / 4.06 / 3.82 → 4.08 ± 0.28 | 72.9% | 52.9 / 60.4 / 64.0% |
+
+- 재실행이 baseline A와 소수점까지 같다 → 학습은 seed 고정 시 완전히 재현된다(차이가 잡음/비결정성이 아님).
+- fallback만 끄면 seed 3개 모두 같거나 좋아지고(−0.04 / −0.30 / −0.76), new-code control과 같은 수준이 된다 → new code가 좋았던 이유는 이 한 가지.
+- **왜 1.37%가 이렇게 큰가**: label pair가 없는 230개 state는 특이하다 — `good_actions`가 많고(최대 80개 이상, planner fallback이 후보를 여럿 저장), teacher action이 backward shot(|angle| > 150°)인 비율 10%(labelled 0.7%). 학습된 old-code 모델(seed 0)에서 이 row의 평균 loss는 2,944로 labelled row(22)의 ~130배 → **train 1.4% row가 전체 train loss의 66%**를 차지한다. raw angle loss라 큰 오차가 그대로 gradient를 지배하고, WTA target(가장 가까운 head)도 매 step 바뀐다.
+- **결정**: baseline을 **fallback 없는 설정(4.14 ± 0.14 / new-code control 4.08 ± 0.28)**으로 갱신. 이후 비교는 이 baseline과 같은 코드로 한다.
+- 함께 의심할 것: no-label row뿐 아니라 labelled row 중 backward shot 등 loss가 큰 소수 row가 여전히 gradient를 지배하는지 (raw loss 문제, roadmap 1b/#8과 연결).
