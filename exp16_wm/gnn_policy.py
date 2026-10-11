@@ -55,7 +55,7 @@ def _mlp(i: int, h: int, o: int) -> nn.Sequential:
 class PairGNNPolicy(nn.Module):
     def __init__(self, hidden: int = 128, wta_eps: float = 0.05, sel_weight: float = 10.0,
                  factorized: bool = False, scratch_head: bool = False, made_head: bool = False,
-                 made2_head: bool = False):
+                 made2_head: bool = False, geom_angle: bool = False):
         super().__init__()
         H = hidden
         self.wta_eps, self.sel_weight = wta_eps, sel_weight
@@ -73,7 +73,10 @@ class PairGNNPolicy(nn.Module):
         self.bb   = _mlp(5 + 2 + 1 + 1, H, H)
         self.ball = _mlp(5 + H, H, H)
         self.pair = _mlp(H + 2 + 2 + 1 + 1, H, H)
+        self.geom_angle = geom_angle                     # angle comes from a pair embedding without the neighbour message
         self.head_a = nn.Linear(H, 2)
+        if geom_angle:
+            self.head_ang = nn.Linear(H, 1)       # angle only; head_a's angle output is then unused (speed still from e)
         self.head_s = nn.Linear(H, 1)             # global mode: pair score; factorized mode: pocket logit within a ball
         if factorized:
             self.head_ball = nn.Linear(2 * H, 1)  # which ball: [h_i, max_j e_ij]
@@ -97,10 +100,11 @@ class PairGNNPolicy(nn.Module):
     # ── encoder ───────────────────────────────
 
     def _encode(self, rel: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        _, e, valid = self._encode_full(rel)
+        _, e, valid, _ = self._encode_full(rel)
         return e, valid
 
-    def _encode_full(self, rel: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def _encode_full(self, rel: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None]:
+        """(h, e, valid, e_geo): e_geo = pair embedding with the ball-ball message zeroed (None unless geom_angle)."""
         B = rel.shape[0]
         balls = rel[:, :3 * N_BALLS].reshape(B, N_BALLS, 3)
         pos, pocketed = balls[..., :2], balls[..., 2]
@@ -121,19 +125,25 @@ class PairGNNPolicy(nn.Module):
         pockets = rel[:, 3 * N_BALLS:].reshape(B, N_POCKETS, 2)
         pr = pockets[:, None, :, :] - pos[:, :, None, :]                   # (B, 3, 6, 2)
         H = h.shape[-1]
-        pair_in = torch.cat([h[:, :, None, :].expand(B, N_BALLS, N_POCKETS, H),
-                             pockets[:, None].expand(B, N_BALLS, N_POCKETS, 2), pr,
-                             pr.norm(dim=-1, keepdim=True),
-                             self.side.view(1, 1, N_POCKETS, 1).expand(B, N_BALLS, N_POCKETS, 1)], dim=-1)
-        e = self.pair(pair_in).reshape(B, N_PAIRS, H)
+        def pair_embed(hb: torch.Tensor) -> torch.Tensor:
+            pair_in = torch.cat([hb[:, :, None, :].expand(B, N_BALLS, N_POCKETS, H),
+                                 pockets[:, None].expand(B, N_BALLS, N_POCKETS, 2), pr,
+                                 pr.norm(dim=-1, keepdim=True),
+                                 self.side.view(1, 1, N_POCKETS, 1).expand(B, N_BALLS, N_POCKETS, 1)], dim=-1)
+            return self.pair(pair_in).reshape(B, N_PAIRS, H)
+
+        e = pair_embed(h)
+        e_geo = pair_embed(self.ball(torch.cat([ball_f, torch.zeros_like(h)], dim=-1))) if self.geom_angle else None
         valid = live[:, :, None].expand(B, N_BALLS, N_POCKETS).reshape(B, N_PAIRS)
-        return h, e, valid
+        return h, e, valid, e_geo
 
     def forward_full(self, rel: torch.Tensor) -> dict[str, torch.Tensor]:
         """Everything the heads produce. Factorized mode adds ball/pocket logits and the scratch logit."""
-        h, e, valid = self._encode_full(rel)
+        h, e, valid, e_geo = self._encode_full(rel)
         B, H = rel.shape[0], e.shape[-1]
         means = torch.tanh(self.head_a(e))
+        if e_geo is not None:
+            means = torch.cat([torch.tanh(self.head_ang(e_geo)), means[..., 1:]], dim=-1)
         out = {"means": means, "valid": valid, "e": e}
         pocket = self.head_s(e).squeeze(-1)
         if self.has_scratch:
@@ -431,7 +441,8 @@ class PairGNNPolicy(nn.Module):
 
     def save(self, path: str) -> None:
         torch.save({"gnn": self.state_dict(), "factorized": self.factorized, "has_scratch": self.has_scratch,
-                    "has_made": self.has_made, "has_made2": self.has_made2}, path)
+                    "has_made": self.has_made, "has_made2": self.has_made2,
+                    "geom_angle": self.geom_angle}, path)
 
 
 assert REL_DIM == 3 * N_BALLS + 2 * N_POCKETS

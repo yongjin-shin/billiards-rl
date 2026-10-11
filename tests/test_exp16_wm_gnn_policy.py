@@ -509,3 +509,38 @@ class TestMade2Head:
         PairGNNPolicy(hidden=16, made2_head=True).load_state_dict({**sd, "made2_scale": torch.ones(2)})
         old = {k: v for k, v in PairGNNPolicy(hidden=16).state_dict().items()}
         PairGNNPolicy(hidden=16).load_state_dict(old)
+
+
+class TestGeomAngle:
+    def _two(self, move_other):
+        # cue at origin, ball 0 at (0.5, 0), ball 1 elsewhere, ball 2 pocketed
+        def rel(b1):
+            r = REL.copy()
+            r[0:3] = (0.5, 0.0, 0.0); r[3:6] = (b1[0], b1[1], 0.0); r[6:9] = (0.0, 0.0, 1.0)
+            return r
+        return torch.as_tensor(np.stack([rel((0.3, 0.6)), rel(move_other)]))
+
+    def test_angle_ignores_the_other_ball_but_speed_and_selection_do_not(self):
+        torch.manual_seed(0)
+        m = PairGNNPolicy(hidden=16, geom_angle=True)
+        o = m.forward_full(self._two((0.9, -0.5)))
+        assert torch.allclose(o["means"][0, :6, 0], o["means"][1, :6, 0], atol=1e-6)        # ball 0's pairs: same angle
+        assert not torch.allclose(o["means"][0, :6, 1], o["means"][1, :6, 1], atol=1e-6)    # speed sees the neighbour
+        assert not torch.allclose(o["logits"][0, :6], o["logits"][1, :6], atol=1e-6)
+        base = PairGNNPolicy(hidden=16)
+        ob = base.forward_full(self._two((0.9, -0.5)))
+        assert not torch.allclose(ob["means"][0, :6, 0], ob["means"][1, :6, 0], atol=1e-6)  # without the flag it does
+
+    def test_default_model_is_unchanged_and_geom_model_trains(self):
+        torch.manual_seed(0); a = PairGNNPolicy(hidden=16)
+        torch.manual_seed(0); b = PairGNNPolicy(hidden=16, geom_angle=False)
+        assert all(torch.equal(x, y) for x, y in zip(a.state_dict().values(), b.state_dict().values()))
+        torch.manual_seed(0)
+        m = PairGNNPolicy(hidden=16, geom_angle=True)
+        rel = torch.as_tensor(np.stack([REL] * 4))
+        good = torch.zeros(4, 2, 2); good[:, 0] = torch.tensor([0.3, -0.5])
+        pairs = torch.full((4, 2), -1, dtype=torch.long); pairs[:, 0] = 7
+        loss = m.train_loss(rel, good[:, 0], good, pairs=pairs)
+        loss.backward()
+        assert torch.isfinite(loss) and m.head_ang.weight.grad.abs().sum() > 0
+        assert m.predict_unit(rel).shape == (4, 2)
