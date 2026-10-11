@@ -430,3 +430,74 @@ class TestWtaFallbackSwitch:
         m.wta_fallback = False
         rel, good = TestPairSupervision()._batch(4)
         assert float(m.train_loss(rel, good[:, 0], good, pairs=torch.full((4, 3), -1))) == 0.0
+
+
+class TestMade2Head:
+    def _m(self):
+        torch.manual_seed(0)
+        return PairGNNPolicy(hidden=16, made2_head=True), torch.as_tensor(np.stack([REL] * 3))
+
+    def test_logits_shapes_and_pocketed_pairs_masked(self):
+        m, rel = self._m()
+        o = m.forward_full(rel)
+        z1 = m.made2_logits(o, torch.zeros(3, 2))
+        z2 = m.made2_logits(o, torch.zeros(3, N_PAIRS, 2))
+        assert z1.shape == z2.shape == (3, N_PAIRS) and torch.allclose(z1, z2)
+        assert (z1[:, 12:] < -1e8).all()                     # ball 3 pocketed in REL
+
+    def test_loss_finite_with_gradient_and_learns_an_action_window(self):
+        # pair 7 is made only within ±0.1° of its own proposal: the head must resolve 0.1°
+        m, _ = self._m()
+        rel = torch.as_tensor(np.stack([REL] * 64))
+        opt = torch.optim.Adam(m.parameters(), lr=3e-3)
+        g = torch.Generator().manual_seed(0)
+        for _ in range(1200):
+            with torch.no_grad():
+                prop = m.forward_full(rel)["means"][:, 7]
+            off = (torch.rand(64, generator=g) - 0.5) * (1.0 / 180.0)            # ±0.5°
+            a = prop.clone(); a[:, 0] += off
+            made = torch.zeros(64, N_PAIRS, dtype=torch.bool)
+            made[:, 7] = off.abs() < 0.1 / 180.0
+            loss = m.made2_loss(rel, a, made, torch.zeros(64, dtype=torch.bool))
+            opt.zero_grad(); loss.backward(); opt.step()
+        assert torch.isfinite(loss)
+        o = m.forward_full(rel[:2])
+        prop = o["means"][:, 7].detach()
+        a = prop.clone(); a[1, 0] += 0.3 / 180.0
+        p = torch.sigmoid(m.made2_logits(o, a))
+        assert float(p[0, 7]) > 0.7 and float(p[1, 7]) < 0.3 and float(p[0, 3]) < 0.1
+
+    def test_refinement_grid_keeps_the_proposal_and_scales_speed_in_mps(self):
+        m, _ = self._m()
+        a = torch.tensor([[0.1, 0.0]])
+        c = m._unit_offsets(a)
+        assert c.shape == (1, len(m.refine_deg) * len(m.refine_speed), 2)
+        assert (c - a).abs().sum(-1).min() < 1e-6
+        v = c[0, :, 1] * m.act_scale[1] + m.act_bias[1]
+        v0 = a[0, 1] * m.act_scale[1] + m.act_bias[1]
+        assert torch.allclose(torch.unique(torch.round(v / v0 * 100) / 100), torch.tensor([0.8, 1.0, 1.25]))
+
+    def test_infer_modes(self, monkeypatch):
+        m, rel = self._m()
+        o = m.forward_full(rel)
+        sel = int(o["logits"][0].argmax())
+        other = 3 if sel != 3 else 4
+        fake = torch.full((3, N_PAIRS), -20.0); fake[:, other] = 5.0          # verifier: only `other` can be made
+        monkeypatch.setattr(m, "made2_logits", lambda o, a: fake.masked_fill(~o["valid"], -1e9))
+        m.infer = "verify"
+        assert torch.allclose(m.predict_unit(rel)[0], o["means"][0, other])
+        m.infer = "select"
+        assert torch.allclose(m.predict_unit(rel)[0], o["means"][0, sel])
+        with pytest.raises(ValueError):
+            p = PairGNNPolicy(hidden=16); p.infer = "refine"; p.predict_unit(rel)
+
+    def test_refine_returns_the_candidate_the_head_scores_highest(self):
+        m, rel = self._m()
+        target = m.predict_unit(rel)[:, 0] + 0.1 / 180.0                       # +0.1° from the proposal
+        class Head(torch.nn.Module):
+            def forward(self, x):                                              # x = [e (16), a (2), (a − a_k)·scale (2)]
+                return -((x[..., 16] - target[:, None]) ** 2)[..., None]
+        m.head_made2 = Head()
+        m.infer = "refine"
+        out = m.predict_unit(rel)
+        assert torch.allclose(out[:, 0], target, atol=1e-6)

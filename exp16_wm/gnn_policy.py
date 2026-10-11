@@ -54,7 +54,8 @@ def _mlp(i: int, h: int, o: int) -> nn.Sequential:
 
 class PairGNNPolicy(nn.Module):
     def __init__(self, hidden: int = 128, wta_eps: float = 0.05, sel_weight: float = 10.0,
-                 factorized: bool = False, scratch_head: bool = False, made_head: bool = False):
+                 factorized: bool = False, scratch_head: bool = False, made_head: bool = False,
+                 made2_head: bool = False):
         super().__init__()
         H = hidden
         self.wta_eps, self.sel_weight = wta_eps, sel_weight
@@ -65,6 +66,10 @@ class PairGNNPolicy(nn.Module):
         self.has_scratch = factorized or scratch_head
         self.wta_fallback = True                        # pair supervision: rows with no labelled pair use WTA (False → left out)
         self.has_made = made_head                       # auxiliary only (modular loss): P(pair made) from pair_stats
+        self.has_made2 = made2_head                     # look-ahead stage 2: P(pair ij made | e_ij, action)
+        self.infer = "select"                           # select | verify | refine | verify_refine (needs made2 head)
+        self.refine_deg = (-0.3, -0.2, -0.1, -0.05, 0.0, 0.05, 0.1, 0.2, 0.3)
+        self.refine_speed = (0.8, 1.0, 1.25)
         self.bb   = _mlp(5 + 2 + 1 + 1, H, H)
         self.ball = _mlp(5 + H, H, H)
         self.pair = _mlp(H + 2 + 2 + 1 + 1, H, H)
@@ -76,11 +81,17 @@ class PairGNNPolicy(nn.Module):
             self.head_scratch = nn.Linear(H, 1)   # will this pair's shot pocket the cue ball
         if made_head:
             self.head_made = nn.Linear(H, 1)      # can this pair be made (coarse-scan success rate) — look-ahead auxiliary
+        if made2_head:
+            self.head_made2 = _mlp(H + 4, H, 1)   # [e_ij, a, (a − a_ij)·scale] → will action a pocket pair ij
         side = torch.zeros(N_POCKETS)
         side[list(SIDE_POCKETS)] = 1.0
         self.register_buffer("side", side)
         self.register_buffer("act_scale", torch.tensor((ACT_HIGH - ACT_LOW) / 2.0, dtype=torch.float32))
         self.register_buffer("act_bias", torch.tensor((ACT_HIGH + ACT_LOW) / 2.0, dtype=torch.float32))
+        # made2 input: action offset from the pair's proposal in precision units (0.2° = 1, 0.5 m/s = 1) —
+        # in [-1, 1] units a 0.1° window is 0.0006 wide, too fine for an MLP to resolve
+        half = (ACT_HIGH - ACT_LOW) / 2.0
+        self.register_buffer("made2_scale", torch.tensor([np.degrees(half[0]) / 0.2, half[1] / 0.5], dtype=torch.float32))
 
     # ── encoder ───────────────────────────────
 
@@ -146,15 +157,66 @@ class PairGNNPolicy(nn.Module):
         o = self.forward_full(rel)
         return o["means"], o["logits"], o["valid"]
 
+    # ── look-ahead stage 2: action-conditional made head ──
+
+    def made2_logits(self, o: dict[str, torch.Tensor], a: torch.Tensor) -> torch.Tensor:
+        """
+        o = forward_full(rel); a (B, 2) one action for every pair or (B, 18, 2) one per pair, in [-1, 1].
+        → (B, 18) logits of "action a pockets pair ij cleanly"; invalid pairs masked.
+        """
+        e, means = o["e"], o["means"].detach()
+        a = a[:, None, :].expand_as(means) if a.dim() == 2 else a
+        z = self.head_made2(torch.cat([e, a, action_diff(a, means) * self.made2_scale], dim=-1)).squeeze(-1)
+        return z.masked_fill(~o["valid"], _NEG)
+
+    def made2_loss(self, rel: torch.Tensor, a: torch.Tensor, made: torch.Tensor,
+                   scratch: torch.Tensor) -> torch.Tensor:
+        """BCE over the live pairs: target_ij = action a made pair ij and the cue ball stayed up."""
+        o = self.forward_full(rel)
+        z = self.made2_logits(o, a)
+        target = (made & ~scratch[:, None]).float()
+        v = o["valid"]
+        return F.binary_cross_entropy_with_logits(z[v], target[v])
+
+    def _unit_offsets(self, a: torch.Tensor) -> torch.Tensor:
+        """(B, 2) actions → (B, C, 2) refinement candidates: angle ± refine_deg × speed × refine_speed."""
+        deg = torch.tensor(self.refine_deg, dtype=a.dtype, device=a.device)
+        mul = torch.tensor(self.refine_speed, dtype=a.dtype, device=a.device)
+        ang = a[:, None, 0] + deg[None] / 180.0                                    # unit angle: 1 = π rad
+        v = a[:, 1:2] * self.act_scale[1] + self.act_bias[1]                         # m/s
+        spd = ((v * mul[None]) - self.act_bias[1]) / self.act_scale[1]
+        grid = torch.stack(torch.broadcast_tensors(ang[:, :, None], spd[:, None, :]), dim=-1)   # (B, A, S, 2)
+        return grid.reshape(len(a), -1, 2).clamp(-1.0, 1.0)
+
     # ── interface used by exp16_wm/bc.py ──────
 
     def predict_unit(self, rel: torch.Tensor) -> torch.Tensor:
-        """Deterministic action in [-1, 1]: the top-scored pair's proposal. (B, 2)"""
+        """
+        Deterministic action in [-1, 1]. infer:
+          select        : the top selection-scored pair's proposal
+          verify        : pair by log p(select) + log P(made | e_ij, a_ij)
+          refine        : selection's pair, then the candidate around its proposal with the highest P(made)
+          verify_refine : both
+        """
         o = self.forward_full(rel)
         score = o["logits"]
         if self.has_scratch and self.scratch_lambda > 0:
             score = score - self.scratch_lambda * torch.sigmoid(o["scratch_logit"])
-        return o["means"][torch.arange(len(score)), score.argmax(dim=1)]
+        if self.infer != "select" and not self.has_made2:
+            raise ValueError(f"infer={self.infer} needs made2_head")
+        if self.infer in ("verify", "verify_refine"):
+            score = F.log_softmax(score, dim=1) + F.logsigmoid(self.made2_logits(o, o["means"]))
+        rows = torch.arange(len(score))
+        k = score.argmax(dim=1)
+        a = o["means"][rows, k]
+        if self.infer not in ("refine", "verify_refine"):
+            return a
+        cand = self._unit_offsets(a)                                                  # (B, C, 2)
+        C = cand.shape[1]
+        e_k = o["e"][rows, k][:, None].expand(-1, C, -1)
+        z = self.head_made2(torch.cat([e_k, cand, action_diff(cand, a[:, None].expand(-1, C, -1)) * self.made2_scale],
+                                      dim=-1)).squeeze(-1)
+        return cand[rows, z.argmax(dim=1)]
 
     def train_loss(self, rel: torch.Tensor, teacher_u: torch.Tensor, good_u: torch.Tensor,
                    w: torch.Tensor | None = None, pairs: torch.Tensor | None = None,
@@ -363,7 +425,7 @@ class PairGNNPolicy(nn.Module):
 
     def save(self, path: str) -> None:
         torch.save({"gnn": self.state_dict(), "factorized": self.factorized, "has_scratch": self.has_scratch,
-                    "has_made": self.has_made}, path)
+                    "has_made": self.has_made, "has_made2": self.has_made2}, path)
 
 
 assert REL_DIM == 3 * N_BALLS + 2 * N_POCKETS

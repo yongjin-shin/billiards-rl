@@ -355,3 +355,34 @@ def test_append_train_only_keeps_val_and_unique_games():
     assert set(out["game"][-3:]).isdisjoint(set(data["game"]))
     with pytest.raises(ValueError):
         append_train_only(data, train, val, {"obs": extra["obs"]})
+
+
+def test_split_rows_maps_original_rows_to_build_split_order():
+    from exp16_wm.bc import split_rows
+    rng = np.random.default_rng(0)
+    n = 40
+    data = {k: np.zeros((n,) + s, np.float32) for k, s in (("action", (2,)), ("good_actions", (2, 2)))}
+    data.update(obs=rng.normal(size=(n, 23)).astype(np.float32), n_good=np.zeros(n, np.int32), pocketed=np.zeros(n, np.int32),
+                shot=np.zeros(n, np.int32), game=np.repeat(np.arange(10), 4))
+    comb, tr, va = build_split(dict(data), 0.2, 3)
+    new = split_rows(data["game"], 0.2, 3)
+    assert np.array_equal(comb["obs"][new], data["obs"])
+
+
+def test_load_sims_aligns_rows_across_files(tmp_path):
+    from exp16_wm.bc import load_sims
+    labels, sims = [], []
+    for i, n in enumerate((3, 2)):
+        obs = np.full((n, 23), i, np.float32) + np.arange(n)[:, None]
+        lp, sp = tmp_path / "lab" / f"f_shard{i}.npz", tmp_path / "sims" / f"f_shard{i}.npz"
+        lp.parent.mkdir(exist_ok=True); sp.parent.mkdir(exist_ok=True)
+        np.savez(lp, obs=obs)
+        np.savez(sp, obs=obs, sim_state=np.array([0, n - 1]), sim_action=np.zeros((2, 2), np.float32),
+                 sim_made=np.array([1, 2], np.int32), sim_scratch_replay=np.array([False, True]))
+        labels.append(str(lp)); sims.append(str(sp))
+    s = load_sims(sims, labels)
+    assert np.array_equal(s["row"], [0, 2, 3, 4]) and s["made"].tolist() == [1, 2, 1, 2]
+    np.savez(tmp_path / "sims" / "f_shard1.npz", obs=np.zeros((2, 23), np.float32), sim_state=np.array([0]),
+             sim_action=np.zeros((1, 2), np.float32), sim_made=np.array([1], np.int32), sim_scratch_replay=np.array([False]))
+    with pytest.raises(ValueError):
+        load_sims(sims, labels)                                              # states differ from the label file

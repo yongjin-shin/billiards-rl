@@ -119,6 +119,41 @@ def build_split(data: dict[str, np.ndarray], val_frac: float, seed: int, data_fr
     return combined, tr_mask, ~tr_mask
 
 
+def load_sims(sims_paths: list[str], label_paths: list[str]) -> dict[str, np.ndarray]:
+    """
+    Teacher simulations with made-slot identity (exp16_wm.sim_identity) aligned to load_teacher_data(label_paths):
+    row = global row of the state in that concatenation. Sims files pair with label files by base name.
+    """
+    by_name = {os.path.basename(p): p for p in sims_paths}
+    rows, act, made, scr, offset = [], [], [], [], 0
+    for lp in sorted(label_paths):
+        z_obs = np.load(lp)["obs"]
+        sp = by_name.get(os.path.basename(lp))
+        if sp is None:
+            raise FileNotFoundError(f"no sims file for {lp}")
+        z = np.load(sp)
+        if "sim_made" not in z.files:
+            raise ValueError(f"{sp} has no sim_made (run exp16_wm.sim_identity)")
+        if not np.array_equal(z["obs"], z_obs):
+            raise ValueError(f"{sp}: states differ from {lp}")
+        rows.append(z["sim_state"].astype(np.int64) + offset)
+        act.append(to_unit(z["sim_action"]).astype(np.float32))
+        made.append(z["sim_made"]); scr.append(z["sim_scratch_replay"])
+        offset += len(z_obs)
+    return {"row": np.concatenate(rows), "a_unit": np.concatenate(act),
+            "made": np.concatenate(made), "scratch": np.concatenate(scr)}
+
+
+def split_rows(game: np.ndarray, val_frac: float, seed: int) -> np.ndarray:
+    """Original row → row index after build_split (data_frac 1, no augmentation: train rows first, then val)."""
+    train, val = split_by_game(game, val_frac, seed)
+    new = np.empty(len(game), np.int64)
+    tr, va = np.where(train)[0], np.where(val)[0]
+    new[tr] = np.arange(len(tr))
+    new[va] = len(tr) + np.arange(len(va))
+    return new
+
+
 def append_train_only(data: dict[str, np.ndarray], train: np.ndarray, val: np.ndarray,
                       extra: dict[str, np.ndarray]) -> tuple[dict[str, np.ndarray], np.ndarray, np.ndarray]:
     """Add extra rows to the train side only (the val set stays exactly the split's); game ids kept unique."""
@@ -255,7 +290,8 @@ def train_bc(agent: VanillaSAC, data: dict[str, np.ndarray], train: np.ndarray, 
              log_every: int = 10, w: torch.Tensor | None = None,
              select: str = "loss", select_thresh_deg: float = 0.2,
              lr_schedule: str = "const", lr_final_frac: float = 0.01, use_pairs: bool = False,
-             selection: str = "global", use_extras: bool = False) -> dict:
+             selection: str = "global", use_extras: bool = False,
+             sims: dict[str, np.ndarray] | None = None, made2_weight: float = 1.0, sims_batch: int = 1024) -> dict:
     """select: 'loss' keeps the lowest val loss; 'within' the highest val within-threshold rate
     (the val loss is dominated by a few far-off predictions and can disagree with it)."""
     if select not in ("loss", "within"):
@@ -284,6 +320,11 @@ def train_bc(agent: VanillaSAC, data: dict[str, np.ndarray], train: np.ndarray, 
     sched = (torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=max(1, epochs), eta_min=lr * lr_final_frac)
              if lr_schedule == "cosine" else None)
     tr_idx, va_idx = np.where(train)[0], np.where(val)[0]
+    if sims is not None:
+        from exp16_wm.sim_identity import from_bitmask
+        sims_tr = np.where(train[sims["row"]])[0]
+        s_row = torch.as_tensor(sims["row"]); s_a = torch.as_tensor(sims["a_unit"])
+        s_mask = sims["made"]; s_scr = torch.as_tensor(sims["scratch"])   # made bitmask decoded per batch
 
     best_score, best_val, best_state, best_epoch, history = -float("inf"), float("inf"), None, -1, []
     for ep in range(epochs):
@@ -294,6 +335,10 @@ def train_bc(agent: VanillaSAC, data: dict[str, np.ndarray], train: np.ndarray, 
             b = perm[i:i + batch]
             l = model.train_loss(obs[b], t_u[b], g_u[b], w, pairs=None if pr is None else pr[b],
                                  extras=None if ex is None else {k: v[b] for k, v in ex.items()})
+            if sims is not None:
+                sb = rng.choice(sims_tr, size=min(sims_batch, len(sims_tr)), replace=False)
+                made_b = torch.as_tensor(from_bitmask(s_mask[sb]))
+                l = l + made2_weight * model.module.made2_loss(obs[s_row[sb]], s_a[sb], made_b, s_scr[sb])
             opt.zero_grad()
             l.backward()
             opt.step()
@@ -367,6 +412,36 @@ def oracle_pair_metrics(agent: PairGNNPolicy, data: dict[str, np.ndarray], val: 
     return out
 
 
+def made2_metrics(agent: PairGNNPolicy, data: dict[str, np.ndarray], val: np.ndarray,
+                  sims: dict[str, np.ndarray], max_n: int = 50_000, seed: int = 0) -> dict:
+    """
+    Verifier quality on val states' simulations (live pairs): AUC of P(made | e_ij, a), and the same AUC
+    restricted to pairs the state can make at all (coarse pair_made > 0 — telling hits from near misses).
+    Trivial baseline: the state-level coarse made rate of the pair (pair_made / pair_n), blind to the action.
+    """
+    from sklearn.metrics import roc_auc_score
+    from exp16_wm.sim_identity import from_bitmask
+    idx = np.where(val[sims["row"]])[0]
+    if len(idx) == 0:
+        return {}
+    idx = np.random.default_rng(seed).choice(idx, size=min(max_n, len(idx)), replace=False)
+    rows = sims["row"][idx]
+    with torch.no_grad():
+        o = agent.forward_full(torch.as_tensor(data["obs"][rows]))
+        z = agent.made2_logits(o, torch.as_tensor(sims["a_unit"][idx])).numpy()
+    target = from_bitmask(sims["made"][idx]) & ~sims["scratch"][idx][:, None]
+    v = o["valid"].numpy()
+    out = {"made2_auc": float(roc_auc_score(target[v], z[v])), "made2_pos_rate": float(target[v].mean())}
+    if "pair_made" in data:
+        rate = data["pair_made"][rows] / np.maximum(data["pair_n"][rows], 1)
+        out["coarse_rate_auc"] = float(roc_auc_score(target[v], rate[v]))
+        f = v & (data["pair_made"][rows] > 0)
+        if target[f].any() and not target[f].all():
+            out["made2_auc_feasible"] = float(roc_auc_score(target[f], z[f]))
+            out["coarse_rate_auc_feasible"] = float(roc_auc_score(target[f], rate[f]))
+    return out
+
+
 def evaluate_policy(agent: "VanillaSAC | TransformedPolicy", seed: int, n_games: int, env_kw: dict) -> dict:
     """Same protocol as exp16_wm/train.py final eval: reset(seed) once, then n_games resets."""
     env = BilliardsEnv(**env_kw)
@@ -437,6 +512,11 @@ def parse_args():
                    help="factorized: extra evaluation with score −= λ·σ(scratch logit)")
     p.add_argument("--pair-supervision", action="store_true",
                    help="GNN: train each pair head on the pair that produced the label (needs exp16_wm.pair_labels)")
+    p.add_argument("--made2-head", action="store_true",
+                   help="look-ahead stage 2: action-conditional made head trained on teacher sims (--sims)")
+    p.add_argument("--made2-weight", type=float, default=1.0)
+    p.add_argument("--sims", type=str, nargs="+", default=["logs/teacher_data/relabel_s1000/sims/*.npz"])
+    p.add_argument("--sims-batch", type=int, default=1024)
     p.add_argument("--no-wta-fallback", action="store_true",
                    help="--pair-supervision: leave rows with no labelled pair out of the loss instead of training them with WTA")
     p.add_argument("--angle-wrap", action="store_true",
@@ -471,6 +551,12 @@ def main():
     paths = sorted({p for pat in args.data for p in glob.glob(pat)})
     data = load_teacher_data(paths)
     teacher = json.loads(str(np.load(paths[0])["meta"]))["teacher"]
+    sims = None
+    if args.made2_head:
+        if args.data_frac < 1.0 or args.augment != "none" or args.model != "gnn":
+            raise SystemExit("--made2-head needs --model gnn, --data-frac 1, --augment none")
+        sims = load_sims(sorted({p for pat in args.sims for p in glob.glob(pat)}), paths)
+        sims["row"] = split_rows(data["game"], args.val_frac, args.seed)[sims["row"]]
     data, train, val = build_split(data, args.val_frac, args.seed, args.data_frac, args.augment)
     extra_tag = ""
     if args.train_only_data:
@@ -488,7 +574,7 @@ def main():
             (f"_mod-{args.selection[0]}{args.sel_target[0]}{dict(angle='a', made='m', made_same='M')[args.reg_target]}{'s' if args.scratch_head else ''}{'_mh' if args.made_head else ''}" if modular else
              ("_pairs" + ("-nofb" if args.no_wta_fallback else "") if args.pair_supervision else "") + ("_fact" + ("" if len(args.fact_terms) == 3 else "-" + "".join(t[0] for t in args.fact_terms))
                                                             if args.selection == "factorized" else "")) + \
-            extra_tag + ("_wrap" if args.angle_wrap else "_nowrap")
+            extra_tag + (f"_m2w{args.made2_weight:g}" if args.made2_head else "") + ("_wrap" if args.angle_wrap else "_nowrap")
     name = (f"exp16_bc_{teacher}_{args.loss}{h_tag}_a{args.angle_scale_deg:g}_v{args.speed_scale:g}"
             f"_s{args.seed}_{time.strftime('%Y-%m-%d@%H%M')}")
     out_dir = os.path.join(args.out_root, name)
@@ -500,7 +586,7 @@ def main():
     if args.model == "gnn":
         agent = PairGNNPolicy(args.gnn_hidden, args.wta_eps, args.sel_weight,
                               factorized=args.selection == "factorized", scratch_head=args.scratch_head,
-                              made_head=args.made_head)
+                              made_head=args.made_head, made2_head=args.made2_head)
         agent.fact_terms = tuple(args.fact_terms)
         agent.wta_fallback = not args.no_wta_fallback
         if modular:
@@ -512,10 +598,13 @@ def main():
     fit = train_bc(agent, data, train, val, args.loss, args.epochs, args.batch, args.lr,
                    args.patience, args.seed, w=dim_weights(args.angle_scale_deg, args.speed_scale),
                    select=args.select, lr_schedule=args.lr_schedule, lr_final_frac=args.lr_final_frac,
-                   use_pairs=args.pair_supervision or modular, selection=args.selection, use_extras=modular)
+                   use_pairs=args.pair_supervision or modular, selection=args.selection, use_extras=modular,
+                   sims=sims, made2_weight=args.made2_weight, sims_batch=args.sims_batch)
     vm = val_metrics(agent, data, val)
     if isinstance(agent, PairGNNPolicy):
         vm.update(oracle_pair_metrics(agent, data, val))
+        if sims is not None:
+            vm.update(made2_metrics(agent, data, val, sims))
     print(f"  trained {fit['epochs_run']} epochs ({time.time()-t0:.0f}s), best ({args.select}) @{fit['best_epoch']}"
           f" val loss {fit['best_val_loss']:.6f}  |  {json.dumps({k: round(v, 4) for k, v in vm.items()})}", flush=True)
     agent.save(os.path.join(out_dir, "bc_model.pt"))
@@ -530,7 +619,15 @@ def main():
         agent.scratch_lambda = 0.0
         print(f"  policy alone with scratch penalty {args.scratch_penalty}: "
               f"{json.dumps({k: (round(v, 3) if v is not None else None) for k, v in ev_pen.items()})}", flush=True)
-    results = {"name": name, "teacher": teacher, "loss": args.loss, "data": paths,
+    ev_modes = None
+    if args.made2_head:                                     # same model, the made head used at inference
+        ev_modes = {}
+        for mode in ("verify", "refine", "verify_refine"):
+            agent.infer = mode
+            ev_modes[mode] = evaluate_policy(TransformedPolicy(agent, args.obs_transform), args.eval_seed, args.eval_games, CLEAR_ENV)
+            print(f"  policy alone, infer={mode}: {json.dumps({k: (round(v, 3) if v is not None else None) for k, v in ev_modes[mode].items()})}", flush=True)
+        agent.infer = "select"
+    results = {"name": name, "teacher": teacher, "loss": args.loss, "data": paths, "eval_infer_modes": ev_modes,
                "train_only_data": extra_paths if args.train_only_data else None, "eval_scratch_penalty": ev_pen,
                "n_shots": int(len(data["shot"])), "n_train": int(train.sum()), "n_val": int(val.sum()),
                "train": {k: v for k, v in fit.items() if k != "history"}, "val": vm, "eval": ev,
