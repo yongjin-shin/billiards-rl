@@ -367,3 +367,20 @@ class TestModularLoss:
         o = m.forward_full(rel)
         assert o["scratch_logit"].shape == (4, N_PAIRS)
         assert "scratch_logit" not in PairGNNPolicy(hidden=16).forward_full(rel)
+
+    def test_made_same_drops_combination_shot_targets(self):
+        # candidate 0 aimed at pair 7 (ball 2) but made pair 2 (ball 1) and pair 8 (ball 2): only pair 8 is a target
+        m, rel, good, pairs, ex = self._setup(mod=("label", "made_same", False))
+        ex["good_made"][:] = 0; ex["good_made"][:, 0, 2] = 1.0; ex["good_made"][:, 0, 8] = 1.0
+        m.sel_weight = 0.0
+        same = m.train_loss(rel, good[:, 0], good, pairs=pairs, extras=ex)
+        ex["good_made"][:, 0, 2] = 0.0
+        m.mod = ("label", "made", False)
+        only8 = m.train_loss(rel, good[:, 0], good, pairs=pairs, extras=ex)
+        assert torch.allclose(same, only8)
+
+    def test_made_same_without_angle_pair_has_no_target(self):
+        m, rel, good, pairs, ex = self._setup(mod=("label", "made_same", False))
+        m.sel_weight = 0.0
+        loss = m.train_loss(rel, good[:, 0], good, pairs=torch.full((4, 2), -1), extras=ex)
+        assert float(loss) == 0.0

@@ -414,8 +414,9 @@ def parse_args():
                    choices=["reg", "sel", "scratch"], help="factorized loss terms to keep (ablation)")
     p.add_argument("--sel-target", type=str, default=None, choices=["label", "made"],
                    help="modular loss (with --reg-target): selection target = labelled pairs or pair_made")
-    p.add_argument("--reg-target", type=str, default=None, choices=["angle", "made"],
-                   help="modular loss (with --sel-target): regression pair = angle-matched (good_pairs) or really made (good_made)")
+    p.add_argument("--reg-target", type=str, default=None, choices=["angle", "made", "made_same"],
+                   help="modular loss (with --sel-target): regression pair = angle-matched (good_pairs), really made (good_made), "
+                        "or really made and the aimed ball (made_same: no combination shots)")
     p.add_argument("--scratch-head", action="store_true", help="modular loss: + scratch head BCE")
     p.add_argument("--scratch-penalty", type=float, default=3.0,
                    help="factorized: extra evaluation with score −= λ·σ(scratch logit)")
@@ -460,7 +461,7 @@ def main():
             ("" if args.augment == "none" else f"_{args.augment}") + \
             ("" if args.data_frac >= 1.0 else f"_frac{args.data_frac:g}") + \
             ("" if args.lr_schedule == "const" else "_cos") + \
-            (f"_mod-{args.selection[0]}{args.sel_target[0]}{args.reg_target[0]}{'s' if args.scratch_head else ''}" if modular else
+            (f"_mod-{args.selection[0]}{args.sel_target[0]}{dict(angle='a', made='m', made_same='M')[args.reg_target]}{'s' if args.scratch_head else ''}" if modular else
              ("_pairs" if args.pair_supervision else "") + ("_fact" + ("" if len(args.fact_terms) == 3 else "-" + "".join(t[0] for t in args.fact_terms))
                                                             if args.selection == "factorized" else "")) + \
             ("_wrap" if args.angle_wrap else "_nowrap")

@@ -236,6 +236,8 @@ class PairGNNPolicy(nn.Module):
           sel_target : "label" → the labelled candidates' pairs (pairs, counts) | "made" → pair_made over live pairs
           reg_target : "angle" → each labelled candidate regresses its angle-matched pair (pairs)
                        "made"  → each clean candidate regresses every pair it really made (good_made)
+                       "made_same" → "made" restricted to the aimed ball (the ball of its angle-matched pair):
+                                     drops combination shots, where aiming at ball A pockets ball B
           use_scratch: + sel_weight · BCE(scratch head, pair_scratch / pair_n)
         Selection is one soft CE on the joint pair distribution in both structures (in the factorized
         one this equals ball CE on the target's ball marginal + per-ball pocket CE weighted by it).
@@ -243,9 +245,9 @@ class PairGNNPolicy(nn.Module):
         no target for a term are left out of that term (instead of the WTA fallback).
         """
         sel_target, reg_target, use_scratch = self.mod
-        if (sel_target == "label" or reg_target == "angle") and pairs is None:
+        if (sel_target == "label" or reg_target in ("angle", "made_same")) and pairs is None:
             raise ValueError("modular loss with label selection / angle regression needs pairs (good_pairs)")
-        if (sel_target == "made" or reg_target == "made" or use_scratch) and ex is None:
+        if (sel_target == "made" or reg_target in ("made", "made_same") or use_scratch) and ex is None:
             raise ValueError("modular loss with made targets / scratch needs extras (good_made, pair_made, ...)")
         w = torch.ones(2, device=rel.device) if w is None else w
         o = self.forward_full(rel)
@@ -256,10 +258,15 @@ class PairGNNPolicy(nn.Module):
         # regression
         if reg_target == "angle":
             combo, g = label, torch.nan_to_num(good_u[:, :pairs.shape[1]])
-        elif reg_target == "made":
+        elif reg_target in ("made", "made_same"):
             K2 = ex["good_made"].shape[1]
             cand_ok = (~torch.isnan(good_u[:, :K2, 0])).float() * (1.0 - ex["good_scratch"].float())
             combo, g = ex["good_made"].float() * cand_ok[..., None], torch.nan_to_num(good_u[:, :K2])
+            if reg_target == "made_same":
+                aimed = pairs[:, :K2]                                                 # (B, K2), −1 = no angle pair
+                ball_of_pair = torch.arange(N_PAIRS, device=rel.device) // N_POCKETS
+                same = (aimed[..., None] >= 0) & (ball_of_pair == (aimed.clamp(min=0) // N_POCKETS)[..., None])
+                combo = combo * same.float()
         else:
             raise ValueError(f"unknown reg_target: {reg_target}")
         d = ((action_diff(means[:, None, :, :], g[:, :, None, :]) * w) ** 2).sum(-1)    # (B, K, 18)
