@@ -4201,3 +4201,28 @@ control(`mod-gla`) seed 0/1/2, val, label pair(candidate 0) 기준.
 **실험**: 새 baseline 설정(`--pair-supervision --no-wta-fallback`, 나머지 동일), seed 0/1/2. 같은 batch에 control(`--geom-angle` 없음)도 다시 돌려 재현성과 같은 코드 비교를 확인(기존 4.14 ± 0.14와 같아야 함).
 **지표**: policy alone shots/game, success; 남은 공 1/2/3개별 각도 오차(label pair 기준 중앙값, within 0.2°)와 실제 clean pocket 비율.
 **판단**: 2개 state의 각도 오차가 control(0.24°)에서 1·3개 수준(0.11~0.13°)으로 줄면 이웃 message 간섭이 원인. 2개 state만 그대로고 1·3개만 변하면 원인 아님(각도가 이웃 정보 없이도 같은 정확도) → 모델 구조가 아니라 optimization/표현 쪽.
+
+**결과: `--geom-angle` (2026-10-11, seed 0/1/2, control 재실행 포함): 원인이 아니다.**
+
+| | shots/game | success | oracle within 0.2° | 각도 오차 중앙값 1 / **2** / 3개 | within 0.2° 1 / **2** / 3개 | clean 성공 1 / **2** / 3개 |
+|---|---|---|---|---|---|---|
+| control (재실행, 이전 4.14와 소수점까지 동일) | 4.28 / 4.15 / 4.00 → 4.14 ± 0.14 | 71.9% | 59.9% | 0.112 / **0.230** / 0.125° | 75.1 / **46.2** / 68.4% | 71.8 / **60.4** / 74.4% |
+| geom-angle (이웃 message 없이 각도) | 3.94 / 4.43 / 3.90 → 4.09 ± 0.29 | 73.0% | 59.3% | 0.118 / **0.215** / 0.137° | 71.6 / **48.4** / 66.4% | 66.2 / **61.4** / 75.7% |
+
+- 이웃 정보 없이 각도를 내도 정확도가 전혀 달라지지 않고(전체 within 59.9% → 59.3%), 2개 state의 각도 오차도 0.230° → 0.215°로 1·3개(0.12~0.14°)와의 격차가 그대로다. **이웃 message 간섭 가설 기각.** 각도는 이웃 정보 없는 기하만으로도 같은 정확도로 계산되는데 2개 state에서만 2배 부정확하다 → 모델 구조의 정보 경로가 아니라 2개 state 입력 분포/최적화 쪽 문제.
+- 지금까지 기각: 일반화, 데이터 양, slot 표현, label 불일치·불규칙, 방해 공, 창 폭, speed hedging, selection, scatter, 이웃 message.
+
+**결과: look-ahead 2단계 (action-conditional made head, 2026-10-11, seed 0/1/2)**
+
+verifier 품질(val states의 teacher sims, 3 seeds): AUC **0.957 / 0.958 / 0.958**(양성 3.7%). state-level coarse 성공률(action을 모름)은 0.90, **가능한 pair(pair_made>0)만** 보면 0.95 vs 0.80 — action을 보는 verifier가 창 안/밖을 잘 구분한다.
+
+| inference (같은 모델, 학습 그대로) | seed 0 / 1 / 2 | 평균 shots/game | select 대비 |
+|---|---|---|---|
+| select(기본) | 4.28 / 4.14 / 3.89 | 4.11 ± 0.20 | – |
+| verify(P(made)로 pair 재선택) | 4.19 / 4.05 / 3.91 | 4.05 ± 0.14 | −0.06 |
+| refine(고른 pair 주변 ±0.3° × speed ×{0.8,1,1.25} 27후보 중 P(made) 최대) | 4.19 / 4.11 / 3.80 | 4.03 ± 0.21 | −0.08 |
+| **verify + refine** | **4.06 / 4.02 / 3.73** | **3.94 ± 0.18** | **−0.17** (seed별 −0.22 / −0.12 / −0.16) |
+
+- made2 head를 학습시켜도 기본 inference는 그대로(4.11 vs 4.14) — 해롭지 않다. baseline(made2 없음) 4.14 → 3.94(−0.20).
+- 같은 모델·같은 평가에서 inference만 바꾼 비교라 seed별 차이가 3개 모두 개선이지만 크기가 작다(−4%, 평가 500 games의 잡음 ~0.05~0.08 shots 수준과 비교해 약 2~3배). 각도 오차를 줄이는 직접적 효과는 refine 후보가 27개로 성기고(각도 9개), head가 0.1° 단위 차이를 구분하는 정도에 달려 있다.
+- 지금까지 시도한 것 중 전체 수치를 움직인 것은 이것이 처음(WTA fallback 제거 4.51 → 4.14 제외).
