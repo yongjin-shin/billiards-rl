@@ -12,9 +12,18 @@ Three measurements per run (really played in the simulator, val states of the ru
   sample  label pair, proposal's speed, angle = proposal + Laplace(b): success of one sample vs the best of N
           (the simulator picks), i.e. what sampling from a distribution head would give
 
+Two more parts (`--parts oracle visited`; default `--parts base` = the three above):
+
+  oracle  at the label pair, swap the pair head's angle and/or speed for the label's and play: is the precision
+          failure the angle, the speed, or both together? Plus simulator-picked best over a speed grid / angle grid /
+          both (an upper bound for refine with a perfect verifier). Judged by `oracle_row` (experiments.md table)
+  visited roll the policy out for games and record each shot's balls left and previous shot's outcome: are the
+          states the policy reaches harder than the teacher's val states? Judged by `visited_flags`
+
 Usage:
     python -m exp16_wm.diagnose_action --runs L4="logs/experiments/*_L4_m2w1_*_s{seed}_*" --seeds 0 1 2 \
         --out logs/diagnose_action/L4.json
+    python -m exp16_wm.diagnose_action --runs ... --parts oracle visited --out logs/diagnose_action/L4_oracle_visited.json
 """
 
 import argparse
@@ -39,6 +48,8 @@ from exp16_wm.teacher_data import CLEAR_ENV
 CHUNK = 300
 SAMPLE_SCALES_DEG = (0.0, 0.05, 0.1, 0.2)                 # Laplace scale b of the angle noise (0 = the proposal itself)
 DIST_BINS = ((0.0, 0.15), (0.15, 0.30), (0.30, 1.0))      # gradient check: distance of an offset from the window edge
+PREV_KINDS = ("first", "after_hit", "after_miss", "after_scratch")   # how the previous shot of the game ended
+GRID_MODES = {"speed7": "speed", "angle31": "angle", "both217": "both"}
 
 
 # ──────────────────────────────────────────────
@@ -106,6 +117,93 @@ def gradient_toward_window(grad: np.ndarray, truth: np.ndarray, offsets: np.ndar
 
 def pct(x: np.ndarray) -> str:
     return f"{100 * float(np.mean(x)):.1f}%" if len(x) else "n/a"
+
+
+def substitute_action(model_act: np.ndarray, label_act: np.ndarray, angle: str = "model", speed: str = "model") -> np.ndarray:
+    """(N, 2) env actions [delta_angle, speed]: the angle / speed column comes from "model" or "label" (inputs untouched)."""
+    for name, v in (("angle", angle), ("speed", speed)):
+        if v not in ("model", "label"):
+            raise ValueError(f"{name} must be 'model' or 'label', got {v!r}")
+    model_act, label_act = np.asarray(model_act), np.asarray(label_act)
+    out = model_act.copy()
+    if angle == "label":
+        out[:, 0] = label_act[:, 0]
+    if speed == "label":
+        out[:, 1] = label_act[:, 1]
+    return out
+
+
+def candidate_grid(action: np.ndarray, deg: tuple, speeds: tuple, mode: str) -> np.ndarray:
+    """
+    One env action [angle rad, speed] → (K, 2) candidates around it: "speed" = the absolute speeds at its angle,
+    "angle" = its angle ± deg (degrees) at its speed, "both" = every angle × every speed.
+    """
+    a = np.asarray(action, dtype=np.float64)
+    angles = a[0] + np.radians(np.asarray(deg, dtype=np.float64))
+    if mode == "speed":
+        cand = [(a[0], sp) for sp in speeds]
+    elif mode == "angle":
+        cand = [(t, a[1]) for t in angles]
+    elif mode == "both":
+        cand = [(t, sp) for t in angles for sp in speeds]
+    else:
+        raise ValueError(f"mode must be speed / angle / both, got {mode!r}")
+    return np.asarray(cand, dtype=np.float32)
+
+
+def oracle_row(m: float, ls: float, la: float, l: float) -> str:
+    """
+    Row of the oracle-swap judgement table (experiments.md 2026-10-12), rates in [0, 1]:
+    m model angle + model speed, ls model angle + label speed, la label angle + model speed, l label angle + label speed.
+      A  l < 97%                                  the label action is not reproduced (harness problem)
+      B  r_a + r_s < 0.5 (l − m)                  angle and speed must be right together
+      C  r_a ≥ 2 r_s and r_a − r_s ≥ 2%p         angle error dominates
+      D  r_s ≥ 2 r_a and r_s − r_a ≥ 2%p         speed error dominates
+      E  otherwise                                both contribute
+    """
+    r_a, r_s = la - m, ls - m
+    if l < 0.97:
+        return "A"
+    if r_a + r_s < 0.5 * (l - m):
+        return "B"
+    if r_a >= 2 * r_s and r_a - r_s >= 0.02:
+        return "C"
+    if r_s >= 2 * r_a and r_s - r_a >= 0.02:
+        return "D"
+    return "E"
+
+
+def previous_outcome(pocketed: bool, scratch: bool) -> str:
+    """How a shot ended, as the label of the next shot's state (scratch wins over a pocket)."""
+    return "after_scratch" if scratch else ("after_hit" if pocketed else "after_miss")
+
+
+def shot_groups(n_left: np.ndarray, prev: np.ndarray, clean: np.ndarray) -> dict:
+    """Clean rate and counts of shots by balls left and by how the previous shot ended; empty groups are nan."""
+    nan = float("nan")
+    n = len(clean)
+    rate = lambda mask: float(clean[mask].mean()) if mask.any() else nan
+    by_balls = {b: {"n": int((n_left == b).sum()), "rate": rate(n_left == b)} for b in (1, 2, 3)}
+    by_prev = {k: {"n": int((prev == k).sum()), "rate": rate(prev == k)} for k in PREV_KINDS}
+    normal = np.isin(prev, ("first", "after_hit"))
+    return {"by_balls": by_balls, "mix": {b: (by_balls[b]["n"] / n if n else nan) for b in (1, 2, 3)}, "by_prev": by_prev,
+            "normal": rate(normal), "after_fail": rate(~normal), "n_after_fail": int((~normal).sum())}
+
+
+def visited_flags(game: dict, val: dict, normal: float, after_fail: float) -> dict[str, bool]:
+    """
+    Rows of the visited-states judgement table (experiments.md 2026-10-12); game / val: balls left → clean rate.
+      A  every balls-left group within 5%p of val and after-failure states within 3%p of normal ones
+      B  after-failure states ≥ 5%p lower than first-shot / after-hit states
+      C  games ≥ 5%p lower than val in every group      D  games ≥ 5%p higher than val in every group
+    Several rows can hold at once. Groups or comparisons with nan are not evaluated.
+    """
+    diffs = [game[b] - val[b] for b in (1, 2, 3) if np.isfinite(game[b]) and np.isfinite(val[b])]
+    gap = normal - after_fail if np.isfinite(normal) and np.isfinite(after_fail) else float("nan")
+    return {"A": bool(diffs) and all(abs(d) <= 0.05 for d in diffs) and (not np.isfinite(gap) or gap <= 0.03),
+            "B": bool(np.isfinite(gap) and gap >= 0.05),
+            "C": bool(diffs) and all(d <= -0.05 for d in diffs),
+            "D": bool(diffs) and all(d >= 0.05 for d in diffs)}
 
 
 # ──────────────────────────────────────────────
@@ -252,9 +350,87 @@ def measure_sample(m: PairGNNPolicy, v: dict, seed: int, env, pm, n_states: int,
     return out
 
 
+def any_clean(env, pm, obs: np.ndarray, cands: np.ndarray) -> bool:
+    """Does any candidate action pocket cleanly from this state? Stops at the first success."""
+    return any(bool((lambda x: x[0].any() and not x[1])(E.play(env, pm, obs, c))) for c in cands)
+
+
+def measure_oracle(m: PairGNNPolicy, v: dict, seed: int, env, pm, n_grid: int) -> dict:
+    rows = torch.arange(len(v["rel"]))
+    with torch.no_grad():
+        o = m.forward_full(v["rel"])
+        model = to_env(m, o["means"][rows, v["p0"]])                      # the pair head's own action at the label pair
+    label = np.asarray(v["label_act"], dtype=np.float32)
+    acts = {"M": model, "Ls": substitute_action(model, label, "model", "label"),
+            "La": substitute_action(model, label, "label", "model"), "L": label}
+    ok = {k: clean_flags(env, pm, v["obs"], a) for k, a in acts.items()}
+    pick = np.random.default_rng(200 + seed).choice(np.where(v["lab"])[0], size=min(n_grid, int(v["lab"].sum())), replace=False)
+    grid = {name: np.array([any_clean(env, pm, v["obs"][j], candidate_grid(model[j], E.ANG31, E.ABS_SPEEDS, mode)) for j in pick])
+            for name, mode in GRID_MODES.items()}
+    configure(m, "verify_refine", E.ANG31, E.ABS_SPEEDS)
+    with torch.no_grad():
+        ref = to_env(m, refine_at(m, m.forward_full(v["rel"][pick]), v["p0"][pick]))
+    grid["M"] = ok["M"][pick]
+    grid["verify_refine_label_pair"] = clean_flags(env, pm, v["obs"][pick], ref)
+    return {"lab": v["lab"], "nl": v["nl"], "ok": ok, "grid": grid}
+
+
+def rollout_shots(m: PairGNNPolicy, n_games: int, env_kw: dict, seed: int = 0) -> dict:
+    """
+    Play n_games with the policy's current inference mode (same protocol as bc.evaluate_policy: reset(seed) once, then
+    one reset per game) and record per shot the balls left, how the previous shot ended and whether it was clean.
+    """
+    env = BilliardsEnv(**env_kw)
+    env.reset(seed=seed)
+    n_left, prev, clean = [], [], []
+    for _ in range(n_games):
+        obs, _ = env.reset()
+        last, done = "first", False
+        while not done:
+            n_left.append(int(E.balls_left(obs[None])[0]))
+            prev.append(last)
+            obs, _, term, trunc, info = env.step(m.act(TRANSFORMS["relative"](obs)))
+            hit, scr = info["pocketed_this_step"] > 0, bool(info["scratch"])
+            clean.append(bool(hit and not scr))
+            last, done = previous_outcome(hit, scr), term or trunc
+    env.close()
+    return {"n_left": np.array(n_left), "prev": np.array(prev), "clean": np.array(clean)}
+
+
+def measure_visited(m: PairGNNPolicy, v: dict, env, pm, n_games: int) -> dict:
+    configure(m, "verify_refine", E.ANG31, E.ABS_SPEEDS)
+    with torch.no_grad():
+        acts = np.concatenate([to_env(m, m.predict_unit(v["rel"][lo:lo + CHUNK])) for lo in range(0, len(v["rel"]), CHUNK)])
+    return {"val": {"nl": v["nl"], "lab": v["lab"], "clean": clean_flags(env, pm, v["obs"], acts)},
+            "games": rollout_shots(m, n_games, CLEAR_ENV)}
+
+
 # ──────────────────────────────────────────────
 # Pooling and printing
 # ──────────────────────────────────────────────
+
+def summarize_oracle(rs: list) -> dict:
+    lab = np.concatenate([r["lab"] for r in rs]); nl = np.concatenate([r["nl"] for r in rs])
+    out: dict = {"n": int(lab.sum()), "clean": {}, "grid": {}}
+    for k in rs[0]["ok"]:
+        arr = np.concatenate([r["ok"][k] for r in rs])
+        out["clean"][k] = {**{str(b): x for b, x in E.by_balls(arr[lab], nl[lab]).items()}, "all": float(arr[lab].mean())}
+    out["grid_n"] = int(sum(len(r["grid"]["M"]) for r in rs))
+    for k in rs[0]["grid"]:
+        out["grid"][k] = float(np.concatenate([r["grid"][k] for r in rs]).mean())
+    c = out["clean"]
+    out["row"] = oracle_row(c["M"]["all"], c["Ls"]["all"], c["La"]["all"], c["L"]["all"])
+    return out
+
+
+def summarize_visited(rs: list) -> dict:
+    cat = lambda f: np.concatenate([f(r) for r in rs])
+    games = shot_groups(cat(lambda r: r["games"]["n_left"]), cat(lambda r: r["games"]["prev"]), cat(lambda r: r["games"]["clean"]))
+    nl, lab, clean = cat(lambda r: r["val"]["nl"]), cat(lambda r: r["val"]["lab"]), cat(lambda r: r["val"]["clean"])
+    val = {b: (float(clean[lab & (nl == b)].mean()) if (lab & (nl == b)).any() else float("nan")) for b in (1, 2, 3)}
+    game = {b: games["by_balls"][b]["rate"] for b in (1, 2, 3)}
+    return {"games": games, "val": {"by_balls": val, "all": float(clean[lab].mean()), "n": int(lab.sum())},
+            "flags": visited_flags(game, val, games["normal"], games["after_fail"])}
 
 def summarize(label: str, split: list, scan: list, sample: list | None) -> dict:
     nl = np.concatenate([r["nl"] for r in split]); lab = np.concatenate([r["lab"] for r in split])
@@ -315,6 +491,40 @@ def print_summary(label: str, s: dict) -> None:
             print(f"  b = {float(b):.2f} deg {'(proposal as is)' if float(b) == 0 else '':18s}{100 * r['single']:>20.1f}%{100 * r['single_two_left']:>17.1f}%{100 * r['best_of_n']:>22.1f}%")
 
 
+def print_oracle(label: str, s: dict) -> None:
+    f = "%-62s %8s %8s %8s %8s"
+    print(f"\n===== {label} oracle swap (label pair, pair head's own action; val states with a label: {s['n']})")
+    print(f % ("clean (real shot, pocket, no scratch)", "1 left", "2 left", "3 left", "all"))
+    names = {"M": "M  model angle + model speed", "Ls": "Ls model angle + label speed", "La": "La label angle + model speed",
+             "L": "L  label angle + label speed (teacher action)"}
+    for k, name in names.items():
+        c = s["clean"][k]
+        print(f % (name, *[f"{100 * c[b]:.1f}%" for b in ("1", "2", "3", "all")]))
+    c = s["clean"]
+    print(f"  r_a = La − M = {100 * (c['La']['all'] - c['M']['all']):+.1f}%p   r_s = Ls − M = {100 * (c['Ls']['all'] - c['M']['all']):+.1f}%p   "
+          f"L − M = {100 * (c['L']['all'] - c['M']['all']):+.1f}%p   → judgement row {s['row']}")
+    print(f"  simulator-picked best over a grid around the model's action (subsample of {s['grid_n']} states):")
+    g = s["grid"]
+    print(f"    model action as is {100 * g['M']:.1f}% | best of 7 speeds {100 * g['speed7']:.1f}% | best of 31 angles {100 * g['angle31']:.1f}% | "
+          f"best of 31 angles × 7 speeds {100 * g['both217']:.1f}% | made-head verify+refine (same label pair) {100 * g['verify_refine_label_pair']:.1f}%")
+    print(f"    (best of 217) − (verify+refine) = {100 * (g['both217'] - g['verify_refine_label_pair']):+.1f}%p")
+
+
+def print_visited(label: str, s: dict) -> None:
+    g, v = s["games"], s["val"]
+    print(f"\n===== {label} policy-visited states vs teacher val states (clean = pocket, no scratch; verify+refine 31x7)")
+    f = "%-46s %9s %9s %9s %9s"
+    print(f % ("", "1 left", "2 left", "3 left", "all"))
+    gall = sum(g["by_balls"][b]["rate"] * g["by_balls"][b]["n"] for b in (1, 2, 3) if g["by_balls"][b]["n"]) / sum(g["by_balls"][b]["n"] for b in (1, 2, 3))
+    print(f % ("games: clean rate", *[f"{100 * g['by_balls'][b]['rate']:.1f}%" for b in (1, 2, 3)], f"{100 * gall:.1f}%"))
+    print(f % ("games: shots", *[str(g["by_balls"][b]["n"]) for b in (1, 2, 3)], str(sum(g["by_balls"][b]["n"] for b in (1, 2, 3)))))
+    print(f % ("games: share of shots", *[f"{100 * g['mix'][b]:.1f}%" for b in (1, 2, 3)], ""))
+    print(f % ("val (teacher states): clean rate", *[f"{100 * v['by_balls'][b]:.1f}%" for b in (1, 2, 3)], f"{100 * v['all']:.1f}%"))
+    print("  by how the previous shot ended (games):  " + " | ".join(f"{k} {100 * d['rate']:.1f}% (n {d['n']})" for k, d in g["by_prev"].items()))
+    print(f"  first shot + after hit {100 * g['normal']:.1f}%  vs  after miss/scratch {100 * g['after_fail']:.1f}% (n {g['n_after_fail']})")
+    print("  judgement rows that hold: " + (", ".join(k for k, x in s["flags"].items() if x) or "none"))
+
+
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser()
     p.add_argument("--runs", nargs="+", required=True, help='label=glob with {seed}, e.g. L4="logs/experiments/*_L4_m2w1_*_s{seed}_*"')
@@ -322,6 +532,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--n-scan", type=int, default=150, help="val states per seed for the scan")
     p.add_argument("--sample-states", type=int, default=600, help="val states per seed for the sampling test (0 = skip)")
     p.add_argument("--sample-draws", type=int, default=6)
+    p.add_argument("--parts", nargs="+", choices=["base", "oracle", "visited"], default=["base"],
+                   help="base = split + scan + sample; oracle = swap angle/speed for the label's; visited = games vs val states")
+    p.add_argument("--oracle-states", type=int, default=300, help="val states per seed for the grid oracle")
+    p.add_argument("--visited-games", type=int, default=500, help="games per seed")
     p.add_argument("--out", type=str, default=None)
     return p.parse_args()
 
@@ -335,7 +549,7 @@ def main() -> None:
     pm = pocket_index_map(env)
     result = {}
     for label, pat in dict(a.split("=", 1) for a in args.runs).items():
-        split, scan, sample = [], [], []
+        split, scan, sample, oracle, visited = [], [], [], [], []
         for sd in args.seeds:
             found = glob.glob(pat.format(seed=sd))
             if len(found) != 1:
@@ -344,13 +558,26 @@ def main() -> None:
             if not m.has_made2 or m.made2_geom:
                 raise SystemExit(f"{label}: needs a made2 head without the geometry input")
             v = val_setup(raw, sd)
-            split.append(measure_split(m, v, env, pm))
-            scan.append(measure_scan(m, v, sd, env, pm, args.n_scan))
-            if args.sample_states:
-                sample.append(measure_sample(m, v, sd, env, pm, args.sample_states, args.sample_draws))
+            if "base" in args.parts:
+                split.append(measure_split(m, v, env, pm))
+                scan.append(measure_scan(m, v, sd, env, pm, args.n_scan))
+                if args.sample_states:
+                    sample.append(measure_sample(m, v, sd, env, pm, args.sample_states, args.sample_draws))
+            if "oracle" in args.parts:
+                oracle.append(measure_oracle(m, v, sd, env, pm, args.oracle_states))
+            if "visited" in args.parts:
+                visited.append(measure_visited(m, v, env, pm, args.visited_games))
             print(f"{label} seed {sd} done", flush=True)
-        result[label] = summarize(label, split, scan, sample or None)
-        print_summary(label, result[label])
+        result[label] = {}
+        if split:
+            result[label] = summarize(label, split, scan, sample or None)
+            print_summary(label, result[label])
+        if oracle:
+            result[label]["oracle"] = summarize_oracle(oracle)
+            print_oracle(label, result[label]["oracle"])
+        if visited:
+            result[label]["visited"] = summarize_visited(visited)
+            print_visited(label, result[label]["visited"])
     if args.out:
         os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
         json.dump(result, open(args.out, "w"), indent=2)
