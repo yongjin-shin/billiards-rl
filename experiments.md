@@ -3857,3 +3857,24 @@ SAC(7.89) 수준으로 악화. 세 항목(2·3·4)을 한꺼번에 바꿔서 어
 지표: shots/game, success, oracle angle err / within 0.2°, top-1 made 가능 비율.
 
 **판단 기준**: control이 baseline A seed 0(4.32)과 seed std(~0.3) 안이면 구현 검증 완료. 하나만 켠 run 중 oracle 각도 오차가 0.19° → 0.5° 수준으로 커지는 것이 원인. seed 1개라 shots 차이 0.5 미만은 효과로 읽지 않는다.
+
+**결과 (2026-10-11, seed 0, policy alone 500 games): 원인은 ③ regression target(`good_made`)이다.**
+
+| run | ① 구조 | ② sel target | ③ reg target | ④ scratch | shots/game | success | oracle angle err | oracle within 0.2° | top-1 made 가능 |
+|---|---|---|---|---|---|---|---|---|---|
+| control | global | label | angle | – | 4.37 | 68.0% | 0.186° | 52.9% | 91.8% |
+| ①만 | **factorized** | label | angle | – | 4.27 | 69.9% | 0.176° | 54.6% | 91.5% |
+| ②만 | global | **made** | angle | – | 4.50 | 66.1% | 0.194° | 50.9% | 91.3% |
+| ③만 | global | label | **made** | – | **7.63** | 38.8% | **0.555°** | 23.1% | 91.1% |
+| ④만 | global | label | angle | **on** | 4.09 | 72.6% | 0.162° | 57.9% | 92.0% |
+| 전부 on | factorized | made | made | on | 7.96 | 37.3% | 0.571° | 23.0% | 90.0% |
+
+- control 4.37은 baseline A seed 0(4.32)과 같다 → modular 구현 검증 완료 (label 없는 1.6% row를 WTA 대신 제외한 차이는 영향 없음).
+- **③만 켜도 전부 켠 것과 같은 수준으로 망가진다** (7.63 vs 7.96, oracle 각도 오차 0.19° → 0.56°). ①②④는 하나씩 켜면 baseline과 seed std(~0.3) 안. ④의 4.09는 seed 1개라 개선으로 읽지 않는다.
+- selection(top-1 made 가능 비율)은 6개 run 모두 90~92%로 같다 → selection 변경(①②)은 무해하다.
+
+**③이 왜 망가뜨리나 (데이터 확인, 원인 가설)**: regression target을 (candidate, pair) 단위로 세면 angle matching 30,462개, `good_made` 30,819개, 겹치는 것 28,582개(93%). 앞의 "98% 일치"는 candidate 0만 본 수치였다. `good_made`에만 있는 target 2,237개 중 **61%는 다른 공의 pair**다: 공 A를 겨눈 action이 결과적으로 공 B를 넣은 경우(combination/kiss shot). ③은 공 B의 pair head에 "공 A를 겨누는 action"을 regression시킨다. pair head는 공 B와 포켓의 geometry로 action을 내는 구조라 이 target을 맞출 수 없고, squared error(0.2° = 1)가 커서 loss를 지배한다. 학습 중 train loss도 ③ run만 ~3,000~4,000으로 다른 run(200~700)의 5~10배였다.
+
+**다음**:
+- ③을 고치려면 `good_made` target에서 **겨눈 공과 다른 공의 pair를 빼거나**(made ∩ 같은 공), angle matching을 유지하고 made는 selection/verifier에만 쓴다. 위 가설은 "made ∩ 같은 공" run이 control 수준으로 돌아오면 검증된다.
+- ①②④는 무해하므로, ③을 빼고 ①②④를 켠 조합을 seed 0/1/2로 돌려 baseline A(4.51 ± 0.23)와 비교. ④(4.09)가 실제 개선인지도 여기서 3 seed로 확인.
