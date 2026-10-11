@@ -3811,3 +3811,49 @@ SAC(7.89) 수준으로 악화. 세 항목(2·3·4)을 한꺼번에 바꿔서 어
 - 그것만으로는 설명이 안 된다: label 있는 pair를 고른 경우에도 clean pocket이 46%(train states 49.7%) — baseline의 66%보다 낮고 train에서도 낮다 → action regression 자체가 부실해졌다. 의심: selection 항목이 3개(ball CE, pocket CE, scratch BCE)로 늘어 각 ×10으로 regression을 압도(soft target의 irreducible entropy도 gradient를 유지). 미검증.
 - scratch penalty λ=3은 효과 없음(7.76 → 7.80): chosen pair 선택이 이미 부정확해서 scratch head를 분리해 볼 단계가 아니다.
 - 다음: (a) `--sel-weight` 1, 3으로 loss 균형 검증, (b) 모든 feasible pair에 coarse-stage action target 부여(`pair_action`)로 정렬 문제 해결, (c) 항목별 ablation(3만: global softmax + outcome-grounded pair).
+
+**sel_weight 검증 (2026-10-10, factorized + outcome-grounded + scratch, seed 0/1/2, λ=0)**:
+
+| sel_weight | shots/game | success |
+|---|---|---|
+| 10 (위 첫 시도) | 7.98 / 7.36 / 7.94 → 7.76 ± 0.35 | 38.3% |
+| 3 | 8.00 / 7.28 / 7.74 → 7.67 ± 0.36 | 38.7% |
+| 1 | 8.80 / 7.13 / 7.39 → 7.77 ± 0.90 | 38.2% |
+
+- 셋 다 seed std 안 → "selection 항목 ×10이 regression을 압도" 가설은 기각.
+
+**reg-only ablation (`--fact-terms reg`, seed 0): 무효 run.** 19.8 shots, clear 75%. selection head가 학습되지 않아 inference가 random init head로 pair를 고른다(chosen pair 중 label 있는 pair 15%, baseline 85%). `--select within`도 이 random selection을 거친 지표라 checkpoint가 epoch 28에서 골라졌다. regression 품질도 분리해서 볼 수 없다 → reg only + `--select within` 조합은 쓰지 않는다.
+
+**Oracle-selection 진단 (seed 0, val 1,697 states)**: selection을 빼고 regression만 보려고, label action이 실제로 made한 (candidate k, pair p)마다 pair p head의 action을 label k와 비교했다.
+
+| model | angle err median | within 0.2° | speed err median | top-1 pair가 made 가능 (`pair_made`>0) |
+|---|---|---|---|---|
+| baseline A (pairs, nowrap) | **0.19°** | **50.7%** | 0.52 | 91.5% |
+| factorized sw3 | 0.52° | 24.7% | 0.54 | 89.6% |
+| factorized sw10 | 0.64° | 20.6% | 0.59 | 89.6% |
+| factorized sw1 | 0.83° | 16.7% | 0.70 | 87.1% |
+
+- selection은 거의 같다(made 가능한 pair를 고른 비율 90% vs 92%). **악화의 주원인은 regression**: 정답 pair를 알려줘도 각도 오차가 2.5~4배. train(첫 3,000 states)도 같은 수치라 overfitting이 아니라 underfitting.
+- 따라서 앞의 진단("chosen pair 22.5%가 label 없음")은 부차적이다.
+- regression target 차이로는 설명이 안 된다: 한 pair가 두 candidate의 target이 되는 경우 2.5%, row당 label candidate ≤2가 99%, robust label에서 angle matching과 `good_made`가 98% 일치 → target이 사실상 같다. 남은 차이는 loss/head 구조.
+
+### 변경점 하나씩 켜기: factorized 악화 원인 분리 (2026-10-11 계획)
+
+**왜**: factorized 실험은 baseline A에서 4가지를 한꺼번에 바꿨고(아래 ①~④), 그 결과 regression이 망가졌다. 어느 변경이 원인인지 하나씩 켜서 확인한다.
+
+| | baseline A | 변경 |
+|---|---|---|
+| ① selection 구조 | 18 pair global softmax | ball head → per-ball pocket softmax (`--selection factorized`) |
+| ② selection target | label pair (candidate별 1개) | `pair_made` 비율 (label 없는 feasible pair 포함) |
+| ③ regression target pair | angle matching (`good_pairs`) | 실제 made pair (`good_made`) |
+| ④ scratch head | 없음 | scratch BCE (×sel_weight) |
+
+**구현**: `PairGNNPolicy`에 4개 스위치를 따로 켤 수 있는 modular loss (`--sel-target label|made`, `--reg-target angle|made`, `--scratch-head`, ①은 기존 `--selection`).
+- selection target은 18-pair 분포 t로 통일: label = labelled candidate의 pair 개수 비율(baseline의 CE와 동일), made = `pair_made`(live pair) 비율. factorized 구조에서는 ball target = t의 ball marginal, pocket target = ball별로 정규화한 t. (기존 factorized 코드의 ball target ∝ max_j pair_made와 다름 → 전부 켠 run도 다시 돌린다.)
+- target이 없는 row는 해당 항목에서 제외 (baseline A는 label 없는 1.6% row를 WTA로 학습 — 차이는 control run으로 확인).
+- val metric에 oracle 각도 오차(위 진단)와 top-1 pair made 가능 비율을 추가.
+
+**실험**: robust label, GNN, relative obs, raw angle loss, lr 1e-3 cosine, 500 epochs, sel_weight 10, `--select within`, **seed 0 고정**. 6 runs: control(전부 off = baseline 재현), ①만, ②만, ③만, ④만, 전부 on.
+지표: shots/game, success, oracle angle err / within 0.2°, top-1 made 가능 비율.
+
+**판단 기준**: control이 baseline A seed 0(4.32)과 seed std(~0.3) 안이면 구현 검증 완료. 하나만 켠 run 중 oracle 각도 오차가 0.19° → 0.5° 수준으로 커지는 것이 원인. seed 1개라 shots 차이 0.5 미만은 효과로 읽지 않는다.
