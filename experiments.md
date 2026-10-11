@@ -4340,3 +4340,11 @@ select 대비 개선(seed별 0 / 1 / 2): verify+refine 1개 +3.6%p(+3.7, +4.0, +
 - **게임에서 3.46 shots/game**(baseline 4.14, g 없는 2단계 3.90). teacher(robust 2.98, geom 2.24)에 가까워졌다.
 - 해석: "head가 창 위치를 모른다"가 병목이었고, 위치를 알려주는 정보(순수 기하 조준각과의 차이)만 주면 head는 창 폭·경계를 잘 학습한다. 즉 문제는 head 용량이 아니라 **`e_ij`가 각도를 0.1° 정밀도로 담지 못하는 것**(= 앞의 pair head 각도 오차와 같은 뿌리).
 - 주의: g는 ghost-ball 기하 공식으로 계산한 값이다. 진단용이라 정책에 넣지 않기로 했던 값을 쓴 결과이므로 "최종 성능"으로 보면 안 되고, 정밀도 병목이 해결되면 어디까지 갈 수 있는지의 상한에 가깝다. 다음 질문: 공식 없이(학습으로) 같은 정밀도를 얻을 수 있는가 — encoder 용량 확대, 좌표의 주파수(sin/cos) 표현.
+
+### encoder 용량 키우기 (2026-10-11 계획)
+
+**질문**: made head 진단에서 병목이 `e_ij`가 각도를 0.1° 정밀도로 담지 못하는 것으로 확인됐다(기하 입력 g를 주면 argmax 창 안 81% → 95%). 공식 없이 encoder 용량만 키워도 이 정밀도가 오르는가.
+**변경**: (a) 폭: `--gnn-hidden 256`(기존 128), (b) 깊이: encoder MLP(ball message / ball / pair)의 hidden layer를 2 → 4(`--gnn-layers 4`). head는 그대로. 둘을 따로 본다(함께는 결과를 보고).
+**실험**: made2 head 포함 설정(`--pair-supervision --no-wta-fallback --made2-head`), seed 0/1/2. control은 이전 `m2w1` run(같은 설정, hidden 128, layers 2).
+**지표**: ① pair head 각도 오차(공 개수별 중앙값·within 0.2°) ② made head: label ±0.6° 스캔 AUC·argmax가 창 안 비율 ③ 실제 clean 성공률(select / verify+refine, 공 개수별) ④ 정책 단독 500 games shots/game.
+**판단**: 각도 오차가 0.15°에서 의미 있게 줄고 스캔 argmax가 81%에서 오르면 용량이 병목(→ 더 키움). 거의 안 변하면 용량이 아니라 표현(sin/cos 좌표)이나 학습 쪽.
