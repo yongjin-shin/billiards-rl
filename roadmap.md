@@ -474,6 +474,61 @@ SAC 7.89, 엔트로피 낮춘 SAC 7.39, teacher 자체: geom 2.24 / random searc
 policy의 shot 실패 분해(robust+pairs, val): chosen pair miss ~24%, chosen pair made지만 scratch 8%, 다른 pair를 clean하게 넣음 1~4%.
 선택한 pair와 action의 일관성(clean pocket 중 chosen pair였던 비율)은 94~98%.
 
+### 현재 상태 (2026-10-12) — 결과 사다리와 병목
+
+정책 단독 500 games, seed 3개 평균(별도 표기 없으면 GNN, relative obs, robust label, pair supervision). 상세와 근거는 experiments.md의 2026-10-11 항목들.
+
+| 단계 | shots/game | success | 무엇을 바꿨나 |
+|---|---|---|---|
+| vanilla SAC (참고) | 7.89 | 38.7% | – |
+| BC baseline A | 4.51 ± 0.23 | 66.2% | label pair 없는 1.37% row를 WTA loss로 학습(그 row가 train loss의 66%를 차지) |
+| **BC 새 baseline** (`--no-wta-fallback`) | **4.14 ± 0.14** | 71.9% | 그 row를 loss에서 제외 |
+| + made head(look-ahead 2단계) select | 4.11 ± 0.20 | 72.5% | action을 받는 made head를 학습(칠 때는 안 씀) → 해롭지 않음 |
+| + verify + refine(각도 31 × 절대 speed 7) | **3.90 ± 0.21** | 76.7% | made head로 pair 재선택 + action 후보 평가(시뮬레이터 없이) |
+| (진단 전용) + 기하 조준각 차이 입력 | 3.46 ± 0.12 | 86.4% | made head에 ghost-ball 조준각과의 차이를 입력 — **상한 참고, 최종 모델이 아님** |
+| teacher (robust / geom) | 2.98 / 2.24 | – | – |
+
+**병목 = `e_ij`(pair embedding)가 각도를 0.1° 정밀도로 담지 못하는 것.** 근거: (1) 남은 공 2개 state는 성공 창 폭이 같은데(0.96° vs 0.92°) 모델 각도 오차가 2배(0.22° vs 0.12°); (2) label은 순수 기하 조준각의 ±0.05° 안이라 깨끗하다; (3) made head는 train과 val 정확도가 같아(AUC 0.831 vs 0.846) 다양성이 아니라 해상도 문제; (4) head에 기하 조준각 차이를 직접 주면 창 위치 적중이 81% → 95%, 2개 state 성공이 66.8% → 76.8%.
+
+**기각된 가설** (전부 실험으로): 일반화/데이터 양(공 2개 데이터 3.7배 추가에도 불변), 포켓된 공 slot 표현, label 불일치·불규칙(flip), 방해 공, 창 폭/난이도, speed hedging(모델이 두 모드 사이로 평균을 내지만 성공에 영향 없음), selection 구조/target(①②), scratch head(④), made head 보조 target(⑤), 이웃 message 간섭(`--geom-angle`), 다른 공의 target(③ `good_made`: combination shot이 pair head 학습을 망가뜨림), scatter 구제(타겟이 아닌 공이 들어가는 비율 ~1%), refine 후보 수/각도 범위(포화).
+
+**열린 결정**: 학습만으로 정밀도를 못 올리면 ghost-ball 기하 조준각 차이를 made head(verifier)에만 입력으로 허용할지. "탐색 + 학습" 방침(bitter lesson)과 충돌하므로 사용자가 정한다 — 용량·표현을 시도한 뒤에 결정.
+
+### 다음 방향 (판단 트리)
+
+결과별 판단 세부표는 experiments.md "encoder 용량 실험 — 결과별 판단표"(기준점과 정정 포함)에 있다.
+
+| 지금 | 결과 | 다음 |
+|---|---|---|
+| encoder 용량(폭 256 / 깊이 4) 실험 | 정밀도 ↑(argmax ≥ 88%, 각도 오차 ≤ 0.095°) | 폭+깊이 결합, 포화점 탐색 → 학습만으로 상한에 근접하면 기하 입력 불필요 |
+| | 소폭 ↑ | sin/cos(Fourier) 좌표 표현을 같은 지표로 시험 |
+| | 변화 없음 | 학습 쪽(긴 학습, lr, EMA/마지막 epoch checkpoint = #9, loss 스케일 `--angle-scale-deg` 0.1) |
+| | train ↑ val ↓ | 데이터/정규화 |
+| argmax ≥ 90% 달성 후 | – | gradient로 action을 연속 공간에서 조정(`∇_a P(made)`, #6의 남은 부분) |
+| 용량·표현·학습을 다 해도 argmax < 90% | – | **사용자 결정**: made head에만 기하 입력 허용 vs 학습만 계속 |
+| 정밀도 병목 해결 후에도 게임(3.90)과 val 격차가 남음 | – | DAgger(#10) |
+
+### 진행 상태 (2026-10-12, 아래 TODO 표 번호 기준)
+
+| # | 상태 |
+|---|---|
+| 1 | **완료.** 새 baseline은 `--no-wta-fallback` 4.14 ± 0.14 (baseline A 4.51은 fallback 때문에 높았음) |
+| 2+3+4 | **완료, 효과 없음.** ①구조·②target·④scratch는 control(4.08 ± 0.28)과 동일, ③ `good_made` target은 combination shot 때문에 7.63으로 악화(같은 공만 남기면 복구). 상세는 experiments.md |
+| 5 | **완료.** action-conditional made head(`--made2-head`), verify로 선택 재정렬 |
+| 6 | **부분 완료.** sims에 (ball, pocket) identity를 복원(`sim_identity.py`)하고 후보 평가 방식 refine까지 완료(각도는 포화, speed는 절대 격자가 최선). **∇_a P(made)는 head 정밀도(argmax ≥ 90%)가 오른 뒤로 보류** |
+| 9 | 아직. 용량 실험에서 학습 쪽 시도가 필요해지면 먼저 한다 |
+| 10 | 보류(위 판단 트리) |
+
+**신규 TODO** (2026-10-12)
+
+| # | 항목 | 이유 | 비용 | 의존 |
+|---|---|---|---|---|
+| 13 | **encoder 용량**: 폭 256 / 깊이 4, 이어서 결합 | 정밀도 병목이 용량인지 | BC ~1시간(병렬 6 runs) | – |
+| 14 | **좌표 sin/cos(Fourier) 표현** | 작은 각도 차이를 더 잘 구분하도록 | BC | 13 결과에 따라 |
+| 15 | **gradient refine** `∇_a P(made)` | 후보 격자 없이 연속 탐색. 단 head 기울기가 정확해야 의미 | 낮음(추론) | 13/14로 argmax ≥ 90% |
+| 16 | **게임 vs val 격차 확인**: made head 이득이 val(+2.8%p)보다 게임(+0.8%p)에서 작은 이유 | policy가 가는 state는 teacher state와 분포가 다름 | 낮음 | – |
+| 17 | **2개 state 약점의 구조적 원인** | 용량으로 안 풀리면 입력 분포·최적화 쪽(남은 공 2개 state만 각도 오차 2배) | – | 13 결과에 따라 |
+
 ### TODO (우선순위순)
 
 | # | 항목 | 이유 | 비용 | 의존 |

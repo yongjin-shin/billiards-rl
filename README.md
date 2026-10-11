@@ -8,8 +8,9 @@ Reinforcement learning on a physics-accurate billiards simulator ([pooltool](htt
 
 | | |
 |---|---|
-| **Current status** | Exp-16 follow-up (2026-10-09): clear-speed task + search-planner reference; behaviour cloning from the planner in progress (`feature/exp16-imitation-teacher`) |
+| **Current status** | Exp-16 follow-up (2026-10-12): clear-speed task + search-planner reference; behaviour cloning (GNN) from the planner reaches 3.90 shots/game with a learned made-head verifier/refiner (`feature/exp16-imitation-teacher`); the bottleneck is the pair embedding's angle precision — see roadmap.md |
 | **Next experiment** | Search + learning (expert iteration): imitate the planner, then let the policy propose search candidates — see roadmap.md |
+| **Behaviour cloning, policy alone (3 seeds)** | shots to clear 3 balls: BC GNN 4.14 ± 0.14 → + made head verify/refine 3.90 ± 0.21 (diagnostic upper reference with an analytic aim input: 3.46); teacher 2.98 — details in experiments.md |
 | **Clear-speed task (seed 0)** | shots to clear 3 balls: vanilla SAC 7.89 / SAC low-entropy 7.39 / random search 2.50 / geometry search planner 2.24 |
 | **Exp-16 vanilla** | Phase 1: pocket 62.2% ≈ SAC 63.6% (p=0.49) / Phase 0: pocket 56.9% ≈ SAC 55.3% (p=0.62) |
 | **Exp-16 WM critic (4 seeds)** | pocket vanilla 62.95% / traj 63.47% / rssm 62.19% — no significant difference (ANOVA p=0.58) |
