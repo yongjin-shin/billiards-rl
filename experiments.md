@@ -4126,3 +4126,19 @@ SAC(7.89) 수준으로 악화. 세 항목(2·3·4)을 한꺼번에 바꿔서 어
 **3. hedging이 성공을 해치는가**: 정책 선택 action의 실제 clean 성공률 — speed ≤1.4 69.9%, 1.4~2.6 71.1%. 해치지 않는다(speed 창이 넓음). 2개 state만: ≤1.4 50.4%, 1.4~2.6 61.3%(비율 32 / 68%).
 
 **결론**: label flip(speed 두 모드)은 실제로 있고 모델은 평균으로 hedge하지만, 모든 공 개수에서 같고 성공률에도 영향이 없어 **2개 state의 약점을 설명하지 못한다**. 같은 speed 모드로 맞춰도 2개 state의 angle 정확도는 낮다(label low·모델 low일 때 within 0.2°: 1개 84.4%, 2개 47.5%, 3개 66.3%). 미확인: 2개 state에서 angle label 자체가 flip하는지(같은 geometry의 비슷한 state끼리 label angle이 갈리는지).
+
+### 남은 공 2개 실패 샷 분류와 시각화 (2026-10-11, 학습 없음)
+
+control 모델(`mod-gla`) seed 0/1/2, val 2개 state 829개에서 policy가 실제로 쳐서 실패한 350건(42.2%)을 분류:
+
+| 실패 유형 | 건수 | 비율 |
+|---|---|---|
+| label에 없는 pair를 골랐다 | 111 | 32% |
+| label pair를 골랐고 각도 오차 ≥ 0.5° | 113 | 32% |
+| label pair를 골랐고 scratch | 56 | 16% |
+| label pair를 골랐고 각도 오차 0.2~0.5° | 53 | 15% |
+| label pair, 각도 < 0.2°(speed 등) | 17 | 5% |
+
+- policy가 **label pair를 고른 684건은 65%, label 밖 pair를 고른 145건은 23%만 성공**. label 밖 pair 실패 111건 중 coarse scan에서 그 pair가 한 번이라도 들어간 것은 54%(평균 성공 비율 0.14), 전혀 안 된 것이 46% → 가능한 pair를 label이 빠뜨려서가 아니라 주로 **되기 어렵거나 안 되는 pair를 고른 것**.
+- label pair를 골라 성공한 샷의 각도 오차 중앙값 0.16°, 실패한 샷(scratch 제외)은 0.65°.
+- 그림(`scratchpad/plots/fail_angle.png`, `fail_pair.png`, `ok.png`; policy 빨강 실선 / label 청록 점선): 각도 실패는 대부분 (a) cue 공이 겨냥한 공에 매우 가깝거나 (b) 겨냥한 공이 포켓에 매우 가까운 샷이고, 두 선이 거의 겹쳐 보여도 0.5~3°의 차이가 실패로 이어진다. label 밖 pair 실패는 label과 완전히 다른 공/포켓을 고른 경우이고 3건에 1건은 scratch.
