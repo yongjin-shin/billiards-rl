@@ -3994,3 +3994,28 @@ SAC(7.89) 수준으로 악화. 세 항목(2·3·4)을 한꺼번에 바꿔서 어
 - **왜 1.37%가 이렇게 큰가**: label pair가 없는 230개 state는 특이하다 — `good_actions`가 많고(최대 80개 이상, planner fallback이 후보를 여럿 저장), teacher action이 backward shot(|angle| > 150°)인 비율 10%(labelled 0.7%). 학습된 old-code 모델(seed 0)에서 이 row의 평균 loss는 2,944로 labelled row(22)의 ~130배 → **train 1.4% row가 전체 train loss의 66%**를 차지한다. raw angle loss라 큰 오차가 그대로 gradient를 지배하고, WTA target(가장 가까운 head)도 매 step 바뀐다.
 - **결정**: baseline을 **fallback 없는 설정(4.14 ± 0.14 / new-code control 4.08 ± 0.28)**으로 갱신. 이후 비교는 이 baseline과 같은 코드로 한다.
 - 함께 의심할 것: no-label row뿐 아니라 labelled row 중 backward shot 등 loss가 큰 소수 row가 여전히 gradient를 지배하는지 (raw loss 문제, roadmap 1b/#8과 연결).
+
+### 데이터 조각별 loss / 정확도 분석 (2026-10-11, 학습 없음)
+
+**왜**: WTA fallback을 끈 뒤에도 소수 row가 loss를 지배하는지, 어떤 state에서 regression이 부정확한지 확인. 질문 "angle이 speed보다 절대값이 작으니 loss signal을 덜 받는 것 아닌가?"도 같이 본다.
+
+**방법**: 새 baseline(old code + `--no-wta-fallback`, seed 0/1/2 모델)에서 labelled row마다 pair loss(가중 squared error, angle 0.2° = 1, speed 0.5 m/s = 1)를 angle/speed로 나눠 계산. train 44,565 rows(3 seed 합침)로 loss 비율, val 4,989 rows로 정확도(candidate 0의 labelled pair 출력 vs label, 각도 오차). 조각은 candidate 0의 pair 기준. script: scratchpad `slice_loss.py`(저장소에 넣지 않음).
+
+**angle vs speed**: loss는 이미 dim별 정밀도 단위로 정규화돼 있어서(`dim_weights`) 절대값을 비교하지 않는다. raw 단위로 환산하면 angle 가중치가 speed보다 ~120배 크다. 그런데도 **train loss의 59%가 speed, 41%가 angle** — 지금 scale에서는 오히려 speed 오차가 loss를 더 차지한다. scale을 바꾼 실험은 MLP 시절 한 번뿐(raw [-1,1] 단위 vs 정규화, 결과 거의 같음 → "병목 아님")이고, GNN + pair supervision 이후 92개 run은 전부 `a0.2_v0.5`. 지금은 angle 정밀도가 병목이라 다시 볼 가치가 있다.
+
+**소수 row 지배?**: 아니다. 상위 0.1% / 1% / 5% / 20% row가 loss의 5.6% / 14.9% / 33.0% / 67.8% — 꼬리가 있지만 no-label row(1.4%가 66%)만큼 극단적이지 않다. backward shot은 데이터 0.7%에 loss 3.8%, 정확도는 매우 낮다(within 0.2° 17.5%, n_val 40) — 비중이 작아 전체에 큰 영향은 없음.
+
+| 조각 | 데이터 | train loss | val angle err median | val within 0.2° |
+|---|---|---|---|---|
+| 전체 | 100% | 100% | ~0.13° | ~67% |
+| **남은 공 2개** | 16.4% | **27.0%** | **0.230°** | **46.2%** |
+| 남은 공 1개 / 3개 | 38.1% / 45.4% | 30.1% / 42.9% | 0.112° / 0.125° | 75.1% / 68.4% |
+| cue–공 거리 < 0.3 | 17.8% | 22.9% | 0.181° | 55.4% |
+| 공–포켓 거리 < 0.3 | 27.2% | 32.4% | 0.171° | 54.7% |
+| label speed ≥ 2 m/s | 23.6% | 39.2% | 0.145° | 61.1% |
+| cut angle 0–20° → 60°+ | 45% → 4% | 비례 | 0.123° → 0.154° | 69.6% → 58.7% |
+| corner / side pocket | 57% / 43% | 비례 | 0.128° / 0.129° | 68.2% / 66.0% |
+
+- **가장 큰 이상: 남은 공 2개 state.** 정확도가 46%로 1개(75%), 3개(68%)보다 크게 낮고 loss를 비중보다 많이 차지한다. 공 개수가 단조적으로 어려워지는 게 아니라 2개만 나쁘다 → 난이도보다 **표현 문제**(포켓된 공 1개가 섞인 입력의 처리) 의심. 데이터 분포도 이상하다(3개 45%, 2개 16%, 1개 38%).
+- 가까운 거리(cue–공, 공–포켓 < 0.3)에서 부정확. cut angle, 포켓 종류는 영향이 작다.
+- 다음 후보: (a) 남은 공 2개 원인 조사 — 포켓된 공의 입력값(rx, ry)이 무엇이고 encoder가 어떻게 받는지, 2개 state가 어떤 상황인지, (b) loss scale sweep(`--angle-scale-deg` 0.1 등 angle 비중 ↑, 같은 코드 control 포함 3 seed).
