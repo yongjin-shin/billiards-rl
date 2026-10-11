@@ -501,3 +501,11 @@ class TestMade2Head:
         m.infer = "refine"
         out = m.predict_unit(rel)
         assert torch.allclose(out[:, 0], target, atol=1e-6)
+
+    def test_checkpoints_with_or_without_made2_scale_load(self):
+        m, _ = self._m()
+        sd = m.state_dict()
+        assert "made2_scale" not in sd
+        PairGNNPolicy(hidden=16, made2_head=True).load_state_dict({**sd, "made2_scale": torch.ones(2)})
+        old = {k: v for k, v in PairGNNPolicy(hidden=16).state_dict().items()}
+        PairGNNPolicy(hidden=16).load_state_dict(old)

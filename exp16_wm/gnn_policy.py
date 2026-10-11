@@ -91,7 +91,8 @@ class PairGNNPolicy(nn.Module):
         # made2 input: action offset from the pair's proposal in precision units (0.2° = 1, 0.5 m/s = 1) —
         # in [-1, 1] units a 0.1° window is 0.0006 wide, too fine for an MLP to resolve
         half = (ACT_HIGH - ACT_LOW) / 2.0
-        self.register_buffer("made2_scale", torch.tensor([np.degrees(half[0]) / 0.2, half[1] / 0.5], dtype=torch.float32))
+        self.register_buffer("made2_scale", torch.tensor([np.degrees(half[0]) / 0.2, half[1] / 0.5], dtype=torch.float32),
+                             persistent=False)
 
     # ── encoder ───────────────────────────────
 
@@ -422,6 +423,11 @@ class PairGNNPolicy(nn.Module):
         x = torch.as_tensor(np.atleast_2d(rel_obs), dtype=torch.float32)
         a = (self.predict_unit(x) * self.act_scale + self.act_bias).numpy()
         return a[0] if np.asarray(rel_obs).ndim == 1 else a
+
+    def load_state_dict(self, state_dict, strict: bool = True, assign: bool = False):
+        """Checkpoints from the few runs that stored the (constant) made2_scale buffer load too."""
+        state_dict = {k: v for k, v in state_dict.items() if k != "made2_scale"}
+        return super().load_state_dict(state_dict, strict=strict, assign=assign)
 
     def save(self, path: str) -> None:
         torch.save({"gnn": self.state_dict(), "factorized": self.factorized, "has_scratch": self.has_scratch,
