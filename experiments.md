@@ -4470,3 +4470,5 @@ select 대비 개선(seed별 0 / 1 / 2): verify+refine 1개 +3.6%p(+3.7, +4.0, +
 - 비용도 기록한다: 파라미터 수와 epoch당 시간(깊이 4: 5.6초/epoch, 6 runs 병렬).
 
 **control 동일성 확인** (진행 중): 현재 코드로 control(`m2w1` 설정)을 3 seed 다시 돌려(`logs/experiments_recheck`) 이전 control과 `results.json`의 eval/val 수치가 같은지 본다. 같으면 위 비교는 같은 코드 기준, 다르면 모든 비교의 control을 재실행한 값으로 바꾼다.
+
+**control 동일성 확인 결과 (2026-10-12)**: 현재 코드로 control(`--pair-supervision --no-wta-fallback --made2-head`)을 seed 0/1/2 다시 돌려(`logs/experiments_recheck`) 이전 `m2w1`과 비교 — eval(shots/game, success), val(oracle 각도 오차, made2 AUC), best epoch, best val loss **전부 소수점까지 동일**(seed 0: 4.284 / 69.4678% / 0.167174° / 0.957115 / epoch 430 / 2074.09). 깊이·폭·기하 입력 옵션을 추가한 뒤에도 기본 설정의 동작이 변하지 않았으므로 control(`m2w1`)은 현재 코드와 같은 코드 기준이다. 깊이 4·폭 256·깊이 6/8과의 비교는 이 control을 그대로 쓴다.
