@@ -606,3 +606,23 @@ class TestMade2Geom:
         for mode in ("select", "verify", "refine", "verify_refine"):
             m.infer = mode
             assert m.predict_unit(rel).shape == (3, 2)
+
+
+class TestEncoderCapacity:
+    def test_default_depth_keeps_the_original_parameter_names(self):
+        from exp16_wm.gnn_policy import _mlp
+        assert [k for k in _mlp(4, 8, 8).state_dict()] == ["0.weight", "0.bias", "2.weight", "2.bias", "4.weight", "4.bias"]
+        torch.manual_seed(0); a = PairGNNPolicy(hidden=16)
+        torch.manual_seed(0); b = PairGNNPolicy(hidden=16, enc_layers=2)
+        assert all(torch.equal(x, y) for x, y in zip(a.state_dict().values(), b.state_dict().values()))
+
+    def test_more_layers_means_more_parameters_and_still_runs(self):
+        n2 = sum(p.numel() for p in PairGNNPolicy(hidden=16, enc_layers=2).parameters())
+        deep = PairGNNPolicy(hidden=16, enc_layers=4)
+        n4 = sum(p.numel() for p in deep.parameters())
+        assert n4 == n2 + 3 * 2 * (16 * 16 + 16)             # +2 hidden layers in each of bb / ball / pair
+        rel = torch.as_tensor(np.stack([REL] * 3))
+        means, logits, valid = deep(rel)
+        assert means.shape == (3, N_PAIRS, 2) and torch.isfinite(means).all()
+        w = PairGNNPolicy(hidden=32)
+        assert w(rel)[0].shape == (3, N_PAIRS, 2)

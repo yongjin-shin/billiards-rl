@@ -492,6 +492,7 @@ def parse_args():
     p.add_argument("--threads",    type=int, default=2)
     p.add_argument("--model",      type=str, default="mlp", choices=["mlp", "gnn"])
     p.add_argument("--gnn-hidden", type=int, default=128)
+    p.add_argument("--gnn-layers", type=int, default=2, help="hidden layers of each encoder MLP (ball message / ball / pair)")
     p.add_argument("--wta-eps",    type=float, default=0.05)
     p.add_argument("--sel-weight", type=float, default=10.0)
     p.add_argument("--obs-transform", type=str, default="raw", choices=list(TRANSFORMS))
@@ -580,6 +581,8 @@ def main():
             (f"_mod-{args.selection[0]}{args.sel_target[0]}{dict(angle='a', made='m', made_same='M')[args.reg_target]}{'s' if args.scratch_head else ''}{'_mh' if args.made_head else ''}" if modular else
              ("_pairs" + ("-nofb" if args.no_wta_fallback else "") if args.pair_supervision else "") + ("_fact" + ("" if len(args.fact_terms) == 3 else "-" + "".join(t[0] for t in args.fact_terms))
                                                             if args.selection == "factorized" else "")) + \
+            ("" if args.gnn_hidden == 128 or args.model != "gnn" else f"_H{args.gnn_hidden}") + \
+            ("" if args.gnn_layers == 2 or args.model != "gnn" else f"_L{args.gnn_layers}") + \
             ("_geoang" if args.geom_angle else "") + extra_tag + (f"_m2w{args.made2_weight:g}" if args.made2_head else "") + ("geo" if args.made2_geom else "") + ("_wrap" if args.angle_wrap else "_nowrap")
     name = (f"exp16_bc_{teacher}_{args.loss}{h_tag}_a{args.angle_scale_deg:g}_v{args.speed_scale:g}"
             f"_s{args.seed}_{time.strftime('%Y-%m-%d@%H%M')}")
@@ -593,7 +596,8 @@ def main():
         agent = PairGNNPolicy(args.gnn_hidden, args.wta_eps, args.sel_weight,
                               factorized=args.selection == "factorized", scratch_head=args.scratch_head,
                               made_head=args.made_head, made2_head=args.made2_head,
-                              geom_angle=args.geom_angle, made2_geom=args.made2_geom)
+                              geom_angle=args.geom_angle, made2_geom=args.made2_geom,
+                              enc_layers=args.gnn_layers)
         agent.fact_terms = tuple(args.fact_terms)
         agent.wta_fallback = not args.no_wta_fallback
         if modular:

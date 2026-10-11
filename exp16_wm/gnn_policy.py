@@ -49,14 +49,19 @@ def action_diff(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
     return torch.stack([wrap_angle_unit(d[..., 0]) if ANGLE_WRAP else d[..., 0], d[..., 1]], dim=-1)
 
 
-def _mlp(i: int, h: int, o: int) -> nn.Sequential:
-    return nn.Sequential(nn.Linear(i, h), nn.ReLU(), nn.Linear(h, h), nn.ReLU(), nn.Linear(h, o))
+def _mlp(i: int, h: int, o: int, layers: int = 2) -> nn.Sequential:
+    """layers hidden layers (2 = the original structure, same state_dict keys)."""
+    mods: list[nn.Module] = [nn.Linear(i, h), nn.ReLU()]
+    for _ in range(layers - 1):
+        mods += [nn.Linear(h, h), nn.ReLU()]
+    return nn.Sequential(*mods, nn.Linear(h, o))
 
 
 class PairGNNPolicy(nn.Module):
     def __init__(self, hidden: int = 128, wta_eps: float = 0.05, sel_weight: float = 10.0,
                  factorized: bool = False, scratch_head: bool = False, made_head: bool = False,
-                 made2_head: bool = False, geom_angle: bool = False, made2_geom: bool = False):
+                 made2_head: bool = False, geom_angle: bool = False, made2_geom: bool = False,
+                 enc_layers: int = 2):
         super().__init__()
         H = hidden
         self.wta_eps, self.sel_weight = wta_eps, sel_weight
@@ -73,9 +78,10 @@ class PairGNNPolicy(nn.Module):
         self.refine_deg = (-0.3, -0.2, -0.1, -0.05, 0.0, 0.05, 0.1, 0.2, 0.3)
         self.refine_speed = (0.8, 1.0, 1.25)             # × the proposal's speed
         self.refine_speed_abs: tuple[float, ...] | None = None   # m/s, instead of refine_speed (independent of the proposal)
-        self.bb   = _mlp(5 + 2 + 1 + 1, H, H)
-        self.ball = _mlp(5 + H, H, H)
-        self.pair = _mlp(H + 2 + 2 + 1 + 1, H, H)
+        self.hidden, self.enc_layers = H, enc_layers
+        self.bb   = _mlp(5 + 2 + 1 + 1, H, H, enc_layers)
+        self.ball = _mlp(5 + H, H, H, enc_layers)
+        self.pair = _mlp(H + 2 + 2 + 1 + 1, H, H, enc_layers)
         self.geom_angle = geom_angle                     # angle comes from a pair embedding without the neighbour message
         self.head_a = nn.Linear(H, 2)
         if geom_angle:
@@ -471,7 +477,8 @@ class PairGNNPolicy(nn.Module):
     def save(self, path: str) -> None:
         torch.save({"gnn": self.state_dict(), "factorized": self.factorized, "has_scratch": self.has_scratch,
                     "has_made": self.has_made, "has_made2": self.has_made2,
-                    "geom_angle": self.geom_angle, "made2_geom": self.made2_geom}, path)
+                    "geom_angle": self.geom_angle, "made2_geom": self.made2_geom,
+                    "hidden": self.hidden, "enc_layers": self.enc_layers}, path)
 
 
 assert REL_DIM == 3 * N_BALLS + 2 * N_POCKETS

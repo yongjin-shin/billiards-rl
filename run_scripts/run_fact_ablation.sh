@@ -13,6 +13,13 @@ if [ "$1" = "geoang" ]; then             # 각도 head에서 이웃 message 빼�
   done
   wait; exit
 fi
+if [ "$1" = "capacity" ]; then           # encoder 용량: 폭 256 / 깊이 4, made2 head 포함, seed 0/1/2
+  for sd in 0 1 2; do
+    run cap_H256_s$sd --pair-supervision --no-wta-fallback --made2-head --gnn-hidden 256 --seed $sd
+    run cap_L4_s$sd   --pair-supervision --no-wta-fallback --made2-head --gnn-layers 4 --seed $sd
+  done
+  wait; exit
+fi
 if [ "$1" = "made2geo" ]; then           # made head 진단: 기하 조준각 차이를 입력으로(--made2-geom), seed 0/1/2
   for sd in 0 1 2; do run made2geo_s$sd --pair-supervision --no-wta-fallback --made2-head --made2-geom --seed $sd; done
   wait; exit
