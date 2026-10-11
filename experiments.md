@@ -4089,3 +4089,17 @@ SAC(7.89) 수준으로 악화. 세 항목(2·3·4)을 한꺼번에 바꿔서 어
 - 2개 state 데이터를 2,745 → 10,245로 ~3.7배 늘려도 **2개 state 정확도·성공률이 그대로**(B 61.1% vs 60.6%)이거나 나빠졌다(A 56.9%). 데이터 부족은 원인이 아니다.
 - 오히려 **다른 state가 나빠졌다**: 1개 state within 75% → 61%(A) / 70%(B), 3개 state 68% → 57% / 62%. 원인 미상 — 후보: 새 데이터가 train의 1/3을 차지해 기존 분포의 학습 비중이 줄어듦, checkpoint 선택(`--select within`, 기존 val 기준) 시점 변화. A(쉬운 안쪽 배치)가 B보다 더 해롭다.
 - 정리: 실제 2개 state의 약점은 데이터 양으로도, 배치(cushion·포켓 근처)를 채워도 해결되지 않는다. 지금까지 기각: 일반화, slot 표현, label 불일치, 방해 공, 창 폭, 데이터 양. 남은 방향: 실패 사례를 직접 보기(2개 state 중 policy가 실패한 샷을 그려서 label·policy action·결과 비교).
+
+### 남은 공 개수별 selection vs regression 분리 (2026-10-11, 학습 없음)
+
+**질문**: 2개 state의 약점이 "공 2개 중 양자택일"(selection)에서 오는가? **방법**: base 모델(old code + `--no-wta-fallback`, seed 0/1/2), val 1,697 states ×3 seeds. policy가 고른 pair의 action으로 실제로 쳐서 clean pocket 비율을 재고, 같은 모델의 action을 **label pair(candidate 0)** 로 고정했을 때(oracle selection)와 비교.
+
+| 남은 공 | 유효 pair | top-1이 label pair | top-1 prob / 2nd prob | top-1 pair coarse feasible | clean (policy 선택) | clean (label pair, 모델 action) | selection 손실 |
+|---|---|---|---|---|---|---|---|
+| 1 | 6 | 95.4% | 0.75 / 0.21 | 91.6% | 71.8% | 74.1% | 2.3%p |
+| **2** | 12 | 83.0% | **0.49 / 0.30** | 91.2% | **60.4%** | **70.2%** | **9.8%p** |
+| 3 | 18 | 82.4% | 0.38 / 0.24 | 92.9% | 74.4% | 79.3% | 4.9%p |
+
+- 2개 state의 격차는 **둘 다**에서 온다: (a) label pair를 줘도 70.2%(1개 74.1%, 3개 79.3%) → regression 약점, (b) policy가 고르면 9.8%p를 더 잃는다(1개 2.3, 3개 4.9) → selection 약점. 이전에 "selection은 변경과 무관하게 91% feasible"로 selection을 배제한 것은 전체 평균이었고, 공 개수별로는 2개 state에서 selection 손실이 가장 크다.
+- 2개 state는 top-1 prob 0.49 / 2nd 0.30으로 가장 애매하다(두 공 사이에서 결정 못 함). top-1이 label 밖일 때(17%) 그 pair head는 그 state에 label action을 본 적이 없다.
+- 미검증: ①(factorized, ball head 먼저)이 2개 state의 selection 손실을 줄이는지(해당 run의 모델이 있어 학습 없이 확인 가능).
