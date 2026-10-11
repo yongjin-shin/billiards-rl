@@ -6,6 +6,14 @@ COMMON=(--data "logs/teacher_data/relabel_s1000/robust/*.npz" --loss nearest_goo
         --lr-schedule cosine --patience 500 --model gnn --obs-transform relative --sel-weight 10
         --select within --seed 0 --threads 2)
 run() { local tag=$1; shift; nohup .venv/bin/python -u -m exp16_wm.bc "${COMMON[@]}" "$@" > "logs/run_logs/ablate_${tag}_${TS}.log" 2>&1 & }
+if [ "$1" = "made2" ]; then              # look-ahead 2단계: sims identity 복원 후 made2 head 학습, seed 0/1/2
+  for f in logs/teacher_data/relabel_s1000/sims/ghost_s1000_shard*.npz; do
+    .venv/bin/python -u -m exp16_wm.sim_identity --file "$f" > "logs/run_logs/sim_identity_$(basename "$f" .npz).log" 2>&1 &
+  done
+  wait
+  for sd in 0 1 2; do run made2_s$sd --pair-supervision --no-wta-fallback --made2-head --seed $sd; done
+  wait; exit
+fi
 if [ "$1" = "twoball" ]; then            # 공 2개 데이터 train-only 추가 (+A / +B), 새 baseline 설정, seed 0/1/2
   for sd in 0 1 2; do
     for X in A B; do
