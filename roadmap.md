@@ -539,6 +539,37 @@ policy의 shot 실패 분해(robust+pairs, val): chosen pair miss ~24%, chosen p
 | 19 | **search → distill (expert iteration)**: head가 분포(Laplace/mixture)를 내고, 샘플 N개를 시뮬레이터로 쳐서 성공한 샘플을 label로 재학습(filtered BC). 샷 단위 contextual bandit(shots/game ≈ 3 / 샷 성공률이 모든 모델에서 맞음) | 같은 label pair에서 샘플 6개 중 하나라도 성공하는 비율이 b = 0.10°에서 깊이 4 81.8% → 92.6%. critic이 필요 없고(시뮬레이터가 진짜 1-step return) 추론은 정책 단독. RL 대응은 experiments.md "head에서 샘플링해서 치면?" | 시뮬레이터 약 100k 샷/라운드(약 4분, 추정) + BC | **사용자 결정**(열린 결정 2) |
 | 20 | **Laplace NLL(고정 scale)을 robust loss로**: 제곱 오차 대체 | train loss의 66%가 label 없는 1.4% row에서 나왔고 loss가 소수 row에 지배됨. 샘플별 scale 학습은 어려운 2개 state를 덜 보게 할 위험이 있어 고정 | BC | – |
 
+### TODO 19 설계 메모: search → distill의 loss 비교 (2026-10-12 초안, 실행 전에 확정)
+
+**틀**: 샷 하나 = reset이 되는 contextual bandit. 정책이 각도(와 speed)를 흔들어 샘플 N개를 만들고, 시뮬레이터로 쳐서 성공/실패를 얻고, 그 결과로 정책을 다시 학습한다. 추론은 정책 단독. SAC로 말하면 actor loss의 Q 자리에 critic 대신 시뮬레이터의 1-step return이 들어가고, entropy ↔ 분포 폭 b. RL 용어 대응은 experiments.md "head에서 샘플링해서 치면?".
+
+**세 loss를 같은 state·같은 샘플로 비교** (실패 샘플을 어떻게 쓰는가)
+
+| | 방법 | 실패 샘플의 역할 | 위험 |
+|---|---|---|---|
+| A | **positives-only (filtered BC)**: 성공 샘플을 label로 supervised | 쓰지 않음 | 상태당 샘플이 전부 성공한 state(b = 0.10°에서 52.8%)는 정보 없이 "샘플 평균 쪽" 노이즈 업데이트. 전부 실패(7.4%)는 신호 없음 |
+| B | **per-state baseline REINFORCE**: advantage = R − (그 state 샘플들의 평균 성공률), 실패는 반대 방향으로 밀기, clip | 성공과 대비되는 음의 advantage | 한계 없는 밀기(평균이 멀리 가고 σ 증가) → advantage·ratio clip. 실패 원인이 각도가 아닐 수 있음(credit assignment) |
+| C | **경계 중앙 label**: 각도를 정렬해 `실패…성공…실패`에서 양쪽 첫 실패의 중점을 label로 | 창의 경계를 알려줌(저분산 supervised target) | 샘플이 창 양쪽 바깥에 있어야 함(좁은 노이즈로는 혼합 state 40%만). 한쪽만 있을 때의 처리는 미정 |
+
+- 기댓값 gradient는 A와 B가 같고(baseline이 state에만 의존) B는 분산만 줄인다. 새 정보는 혼합 state(약 40%)의 경계에서 온다.
+- 1단계는 **각도만**(label pair, speed = proposal)으로 한다: 실패 원인이 각도로 한정돼 credit assignment가 깨끗하다. speed·pair는 그다음. 실패 원인이 speed인 state(각도 노이즈로 닿지 못하는 ~7%)는 각도 샘플링만으로 신호가 없다.
+- 샘플링 예산은 세 방법이 같아야 한다(같은 state, 같은 샘플). 시작은 Laplace(b = 0.10°) × N = 6~8, 학습 state는 teacher train state(이전 run과 같은 코드·같은 split). 시뮬레이터 약 15k state × 8 ≈ 120k 샷, 약 5분(추정).
+
+**주의 (앞선 설명 정정)**
+- "샘플 6개로 81.8% → 92.6%"는 **추론 때 시뮬레이터가 고를 때의 상한**이지 distill 후 정책 단독 성능이 아니다.
+- teacher state에서는 teacher label이 이미 거의 창 중앙이다(기하 조준각 ±0.05°, teacher 성공 99.8%). search로 얻는 점 label은 teacher보다 정밀하지 않다. 기대하는 이득은 (i) 정책이 실제로 가는 state(게임 vs val 격차, #16)와 (ii) 창 안이면 gradient가 0인 tail 집중 loss이다. 따라서 teacher state에서만 비교하면 이득이 안 보일 수 있고, 그 경우 판단 D가 아니라 "state 분포를 정책이 가는 곳으로 옮긴 뒤 재시도"가 다음 행동이다.
+
+**비교 기준과 판단표 (초안)**: 정책 단독 500 games shots/game, seed 3개. control = 같은 길이·같은 구조의 현재 최선(깊이 4, 500 epoch 3.55 ± 0.10, 학습 길이 실험 결과로 바뀔 수 있음). "효과 인정" = seed 3개 모두 개선 + 평균 차이 ≥ 0.15 shots.
+
+| # | 관측 | 해석 | 다음 행동 |
+|---|---|---|---|
+| A | A·B·C 모두 control 안(차이 < 0.15) | teacher state에서 distill은 이득 없음 | 정책이 가는 state(DAgger식)로 분포를 옮겨 재시도, 또는 열린 결정 1(기하 입력) |
+| B | A만 개선, B·C는 A와 같음 | positives로 충분 | negative는 쓰지 않는다 |
+| C | B가 A보다 좋음(효과 인정) | 분산 감소 또는 경계 정보가 도움 | B 유지, speed·pair로 확장 |
+| D | C가 A·B보다 좋음(효과 인정) | 경계 중앙 label이 최선 | C로 확장, 양쪽 경계가 없는 state의 처리 설계 |
+| E | B가 A보다 나쁘거나 불안정(σ 증가, loss spike) | negative의 위험(한계 없는 밀기·credit assignment) | clip 강화 또는 A/C |
+| F | seed 하나만 반대 | 불확실 | seed 5개 |
+
 ### TODO (우선순위순)
 
 | # | 항목 | 이유 | 비용 | 의존 |
