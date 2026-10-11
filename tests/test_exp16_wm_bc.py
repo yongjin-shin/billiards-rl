@@ -342,3 +342,16 @@ def test_oracle_pair_metrics_measure_the_made_pairs_output():
     assert abs(out["oracle_angle_err_median_deg"] - 0.1) < 1e-3 and out["oracle_angle_within_0.2deg"] == 1.0
     assert out["top1_pair_made_rate"] == 0.0
     assert oracle_pair_metrics(m, {"obs": obs}, np.ones(N, dtype=bool)) == {}
+
+
+def test_append_train_only_keeps_val_and_unique_games():
+    from exp16_wm.bc import append_train_only
+    data = {"obs": np.zeros((5, 3), np.float32), "game": np.array([0, 0, 1, 2, 2]), "shot": np.arange(5)}
+    train, val = np.array([1, 1, 0, 1, 1], bool), np.array([0, 0, 1, 0, 0], bool)
+    extra = {"obs": np.ones((3, 3), np.float32), "game": np.array([0, 1, 2]), "shot": np.zeros(3, np.int64), "other": np.zeros(3)}
+    out, tr, va = append_train_only(data, train, val, extra)
+    assert len(out["obs"]) == 8 and set(out) == set(data)
+    assert np.array_equal(va, np.r_[val, [False] * 3]) and tr[-3:].all()
+    assert set(out["game"][-3:]).isdisjoint(set(data["game"]))
+    with pytest.raises(ValueError):
+        append_train_only(data, train, val, {"obs": extra["obs"]})

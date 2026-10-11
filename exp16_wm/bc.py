@@ -119,6 +119,19 @@ def build_split(data: dict[str, np.ndarray], val_frac: float, seed: int, data_fr
     return combined, tr_mask, ~tr_mask
 
 
+def append_train_only(data: dict[str, np.ndarray], train: np.ndarray, val: np.ndarray,
+                      extra: dict[str, np.ndarray]) -> tuple[dict[str, np.ndarray], np.ndarray, np.ndarray]:
+    """Add extra rows to the train side only (the val set stays exactly the split's); game ids kept unique."""
+    missing = [k for k in data if k not in extra]
+    if missing:
+        raise ValueError(f"train-only data lacks {missing}")
+    ex = {k: extra[k] for k in data}
+    ex["game"] = extra["game"] - extra["game"].min() + data["game"].max() + 1
+    out = {k: np.concatenate([data[k], ex[k].astype(data[k].dtype)]) for k in data}
+    n = len(extra["obs"])
+    return out, np.concatenate([train, np.ones(n, bool)]), np.concatenate([val, np.zeros(n, bool)])
+
+
 # ──────────────────────────────────────────────
 # Losses / metrics
 # ──────────────────────────────────────────────
@@ -432,6 +445,8 @@ def parse_args():
     p.add_argument("--select",     type=str, default="within", choices=["loss", "within"],
                    help="best checkpoint: lowest val loss or highest val within-0.2° rate")
     p.add_argument("--data-frac",  type=float, default=1.0, help="fraction of train games used")
+    p.add_argument("--train-only-data", type=str, nargs="+", default=None,
+                   help="extra label files added to train only (val stays the --data split's)")
     p.add_argument("--hidden",     type=int, nargs="+", default=None,
                    help="actor hidden sizes (default: VanillaSAC's, i.e. same as SAC runs)")
     p.add_argument("--out-root",   type=str, default="logs/experiments")
@@ -457,6 +472,11 @@ def main():
     data = load_teacher_data(paths)
     teacher = json.loads(str(np.load(paths[0])["meta"]))["teacher"]
     data, train, val = build_split(data, args.val_frac, args.seed, args.data_frac, args.augment)
+    extra_tag = ""
+    if args.train_only_data:
+        extra_paths = sorted({p for pat in args.train_only_data for p in glob.glob(pat)})
+        data, train, val = append_train_only(data, train, val, load_teacher_data(extra_paths))
+        extra_tag = "_plus-" + os.path.basename(os.path.dirname(os.path.dirname(extra_paths[0])))
     data["obs"] = TRANSFORMS[args.obs_transform](data["obs"])
 
     h_tag = ("_gnn" if args.model == "gnn" else "") + \
@@ -468,7 +488,7 @@ def main():
             (f"_mod-{args.selection[0]}{args.sel_target[0]}{dict(angle='a', made='m', made_same='M')[args.reg_target]}{'s' if args.scratch_head else ''}{'_mh' if args.made_head else ''}" if modular else
              ("_pairs" + ("-nofb" if args.no_wta_fallback else "") if args.pair_supervision else "") + ("_fact" + ("" if len(args.fact_terms) == 3 else "-" + "".join(t[0] for t in args.fact_terms))
                                                             if args.selection == "factorized" else "")) + \
-            ("_wrap" if args.angle_wrap else "_nowrap")
+            extra_tag + ("_wrap" if args.angle_wrap else "_nowrap")
     name = (f"exp16_bc_{teacher}_{args.loss}{h_tag}_a{args.angle_scale_deg:g}_v{args.speed_scale:g}"
             f"_s{args.seed}_{time.strftime('%Y-%m-%d@%H%M')}")
     out_dir = os.path.join(args.out_root, name)
@@ -510,7 +530,8 @@ def main():
         agent.scratch_lambda = 0.0
         print(f"  policy alone with scratch penalty {args.scratch_penalty}: "
               f"{json.dumps({k: (round(v, 3) if v is not None else None) for k, v in ev_pen.items()})}", flush=True)
-    results = {"name": name, "teacher": teacher, "loss": args.loss, "data": paths, "eval_scratch_penalty": ev_pen,
+    results = {"name": name, "teacher": teacher, "loss": args.loss, "data": paths,
+               "train_only_data": extra_paths if args.train_only_data else None, "eval_scratch_penalty": ev_pen,
                "n_shots": int(len(data["shot"])), "n_train": int(train.sum()), "n_val": int(val.sum()),
                "train": {k: v for k, v in fit.items() if k != "history"}, "val": vm, "eval": ev,
                "args": vars(args)}

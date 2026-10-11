@@ -6,6 +6,15 @@ COMMON=(--data "logs/teacher_data/relabel_s1000/robust/*.npz" --loss nearest_goo
         --lr-schedule cosine --patience 500 --model gnn --obs-transform relative --sel-weight 10
         --select within --seed 0 --threads 2)
 run() { local tag=$1; shift; nohup .venv/bin/python -u -m exp16_wm.bc "${COMMON[@]}" "$@" > "logs/run_logs/ablate_${tag}_${TS}.log" 2>&1 & }
+if [ "$1" = "twoball" ]; then            # 공 2개 데이터 train-only 추가 (+A / +B), 새 baseline 설정, seed 0/1/2
+  for sd in 0 1 2; do
+    for X in A B; do
+      run twoball_${X}_s$sd --pair-supervision --no-wta-fallback --seed $sd \
+          --train-only-data "logs/teacher_data/two_ball_$X/robust/*.npz"
+    done
+  done
+  wait; exit
+fi
 if [ "$1" = "wtafb" ]; then              # WTA fallback 검증: old code(--pair-supervision) 그대로 vs fallback 끔, seed 0/1/2
   for sd in 0 1 2; do
     run oldA_s$sd    --pair-supervision --seed $sd
