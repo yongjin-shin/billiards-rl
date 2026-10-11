@@ -287,3 +287,83 @@ class TestFactTerms:
         assert vals[("reg",)] > 0 and vals[("sel",)] > 0 and vals[("scratch",)] > 0
         parts = vals[("reg",)] + vals[("sel",)] + vals[("scratch",)]
         assert abs(vals[("reg", "sel", "scratch")] - parts) < 1e-3 * max(1.0, parts)
+
+
+class TestModularLoss:
+    """--sel-target / --reg-target / --scratch-head: the factorized experiment's changes switched on one at a time."""
+
+    def _setup(self, B=4, factorized=False, scratch=False, mod=("label", "angle", False)):
+        torch.manual_seed(0)
+        m = PairGNNPolicy(hidden=16, factorized=factorized, scratch_head=scratch)
+        m.mod = mod
+        rel = torch.as_tensor(np.stack([REL] * B))
+        good = torch.full((B, 2, 2), float("nan")); good[:, 0] = torch.tensor([0.3, -0.5])
+        pairs = torch.full((B, 2), -1, dtype=torch.long); pairs[:, 0] = 7
+        return m, rel, good, pairs, TestFactorized()._extras(B, pair_made_slots=(7, 8), made_slot=7)
+
+    def test_label_angle_global_equals_pair_loss(self):
+        m, rel, good, pairs, ex = self._setup()
+        pairs[:, 1] = 9; good[:, 1] = torch.tensor([0.1, 0.2])
+        w = torch.tensor([3.0, 2.0])
+        mod = m.train_loss(rel, good[:, 0], good, w=w, pairs=pairs, extras=ex)
+        m.mod = None
+        ref = m.train_loss(rel, good[:, 0], good, w=w, pairs=pairs)
+        assert torch.allclose(mod, ref, rtol=1e-5)
+
+    def test_every_combination_is_finite_and_differentiable(self):
+        for fact in (False, True):
+            for sel in ("label", "made"):
+                for reg in ("angle", "made"):
+                    for sc in (False, True):
+                        m, rel, good, pairs, ex = self._setup(factorized=fact, scratch=sc, mod=(sel, reg, sc))
+                        loss = m.train_loss(rel, good[:, 0], good, pairs=pairs, extras=ex)
+                        loss.backward()
+                        assert torch.isfinite(loss), (fact, sel, reg, sc)
+                        assert all(torch.isfinite(p.grad).all() for p in m.parameters() if p.grad is not None)
+
+    def test_rows_without_targets_give_zero_loss_not_nan(self):
+        m, rel, good, pairs, ex = self._setup(mod=("made", "made", False))
+        ex["pair_made"][:] = 0
+        ex["good_made"][:] = 0
+        loss = m.train_loss(rel, good[:, 0], good, pairs=torch.full((4, 2), -1), extras=ex)
+        assert float(loss) == 0.0
+
+    def test_missing_inputs_raise(self):
+        m, rel, good, pairs, ex = self._setup(mod=("label", "made", False))
+        with pytest.raises(ValueError):
+            m.train_loss(rel, good[:, 0], good, pairs=None, extras=ex)
+        with pytest.raises(ValueError):
+            m.train_loss(rel, good[:, 0], good, pairs=pairs, extras=None)
+        m.mod = ("label", "angle", True)                       # scratch term without a scratch head
+        with pytest.raises(ValueError):
+            m.train_loss(rel, good[:, 0], good, pairs=pairs, extras=ex)
+
+    def test_made_regression_trains_the_made_pair_not_the_angle_matched_one(self):
+        m, rel, good, pairs, ex = self._setup(B=16, mod=("label", "made", False))
+        ex["good_made"][:] = 0; ex["good_made"][:, 0, 8] = 1.0     # label action really made pair 8, angle matching said 7
+        m.sel_weight = 0.0
+        opt = torch.optim.Adam(m.parameters(), lr=5e-3)
+        for _ in range(300):
+            loss = m.train_loss(rel, good[:, 0], good, pairs=pairs, extras=ex)
+            opt.zero_grad(); loss.backward(); opt.step()
+        means, _, _ = m(rel[:1])
+        assert torch.allclose(means[0, 8], torch.tensor([0.3, -0.5]), atol=0.05)
+        assert not torch.allclose(means[0, 7], torch.tensor([0.3, -0.5]), atol=0.05)
+
+    def test_made_selection_matches_made_proportions_in_both_structures(self):
+        for fact in (False, True):
+            m, rel, good, pairs, ex = self._setup(B=16, factorized=fact, mod=("made", "angle", False))
+            ex["pair_made"][:, 7], ex["pair_made"][:, 8] = 15, 5
+            opt = torch.optim.Adam(m.parameters(), lr=5e-3)
+            for _ in range(400):
+                loss = m.train_loss(rel, good[:, 0], good, pairs=pairs, extras=ex)
+                opt.zero_grad(); loss.backward(); opt.step()
+            _, logits, _ = m(rel[:1])
+            p = torch.softmax(logits[0], dim=0)
+            assert abs(float(p[7]) - 0.75) < 0.05 and abs(float(p[8]) - 0.25) < 0.05, fact
+
+    def test_scratch_head_in_global_structure(self):
+        m, rel, _, _, _ = self._setup(scratch=True)
+        o = m.forward_full(rel)
+        assert o["scratch_logit"].shape == (4, N_PAIRS)
+        assert "scratch_logit" not in PairGNNPolicy(hidden=16).forward_full(rel)

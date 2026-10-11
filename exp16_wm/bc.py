@@ -242,7 +242,7 @@ def train_bc(agent: VanillaSAC, data: dict[str, np.ndarray], train: np.ndarray, 
              log_every: int = 10, w: torch.Tensor | None = None,
              select: str = "loss", select_thresh_deg: float = 0.2,
              lr_schedule: str = "const", lr_final_frac: float = 0.01, use_pairs: bool = False,
-             selection: str = "global") -> dict:
+             selection: str = "global", use_extras: bool = False) -> dict:
     """select: 'loss' keeps the lowest val loss; 'within' the highest val within-threshold rate
     (the val loss is dominated by a few far-off predictions and can disagree with it)."""
     if select not in ("loss", "within"):
@@ -259,13 +259,13 @@ def train_bc(agent: VanillaSAC, data: dict[str, np.ndarray], train: np.ndarray, 
         raise ValueError("use_pairs needs data['good_pairs'] (run exp16_wm.pair_labels; no --augment flip4)")
     pr = torch.as_tensor(data["good_pairs"].astype(np.int64)) if use_pairs else None
     ex = None
-    if selection == "factorized":
+    if selection not in ("global", "factorized"):
+        raise ValueError(f"unknown selection: {selection}")
+    if selection == "factorized" or use_extras:
         missing = [k for k in FACT_KEYS if k not in data]
         if missing:
-            raise ValueError(f"selection=factorized needs {missing} (exp16_wm.outcomes / exp16_wm.pair_stats)")
+            raise ValueError(f"factorized / outcome targets need {missing} (exp16_wm.outcomes / exp16_wm.pair_stats)")
         ex = {k: torch.as_tensor(data[k].astype(np.float32 if k in ("good_made", "good_scratch") else np.int64)) for k in FACT_KEYS}
-    elif selection != "global":
-        raise ValueError(f"unknown selection: {selection}")
     opt = torch.optim.Adam(model.params(), lr=lr)
     # constant lr plateaus ~1e-3 of the action range above the precision a pocket needs (~0.1°); anneal it
     sched = (torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=max(1, epochs), eta_min=lr * lr_final_frac)
@@ -326,6 +326,34 @@ def val_metrics(agent: "VanillaSAC | PairGNNPolicy", data: dict[str, np.ndarray]
     }
 
 
+def oracle_pair_metrics(agent: PairGNNPolicy, data: dict[str, np.ndarray], val: np.ndarray) -> dict:
+    """
+    Regression quality with the pair given (selection taken out): for every (candidate k, pair p) where
+    clean label action k really made pair p (good_made), pair p's action vs action k. Plus how often the
+    top-1 pair is one the coarse scan could make (pair_made > 0). {} without the outcome arrays.
+    """
+    if "good_made" not in data or "good_scratch" not in data:
+        return {}
+    with torch.no_grad():
+        o = agent.forward_full(torch.as_tensor(data["obs"][val]))
+    means, top = o["means"].numpy(), o["logits"].numpy().argmax(axis=1)
+    gm = data["good_made"][val].astype(bool)
+    K2 = gm.shape[1]
+    g = to_unit(data["good_actions"][val][:, :K2])
+    ok = ~np.isnan(g[..., 0]) & ~data["good_scratch"][val].astype(bool)
+    b, k, p = np.nonzero(gm & ok[..., None])
+    out = {}
+    if len(b):
+        d = (means[b, p, 0] - g[b, k, 0]) * np.pi
+        err = np.degrees(np.abs(np.arctan2(np.sin(d), np.cos(d))))
+        out = {"oracle_angle_err_median_deg": float(np.median(err)),
+               "oracle_angle_within_0.2deg": float(np.mean(err < 0.2)),
+               "oracle_speed_err_median": float(np.median(np.abs(means[b, p, 1] - g[b, k, 1])) * (ACT_HIGH[1] - ACT_LOW[1]) / 2.0)}
+    if "pair_made" in data:
+        out["top1_pair_made_rate"] = float(np.mean(data["pair_made"][val][np.arange(len(top)), top] > 0))
+    return out
+
+
 def evaluate_policy(agent: "VanillaSAC | TransformedPolicy", seed: int, n_games: int, env_kw: dict) -> dict:
     """Same protocol as exp16_wm/train.py final eval: reset(seed) once, then n_games resets."""
     env = BilliardsEnv(**env_kw)
@@ -384,6 +412,11 @@ def parse_args():
                    help="factorized: ball head + per-ball pocket softmax, outcome-grounded targets, scratch head")
     p.add_argument("--fact-terms", type=str, nargs="+", default=["reg", "sel", "scratch"],
                    choices=["reg", "sel", "scratch"], help="factorized loss terms to keep (ablation)")
+    p.add_argument("--sel-target", type=str, default=None, choices=["label", "made"],
+                   help="modular loss (with --reg-target): selection target = labelled pairs or pair_made")
+    p.add_argument("--reg-target", type=str, default=None, choices=["angle", "made"],
+                   help="modular loss (with --sel-target): regression pair = angle-matched (good_pairs) or really made (good_made)")
+    p.add_argument("--scratch-head", action="store_true", help="modular loss: + scratch head BCE")
     p.add_argument("--scratch-penalty", type=float, default=3.0,
                    help="factorized: extra evaluation with score −= λ·σ(scratch logit)")
     p.add_argument("--pair-supervision", action="store_true",
@@ -406,22 +439,30 @@ def main():
         raise SystemExit("--pair-supervision / --selection factorized need --model gnn and --augment none")
     if args.model == "gnn" and args.obs_transform != "relative":
         raise SystemExit("--model gnn takes the relative observation: add --obs-transform relative")
+    modular = args.sel_target is not None or args.reg_target is not None or args.scratch_head
+    if modular and (args.sel_target is None or args.reg_target is None or args.model != "gnn"):
+        raise SystemExit("modular loss needs --model gnn and both --sel-target and --reg-target")
     torch.set_num_threads(args.threads)
     seed_everything(args.seed)
+
     import exp16_wm.gnn_policy as _gp
     _gp.ANGLE_WRAP = args.angle_wrap
+
     paths = sorted({p for pat in args.data for p in glob.glob(pat)})
     data = load_teacher_data(paths)
     teacher = json.loads(str(np.load(paths[0])["meta"]))["teacher"]
     data, train, val = build_split(data, args.val_frac, args.seed, args.data_frac, args.augment)
     data["obs"] = TRANSFORMS[args.obs_transform](data["obs"])
+
     h_tag = ("_gnn" if args.model == "gnn" else "") + \
             ("" if args.hidden is None else "_h" + "x".join(map(str, args.hidden))) + \
             ("" if args.obs_transform == "raw" else f"_{args.obs_transform}") + \
             ("" if args.augment == "none" else f"_{args.augment}") + \
             ("" if args.data_frac >= 1.0 else f"_frac{args.data_frac:g}") + \
-            ("" if args.lr_schedule == "const" else "_cos") + ("_pairs" if args.pair_supervision else "") + ("_fact" + ("" if len(args.fact_terms) == 3 else "-" + "".join(t[0] for t in args.fact_terms))
-             if args.selection == "factorized" else "") + \
+            ("" if args.lr_schedule == "const" else "_cos") + \
+            (f"_mod-{args.selection[0]}{args.sel_target[0]}{args.reg_target[0]}{'s' if args.scratch_head else ''}" if modular else
+             ("_pairs" if args.pair_supervision else "") + ("_fact" + ("" if len(args.fact_terms) == 3 else "-" + "".join(t[0] for t in args.fact_terms))
+                                                            if args.selection == "factorized" else "")) + \
             ("_wrap" if args.angle_wrap else "_nowrap")
     name = (f"exp16_bc_{teacher}_{args.loss}{h_tag}_a{args.angle_scale_deg:g}_v{args.speed_scale:g}"
             f"_s{args.seed}_{time.strftime('%Y-%m-%d@%H%M')}")
@@ -433,16 +474,21 @@ def main():
 
     if args.model == "gnn":
         agent = PairGNNPolicy(args.gnn_hidden, args.wta_eps, args.sel_weight,
-                              factorized=args.selection == "factorized")
+                              factorized=args.selection == "factorized", scratch_head=args.scratch_head)
         agent.fact_terms = tuple(args.fact_terms)
+        if modular:
+            agent.mod = (args.sel_target, args.reg_target, args.scratch_head)
     else:
         agent = make_agent(CLEAR_ENV["n_balls"], args.hidden, OBS_DIMS[args.obs_transform])
+
     t0 = time.time()
     fit = train_bc(agent, data, train, val, args.loss, args.epochs, args.batch, args.lr,
                    args.patience, args.seed, w=dim_weights(args.angle_scale_deg, args.speed_scale),
                    select=args.select, lr_schedule=args.lr_schedule, lr_final_frac=args.lr_final_frac,
-                   use_pairs=args.pair_supervision, selection=args.selection)
+                   use_pairs=args.pair_supervision or modular, selection=args.selection, use_extras=modular)
     vm = val_metrics(agent, data, val)
+    if isinstance(agent, PairGNNPolicy):
+        vm.update(oracle_pair_metrics(agent, data, val))
     print(f"  trained {fit['epochs_run']} epochs ({time.time()-t0:.0f}s), best ({args.select}) @{fit['best_epoch']}"
           f" val loss {fit['best_val_loss']:.6f}  |  {json.dumps({k: round(v, 4) for k, v in vm.items()})}", flush=True)
     agent.save(os.path.join(out_dir, "bc_model.pt"))
@@ -451,7 +497,7 @@ def main():
     print(f"  policy alone ({args.eval_games} games): {json.dumps({k: (round(v, 3) if v is not None else None) for k, v in ev.items()})}",
           flush=True)
     ev_pen = None
-    if args.selection == "factorized":                       # the scratch head's effect, same model, penalty at inference only
+    if isinstance(agent, PairGNNPolicy) and agent.has_scratch:   # the scratch head's effect, same model, penalty at inference only
         agent.scratch_lambda = args.scratch_penalty
         ev_pen = evaluate_policy(TransformedPolicy(agent, args.obs_transform), args.eval_seed, args.eval_games, CLEAR_ENV)
         agent.scratch_lambda = 0.0

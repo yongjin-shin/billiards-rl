@@ -319,3 +319,26 @@ class TestFactorizedPlumbing:
         with pytest.raises(ValueError):
             train_bc(make_agent(3), d, tr, ~tr, "teacher", epochs=1, batch=8, lr=1e-3, patience=1, seed=0,
                      log_every=0, selection="local")
+
+
+def test_oracle_pair_metrics_measure_the_made_pairs_output():
+    from exp16_wm.bc import oracle_pair_metrics, to_unit
+    from exp16_wm.gnn_policy import PairGNNPolicy
+    from exp16_wm.train import ACT_LOW, ACT_HIGH
+    torch.manual_seed(0)
+    m = PairGNNPolicy(hidden=16)
+    N = 5
+    obs = np.random.default_rng(0).uniform(0.1, 0.9, (N, 21)).astype(np.float32)
+    obs[:, 2::3][:, :3] = 0.0
+    with torch.no_grad():
+        means = m.forward_full(torch.as_tensor(obs))["means"].numpy()
+    unit = means[:, 4].copy(); unit[:, 0] += 0.1 / 180.0               # label = pair 4's output + 0.1°
+    good = np.full((N, 3, 2), np.nan, dtype=np.float32)
+    good[:, 0] = unit * (ACT_HIGH - ACT_LOW) / 2.0 + (ACT_HIGH + ACT_LOW) / 2.0
+    gm = np.zeros((N, 2, 18), dtype=np.float32); gm[:, 0, 4] = 1
+    data = {"obs": obs, "good_actions": good, "good_made": gm, "good_scratch": np.zeros((N, 2), dtype=np.float32),
+            "pair_made": np.zeros((N, 18), dtype=np.int64)}
+    out = oracle_pair_metrics(m, data, np.ones(N, dtype=bool))
+    assert abs(out["oracle_angle_err_median_deg"] - 0.1) < 1e-3 and out["oracle_angle_within_0.2deg"] == 1.0
+    assert out["top1_pair_made_rate"] == 0.0
+    assert oracle_pair_metrics(m, {"obs": obs}, np.ones(N, dtype=bool)) == {}

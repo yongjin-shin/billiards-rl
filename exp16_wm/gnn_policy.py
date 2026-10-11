@@ -54,13 +54,15 @@ def _mlp(i: int, h: int, o: int) -> nn.Sequential:
 
 class PairGNNPolicy(nn.Module):
     def __init__(self, hidden: int = 128, wta_eps: float = 0.05, sel_weight: float = 10.0,
-                 factorized: bool = False):
+                 factorized: bool = False, scratch_head: bool = False):
         super().__init__()
         H = hidden
         self.wta_eps, self.sel_weight = wta_eps, sel_weight
         self.factorized = factorized
         self.scratch_lambda = 0.0         # inference: penalise pairs the scratch head expects to scratch
         self.fact_terms = ("reg", "sel", "scratch")     # factorized loss terms that are switched on (ablations)
+        self.mod: tuple[str, str, bool] | None = None   # modular loss (sel_target, reg_target, use_scratch); see _mod_loss
+        self.has_scratch = factorized or scratch_head
         self.bb   = _mlp(5 + 2 + 1 + 1, H, H)
         self.ball = _mlp(5 + H, H, H)
         self.pair = _mlp(H + 2 + 2 + 1 + 1, H, H)
@@ -68,6 +70,7 @@ class PairGNNPolicy(nn.Module):
         self.head_s = nn.Linear(H, 1)             # global mode: pair score; factorized mode: pocket logit within a ball
         if factorized:
             self.head_ball = nn.Linear(2 * H, 1)  # which ball: [h_i, max_j e_ij]
+        if self.has_scratch:
             self.head_scratch = nn.Linear(H, 1)   # will this pair's shot pocket the cue ball
         side = torch.zeros(N_POCKETS)
         side[list(SIDE_POCKETS)] = 1.0
@@ -117,6 +120,8 @@ class PairGNNPolicy(nn.Module):
         means = torch.tanh(self.head_a(e))
         out = {"means": means, "valid": valid, "e": e}
         pocket = self.head_s(e).squeeze(-1)
+        if self.has_scratch:
+            out["scratch_logit"] = self.head_scratch(e).squeeze(-1)
         if not self.factorized:
             out["logits"] = pocket.masked_fill(~valid, _NEG)
             return out
@@ -126,7 +131,6 @@ class PairGNNPolicy(nn.Module):
         pocket = pocket.view(B, N_BALLS, N_POCKETS)
         joint = F.log_softmax(ball, dim=1)[:, :, None] + F.log_softmax(pocket, dim=2)
         out.update(ball_logits=ball, pocket_logits=pocket, live=live,
-                   scratch_logit=self.head_scratch(e).squeeze(-1),
                    logits=joint.reshape(B, N_PAIRS).masked_fill(~valid, _NEG))
         return out
 
@@ -142,7 +146,7 @@ class PairGNNPolicy(nn.Module):
         """Deterministic action in [-1, 1]: the top-scored pair's proposal. (B, 2)"""
         o = self.forward_full(rel)
         score = o["logits"]
-        if self.factorized and self.scratch_lambda > 0:
+        if self.has_scratch and self.scratch_lambda > 0:
             score = score - self.scratch_lambda * torch.sigmoid(o["scratch_logit"])
         return o["means"][torch.arange(len(score)), score.argmax(dim=1)]
 
@@ -156,6 +160,8 @@ class PairGNNPolicy(nn.Module):
         selection head is trained to pick those pairs (fixed targets instead of a moving winner).
         Rows with no labelled pair fall back to winner-takes-all.
         """
+        if self.mod is not None:
+            return self._mod_loss(rel, good_u, pairs, extras, w)
         if self.factorized:
             if extras is None:
                 raise ValueError("factorized PairGNNPolicy needs extras (good_made, good_scratch, pair_made, pair_scratch, pair_n)")
@@ -222,6 +228,68 @@ class PairGNNPolicy(nn.Module):
             total = total + self.sel_weight * scratch_bce
         return total
 
+    def _mod_loss(self, rel: torch.Tensor, good_u: torch.Tensor, pairs: torch.Tensor | None,
+                  ex: dict[str, torch.Tensor] | None, w: torch.Tensor | None) -> torch.Tensor:
+        """
+        Modular loss: each change of the factorized experiment switched on alone (ablation).
+          structure  : self.factorized (global 18-way softmax vs ball head × per-ball pocket softmax)
+          sel_target : "label" → the labelled candidates' pairs (pairs, counts) | "made" → pair_made over live pairs
+          reg_target : "angle" → each labelled candidate regresses its angle-matched pair (pairs)
+                       "made"  → each clean candidate regresses every pair it really made (good_made)
+          use_scratch: + sel_weight · BCE(scratch head, pair_scratch / pair_n)
+        Selection is one soft CE on the joint pair distribution in both structures (in the factorized
+        one this equals ball CE on the target's ball marginal + per-ball pocket CE weighted by it).
+        label + angle, global, no scratch == _pair_loss on rows that have a labelled pair; rows with
+        no target for a term are left out of that term (instead of the WTA fallback).
+        """
+        sel_target, reg_target, use_scratch = self.mod
+        if (sel_target == "label" or reg_target == "angle") and pairs is None:
+            raise ValueError("modular loss with label selection / angle regression needs pairs (good_pairs)")
+        if (sel_target == "made" or reg_target == "made" or use_scratch) and ex is None:
+            raise ValueError("modular loss with made targets / scratch needs extras (good_made, pair_made, ...)")
+        w = torch.ones(2, device=rel.device) if w is None else w
+        o = self.forward_full(rel)
+        means, valid = o["means"], o["valid"]
+        zero = means.new_zeros(())
+        if pairs is not None:
+            label = F.one_hot(pairs.clamp(min=0), N_PAIRS).float() * (pairs >= 0)[..., None].float()   # (B, K, 18)
+        # regression
+        if reg_target == "angle":
+            combo, g = label, torch.nan_to_num(good_u[:, :pairs.shape[1]])
+        elif reg_target == "made":
+            K2 = ex["good_made"].shape[1]
+            cand_ok = (~torch.isnan(good_u[:, :K2, 0])).float() * (1.0 - ex["good_scratch"].float())
+            combo, g = ex["good_made"].float() * cand_ok[..., None], torch.nan_to_num(good_u[:, :K2])
+        else:
+            raise ValueError(f"unknown reg_target: {reg_target}")
+        d = ((action_diff(means[:, None, :, :], g[:, :, None, :]) * w) ** 2).sum(-1)    # (B, K, 18)
+        n = combo.sum(dim=(1, 2))
+        rows = n > 0
+        reg = ((d * combo).sum(dim=(1, 2)) / n.clamp(min=1.0))[rows].mean() if bool(rows.any()) else zero
+        # selection: soft CE on the joint distribution over the 18 pairs
+        if sel_target == "label":
+            t = label.sum(dim=1)
+        elif sel_target == "made":
+            t = ex["pair_made"].float() * valid.float()
+        else:
+            raise ValueError(f"unknown sel_target: {sel_target}")
+        mass = t.sum(dim=1)
+        rows = mass > 0
+        ce = zero
+        if bool(rows.any()):
+            t = t / mass.clamp(min=1e-9)[:, None]
+            ce = -(t * F.log_softmax(o["logits"], dim=1)).sum(dim=1)[rows].mean()
+        total = reg + self.sel_weight * ce
+        if use_scratch:
+            if not self.has_scratch:
+                raise ValueError("use_scratch needs PairGNNPolicy(scratch_head=True)")
+            n_try = ex["pair_n"].float()
+            tried = (n_try > 0) & valid
+            if bool(tried.any()):
+                target = ex["pair_scratch"].float() / n_try.clamp(min=1.0)
+                total = total + self.sel_weight * F.binary_cross_entropy_with_logits(o["scratch_logit"][tried], target[tried])
+        return total
+
     def _pair_loss(self, rel: torch.Tensor, good_u: torch.Tensor, pairs: torch.Tensor,
                    w: torch.Tensor | None) -> torch.Tensor:
         w = torch.ones(2, device=rel.device) if w is None else w
@@ -276,7 +344,7 @@ class PairGNNPolicy(nn.Module):
         return a[0] if np.asarray(rel_obs).ndim == 1 else a
 
     def save(self, path: str) -> None:
-        torch.save({"gnn": self.state_dict(), "factorized": self.factorized}, path)
+        torch.save({"gnn": self.state_dict(), "factorized": self.factorized, "has_scratch": self.has_scratch}, path)
 
 
 assert REL_DIM == 3 * N_BALLS + 2 * N_POCKETS
