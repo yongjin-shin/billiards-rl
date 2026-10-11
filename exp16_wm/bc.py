@@ -418,6 +418,8 @@ def parse_args():
                    help="modular loss (with --sel-target): regression pair = angle-matched (good_pairs), really made (good_made), "
                         "or really made and the aimed ball (made_same: no combination shots)")
     p.add_argument("--scratch-head", action="store_true", help="modular loss: + scratch head BCE")
+    p.add_argument("--made-head", action="store_true",
+                   help="modular loss: + auxiliary made head BCE to pair_made / pair_n (look-ahead, not used at inference)")
     p.add_argument("--scratch-penalty", type=float, default=3.0,
                    help="factorized: extra evaluation with score −= λ·σ(scratch logit)")
     p.add_argument("--pair-supervision", action="store_true",
@@ -440,7 +442,7 @@ def main():
         raise SystemExit("--pair-supervision / --selection factorized need --model gnn and --augment none")
     if args.model == "gnn" and args.obs_transform != "relative":
         raise SystemExit("--model gnn takes the relative observation: add --obs-transform relative")
-    modular = args.sel_target is not None or args.reg_target is not None or args.scratch_head
+    modular = args.sel_target is not None or args.reg_target is not None or args.scratch_head or args.made_head
     if modular and (args.sel_target is None or args.reg_target is None or args.model != "gnn"):
         raise SystemExit("modular loss needs --model gnn and both --sel-target and --reg-target")
     torch.set_num_threads(args.threads)
@@ -461,7 +463,7 @@ def main():
             ("" if args.augment == "none" else f"_{args.augment}") + \
             ("" if args.data_frac >= 1.0 else f"_frac{args.data_frac:g}") + \
             ("" if args.lr_schedule == "const" else "_cos") + \
-            (f"_mod-{args.selection[0]}{args.sel_target[0]}{dict(angle='a', made='m', made_same='M')[args.reg_target]}{'s' if args.scratch_head else ''}" if modular else
+            (f"_mod-{args.selection[0]}{args.sel_target[0]}{dict(angle='a', made='m', made_same='M')[args.reg_target]}{'s' if args.scratch_head else ''}{'_mh' if args.made_head else ''}" if modular else
              ("_pairs" if args.pair_supervision else "") + ("_fact" + ("" if len(args.fact_terms) == 3 else "-" + "".join(t[0] for t in args.fact_terms))
                                                             if args.selection == "factorized" else "")) + \
             ("_wrap" if args.angle_wrap else "_nowrap")
@@ -475,7 +477,8 @@ def main():
 
     if args.model == "gnn":
         agent = PairGNNPolicy(args.gnn_hidden, args.wta_eps, args.sel_weight,
-                              factorized=args.selection == "factorized", scratch_head=args.scratch_head)
+                              factorized=args.selection == "factorized", scratch_head=args.scratch_head,
+                              made_head=args.made_head)
         agent.fact_terms = tuple(args.fact_terms)
         if modular:
             agent.mod = (args.sel_target, args.reg_target, args.scratch_head)

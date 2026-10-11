@@ -384,3 +384,29 @@ class TestModularLoss:
         m.sel_weight = 0.0
         loss = m.train_loss(rel, good[:, 0], good, pairs=torch.full((4, 2), -1), extras=ex)
         assert float(loss) == 0.0
+
+    def test_made_head_learns_the_pair_made_rate(self):
+        torch.manual_seed(0)
+        m = PairGNNPolicy(hidden=32, made_head=True)
+        m.mod = ("label", "angle", False)
+        rel = torch.as_tensor(np.stack([REL] * 16))
+        good = torch.full((16, 2, 2), float("nan")); good[:, 0] = torch.tensor([0.3, -0.5])
+        pairs = torch.full((16, 2), -1, dtype=torch.long); pairs[:, 0] = 7
+        ex = TestFactorized()._extras(16, pair_made_slots=(7,), made_slot=7)
+        ex["pair_made"][:, 7], ex["pair_made"][:, 8] = 15, 5          # out of 20 tries → 0.75, 0.25
+        opt = torch.optim.Adam(m.parameters(), lr=5e-3)
+        for _ in range(400):
+            loss = m.train_loss(rel, good[:, 0], good, pairs=pairs, extras=ex)
+            opt.zero_grad(); loss.backward(); opt.step()
+        p = torch.sigmoid(m.forward_full(rel[:1])["made_logit"][0])
+        assert abs(float(p[7]) - 0.75) < 0.05 and abs(float(p[8]) - 0.25) < 0.05 and float(p[0]) < 0.05
+
+    def test_made_head_adds_to_the_loss_and_needs_extras(self):
+        m, rel, good, pairs, ex = self._setup()
+        base = float(m.train_loss(rel, good[:, 0], good, pairs=pairs, extras=ex))
+        torch.manual_seed(0)
+        mh = PairGNNPolicy(hidden=16, made_head=True); mh.mod = ("label", "angle", False)
+        assert float(mh.train_loss(rel, good[:, 0], good, pairs=pairs, extras=ex)) > base
+        with pytest.raises(ValueError):
+            mh.train_loss(rel, good[:, 0], good, pairs=pairs, extras=None)
+        assert "made_logit" not in m.forward_full(rel)
