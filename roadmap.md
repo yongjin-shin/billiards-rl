@@ -500,6 +500,64 @@ policy의 shot 실패 분해(robust+pairs, val): chosen pair miss ~24%, chosen p
 1. 학습만으로 정밀도를 못 올리면 ghost-ball 기하 조준각 차이를 made head(verifier)에만 입력으로 허용할지. "탐색 + 학습" 방침(bitter lesson)과 충돌한다. 단 위 정정대로 "argmax ≥ 90%"는 made head 해상도가 아니라 proposal 정확도의 기준이다.
 2. **다음 단계 (2026-10-12)**: (a) search → distill(TODO 19: 분포 head + 시뮬레이터 best-of-N → 성공 샘플로 재학습), (b) 깊이 > 4 최적화 안정화(TODO 18: residual/LayerNorm). 먼저 **학습 길이 3배(1500 epoch) 실험**(깊이 4 vs 6, 2026-10-12 07:41 시작, 약 3시간)의 결과를 본다.
 
+### 아이디어 지도 (2026-10-12) — 주제별 2단계 정리
+
+현재 병목은 **고른 pair의 action 정밀도**다(깊이 4에서 label pair를 줘도 13.7%p 실패, pair 선택 손실은 4.2%p). 상태 표기: **[완료]** 결과 있음 / **[진행]** 실행 중 / **[미착수]** 아직 안 함 / **[보류]** 사전에 멈춤. 숫자는 experiments.md의 해당 절.
+
+**1. 데이터와 teacher**
+- **[완료]** label 없는 1.37% row를 WTA loss로 학습하던 문제 → `--no-wta-fallback`으로 4.51 → 4.14 (그 row가 train loss의 66%)
+- **[완료]** 공 2개 데이터 3.7배 추가 → 불변. label 불일치·flip, 방해 공, 창 폭/난이도 → 기각
+- **[미착수]** DAgger(#10)와 게임 vs val 격차 규명(#16)
+- **[미착수]** position play·multi-ball teacher(#11) (지금 게임 성능은 shots/game ≈ 3 / 샷 성공률로만 결정됨)
+
+**2. Pair 선택**
+- **[완료]** factorized ①, made selection target ②, scratch head ④ → control과 동일. `good_made` ③ → 7.63으로 악화. made head 보조 target ⑤ → 효과 없음
+- **[완료]** 깊이 4에서 선택 손실 4.2%p (병목 아님). 깊이 > 4에서는 3개 state의 선택이 나빠짐
+
+**3. Action 정밀도: 모델 구조와 학습 (현재 병목)**
+- **[완료]** GNN + pair supervision, encoder 깊이 4 → 3.90 → 3.55. 폭 256 → 작은 효과(보류). 깊이 6/8 → 3.77 / 3.94(최적화 문제)
+- **[완료]** 이웃 message 빼기(`--geom-angle`), 포켓된 공 slot 표현 → 효과 없음. angle wrap-aware loss → policy 악화(이유 미규명). lr decay 단독 → 악화
+- **[진행]** 학습 길이 3배(1500 epoch, 깊이 4 vs 6)
+- **[미착수]** residual/LayerNorm + lr 3e-4(#18), 좌표 sin/cos(#14), 폭+깊이 결합
+- **[미착수]** loss 스케일 `--angle-scale-deg 0.1`, EMA/마지막 epoch checkpoint(#9), lr/clip 정리(#1b), Laplace NLL robust loss(#20)
+- **[미착수]** 2개 state 약점의 구조적 원인(#17), 이전 비교의 pair supervision 조건 재실행(#7)
+
+**4. 추론 때 보정 (made head, verify/refine)**
+- **[완료]** made head + verify + refine(각도 31 × 절대 speed 7) → 3.90. refine의 이득은 각도가 아니라 speed에서 나옴. 각도만 조정(격자·gradient)은 이득 0
+- **[완료]** made head의 "스캔 argmax가 창 안"은 proposal 적중률과 같은 값(정정), head는 proposal에 앵커됨
+- **[완료·참고용]** 기하 조준각 차이 입력 → 3.46 (상한 참고, 최종 모델 아님)
+- **[보류]** gradient refine ∇ₐP(made)(#15) — head가 proposal 밖 정보를 가질 때까지
+- **[미착수·아이디어]** made head를 proposal 앵커에서 풀기(입력 차이 제거 또는 proposal 무작위 섭동). 단 같은 encoder의 정밀도 한계에 막힐 가능성이 있다(기하 입력이 있어야 95%)
+- **[미착수·아이디어]** speed head를 mode-aware하게: label speed는 1.0 m/s 76% / ≥2 m/s 24%의 두 모드인데 모델은 중간값을 낸다. refine이 speed에서 이득을 보는 것과 연결(미검증)
+
+**5. 탐색 + 학습 (expert iteration, RL 연결)**
+- **[완료]** Laplace 샘플링: 샘플 하나를 그대로 치면 손해, 시뮬레이터가 6개 중 고르면 81.8 → 92.6% (추론 때 시뮬레이터가 있을 때의 상한)
+- **[완료]** 틀 정리: 샷 단위 contextual bandit, RL 용어 대응
+- **[미착수]** search → distill(#19): A positives-only / B baseline REINFORCE + negatives / C 경계 중앙 label
+- **[미착수]** 분포 head(Laplace/mixture) 학습, policy gradient 계열 fine-tune(#12)
+
+**6. 방법론과 검증**
+- **[완료]** control 동일성 확인, 판단표 사전 등록, 기준선 정정, `eval_by_balls` / `diagnose_action` 도구화
+- **[미착수]** seed 5개 반복(판단표 E/F 행이 나올 때), margin/geom32 label의 seed 반복(#1)
+
+**결정 대기**: (1) 기하 조준각 입력을 made head에만 허용할지(bitter lesson과 충돌), (2) 다음 단계를 search → distill로 갈지 residual/LayerNorm 깊이 재시도로 갈지.
+
+### 지금 실험할 만한 것 (2026-10-12, 우선순위)
+
+기준: 병목(action 정밀도)에 직접 닿고, 결과가 다음 결정을 바꾸는 것. 자원: Mac mini 10코어에서 1500 epoch 6 runs가 돌고 있어(깊이 4 약 10:00, 깊이 6 약 11:00 종료 예상) 학습 없는 진단은 지금, 새 학습은 깊이 4 run이 끝난 뒤. 판단표는 실행 직전에 결과를 보기 전에 정한다(experiments.md 규칙).
+
+| 순위 | 실험 | 무엇을 가르나 | 비용 | 시점 |
+|---|---|---|---|---|
+| 1 | **oracle 교체 진단 (학습 없음)**: label pair에서 (a) 모델 각도 + label speed, (b) label 각도 + 모델 speed, (c) 둘 다 label(teacher action, 성공 ≈ 99.8%여야 함: 하네스 검증)로 실제로 쳐서 clean 비교 | 13.7%p 정밀도 실패가 각도 때문인지 speed 때문인지 결합 때문인지. 각도 지배 → 깊이·loss 스케일·탐색 쪽, speed 지배 → mode-aware speed head(4번 아이디어) | `diagnose_action`에 약 30줄 + 테스트, 계산 약 5분 | 지금 |
+| 2 | **정책이 가는 state vs teacher state (#16, 학습 없음)**: 500 games 롤아웃에서 state와 결과를 기록해 남은 공 수별 샷 성공률을 val과 비교 | 분포 이동이 있는가 → DAgger / 정책이 가는 state에서의 distill의 가치. 없으면 search → distill의 기대 이득이 줄어든다 | 롤아웃 기록 약 40줄 + 테스트, 계산 수 분 | 지금 |
+| 3 | **loss 스케일 `--angle-scale-deg 0.1`** (깊이 4, 500 epoch, seed 0/1/2) | baseline 측정(2026-10-11, 깊이 2)에서 train loss의 59%가 speed, 41%가 angle이었는데 병목은 각도다(이전 스케일 실험은 MLP 시절 1회뿐, 깊이 4에서는 안 잼). 코드 변경 없음 | BC 약 45분(3 runs 병렬) | 깊이 4 1500 run 종료 후 |
+| 4 | **residual/LayerNorm 코드 준비(#18)**: encoder MLP 옵션 추가, 기본값 동작 불변을 테스트로 고정(control 재현) | 학습 길이 실험이 D/C로 나오면 바로 실행 가능하게. A로 나오면 불필요 | 코드 + 테스트만 | 지금 준비, 실행은 1500 epoch 결과 후 |
+| 5 | **search → distill 최소 버전(#19)**: A(positives-only) vs C(경계 중앙 label)를 label만 교체해 기존 BC로 학습. state 분포는 2번 결과로 결정 | 실패 샘플(경계)이 쓸모 있는지. teacher state에서는 teacher label이 이미 중앙이라 null일 가능성이 높다 | 시뮬레이터 약 120k 샷(약 5분) + BC 6 runs | 2번 결과 후 |
+| 6 | 폭 256 + 깊이 4 결합 | 폭이 깊이와 겹치는지. 폭 효과가 작고 seed가 불안정해 우선순위 낮음 | 코드 없음, 3 runs | 여유 있을 때 |
+| 상시 | 새 run부터 **마지막 epoch 가중치도 저장**(#9) | 최댓값 선택의 낙관 편향을 보정(best-vs-last 비교) | 코드 약 5줄 + 테스트, 숫자 변화 없음 | 다음 학습 run 전에 |
+
+**일단 보류**: sin/cos 표현(#14)과 Laplace NLL(#20)은 깊이·loss 스케일 결과가 나온 뒤, made head 앵커 해소와 gradient refine(#15)은 기하 입력 결정 후, mode-aware speed head는 1번 결과에 달려 있다.
+
 ### 다음 방향 (판단 트리)
 
 결과별 판단 세부표는 experiments.md "encoder 용량 실험 — 결과별 판단표"(기준점과 정정 포함)에 있다.
