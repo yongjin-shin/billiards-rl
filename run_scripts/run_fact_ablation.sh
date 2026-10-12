@@ -57,6 +57,10 @@ if [ "$1" = "geomlog" ]; then            # 보조 loss 곡선 확인: 이전 geo
   run geomlog_ga5_s0 --out-root logs/experiments_geomlog --pair-supervision --no-wta-fallback --made2-head --gnn-layers 4 --geom-aux-weight 5 --seed 0
   wait; exit
 fi
+if [ "$1" = "geomw20" ]; then            # 보조 가중치 5 → 20, seed 0 (experiments.md 2026-10-13)
+  run geomw20_ga20_s0 --out-root logs/experiments_geomw20 --pair-supervision --no-wta-fallback --made2-head --gnn-layers 4 --geom-aux-weight 20 --seed 0
+  wait; exit
+fi
 if [ "$1" = "capacity" ]; then           # encoder 용량: 폭 256 / 깊이 4, made2 head 포함, seed 0/1/2
   for sd in 0 1 2; do
     run cap_H256_s$sd --pair-supervision --no-wta-fallback --made2-head --gnn-hidden 256 --seed $sd
