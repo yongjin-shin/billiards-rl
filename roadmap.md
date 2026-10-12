@@ -531,7 +531,7 @@ policy의 shot 실패 분해(robust+pairs, val): chosen pair miss ~24%, chosen p
 - **[완료·참고용]** 기하 조준각 차이 입력 → 3.46 (상한 참고, 최종 모델 아님)
 - **[보류]** gradient refine ∇ₐP(made)(#15) — head가 proposal 밖 정보를 가질 때까지
 - **[미착수·아이디어]** made head를 proposal 앵커에서 풀기(입력 차이 제거 또는 proposal 무작위 섭동). 격자 oracle의 상한(99.2% vs 84.8%)은 크지만, 기하 입력을 준 made head도 verify+refine이 82.6%(2층)에 그쳐 학습된 verifier로 얼마나 따라갈지는 불확실하다
-- **[미착수·아이디어]** 재시도 시 탐색(TODO 22): 직전 샷이 miss였던 state는 성공률 70.4%로 정상(82.2%)보다 낮다. 결정론적 정책이 같은 action을 반복하는 것일 수 있다(미검증)
+- **[완료·기각]** 재시도 시 탐색(TODO 22): miss·scratch 직후 샷의 object ball 배치가 그대로인 비율은 22~24%뿐(대부분 새 배치). 그대로인 그룹이 더 어렵지만(−9.9%p) 전체 샷의 4%라 이득 상한 +0.4%p → 접음
 - **[미착수·상향]** speed head를 mode-aware하게(TODO 21): label speed는 1.0 m/s 76% / ≥2 m/s 24%의 두 모드인데 모델은 중간값을 낸다. oracle 교체에서 speed를 label로 맞추면 81.6 → 89.6%(+8.0%p, 상한)
 
 **5. 탐색 + 학습 (expert iteration, RL 연결)**
@@ -559,7 +559,7 @@ policy의 shot 실패 분해(robust+pairs, val): chosen pair miss ~24%, chosen p
 | 2 | **loss 스케일 `--angle-scale-deg 0.1`** (깊이 4, 500 epoch, seed 0/1/2) | 각도가 병목(특히 2개 state)인데 baseline 측정(깊이 2)에서 train loss의 59%가 speed. 깊이 4에서는 안 잼. 코드 변경 없음 | BC 약 45분 | 1번과 병행 가능 |
 | 3 | **search → distill 최소 버전(#19)**: A(positives-only) vs C(경계 중앙 label), label만 교체 | 격자 oracle 상한이 크다(해가 99.2%). state 분포는 teacher state로 충분(실패의 73%가 첫 샷·적중 직후, 정책 state의 이득 상한 +2.0%p). 단 teacher label이 이미 중앙이라 null일 수 있음 | 시뮬레이터 약 120k 샷(약 5분) + BC 6 runs | 1·2번 뒤 |
 | 4 | ~~residual/LayerNorm 코드 준비(#18)~~ **[보류]** | 깊이 6이 1500 epoch에서 수렴해(3.77 → 3.51) 구조적 불안정이 아니라 학습 예산 문제였다. 깊이 6이 깊이 4를 못 넘었으므로 필요성이 낮다 | – | – |
-| 5 | **재시도 시 탐색 사전 측정(TODO 22)**: miss 직후 state가 직전 state와 얼마나 같은지 측정, 같으면 재시도 때 각도에 노이즈를 주는 롤아웃 | miss 직후 성공률 70.4% vs 정상 82.2%. 결정론적 정책의 반복 실패 가설(미검증). 학습 없음 | 롤아웃 기록 약 20줄 + 테스트, 수 분 | 지금 가능 |
+| – | 재시도 시 탐색 사전 측정(TODO 22) | **[완료·기각]** 판단표 B: 배치 그대로 22~24% < 50%, 이득 상한 +0.4%p. 2단계(노이즈 롤아웃)는 접음 | – | – |
 | 6 | 폭 256 + 깊이 4 결합 | 폭 효과가 작고 seed가 불안정해 우선순위 낮음 | 코드 없음, 3 runs | 여유 있을 때 |
 | 상시 | 새 run부터 **마지막 epoch 가중치도 저장**(#9) | 최댓값 선택의 낙관 편향 보정(best-vs-last 비교) | 코드 약 5줄 + 테스트 | 다음 학습 run 전에 |
 
@@ -603,7 +603,7 @@ policy의 shot 실패 분해(robust+pairs, val): chosen pair miss ~24%, chosen p
 | 18 | ~~깊이 > 4 최적화 안정화~~ **[보류]**: encoder MLP에 residual connection 또는 LayerNorm, lr 3e-4로 6/8층 재시도 | 깊이 6이 1500 epoch에서 수렴해 필요성이 줄었고, 깊이 6이 깊이 4를 못 넘음 | – | – |
 | 19 | **search → distill (expert iteration)**: head가 분포(Laplace/mixture)를 내고, 샘플 N개를 시뮬레이터로 쳐서 성공한 샘플을 label로 재학습(filtered BC). 샷 단위 contextual bandit(shots/game ≈ 3 / 샷 성공률이 모든 모델에서 맞음) | 같은 label pair에서 샘플 6개 중 하나라도 성공하는 비율이 b = 0.10°에서 깊이 4 81.8% → 92.6%, 격자 oracle은 각도 31 × speed 7 중 99.2%(made head는 84.8%). critic이 필요 없고(시뮬레이터가 진짜 1-step return) 추론은 정책 단독. RL 대응은 experiments.md "head에서 샘플링해서 치면?" | 시뮬레이터 약 100k 샷/라운드(약 4분, 추정) + BC | **사용자 결정**(열린 결정 2) |
 | 21 | **speed 쪽 개선**: speed head를 mode-aware하게(label speed가 1.0 m/s 76% / ≥2 m/s 24%의 두 모드인데 모델은 중간값을 냄) 또는 speed에만 L1 loss | oracle 교체에서 speed를 label로 바꾸면 81.6 → 89.6%(+8.0%p, 상한). 깊이 4는 speed를 안 고쳤다(r_s +7.5 → +8.0%p) | 코드 + 테스트 + BC 3 runs | – |
-| 22 | **재시도 시 탐색**: 직전 샷이 miss였고 state가 거의 같으면 각도에 노이즈를 주는 롤아웃. 먼저 miss 직후 state가 직전과 얼마나 같은지 측정 | miss 직후 성공률 70.4% vs 정상 82.2%. 결정론적 정책이 같은 action을 반복해 또 실패하는 것일 수 있음(미검증). 샘플링이 이득이 되는 경우 | 학습 없음, 롤아웃 | – |
+| 22 | ~~재시도 시 탐색~~ **완료·기각(2026-10-12)**: miss 직후 배치가 그대로인 비율 22~24%(판단표 B), 이득 상한 +0.4%p. 원래 제안: 직전 샷이 miss였고 state가 거의 같으면 각도에 노이즈를 주는 롤아웃 | miss 직후 성공률 70.4% vs 정상 82.2%. 결정론적 정책이 같은 action을 반복해 또 실패하는 것일 수 있음(미검증). 샘플링이 이득이 되는 경우 | 학습 없음, 롤아웃 | – |
 | 20 | **Laplace NLL(고정 scale)을 robust loss로**: 제곱 오차 대체 | train loss의 66%가 label 없는 1.4% row에서 나왔고 loss가 소수 row에 지배됨. 샘플별 scale 학습은 어려운 2개 state를 덜 보게 할 위험이 있어 고정 | BC | – |
 
 ### TODO 19 설계 메모: search → distill의 loss 비교 (2026-10-12 초안, 실행 전에 확정)
