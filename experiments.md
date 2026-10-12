@@ -4945,3 +4945,26 @@ select 대비 개선(seed별 0 / 1 / 2): verify+refine 1개 +3.6%p(+3.7, +4.0, +
 - L1 / BIN의 head는 의도대로 중간값을 없앴다(중앙값 1.02 / 1.00). 그러나 친 속도는 made head의 선택이라 L1은 1.0(75%), BIN은 0.75(71%)로 바뀌었고, **같은 속도에서도 clean 성공률이 control보다 낮다**(1.0 m/s: 79.7% → 77.0% / 72.2%, 0.75 m/s: 83.4% → 70.2% / 76.5%; 상태 구성이 달라 엄밀한 비교는 아님). 즉 악화는 속도 선택이 아니라 각도·pair 선택·made head 쪽 변화에서 왔을 가능성이 크다(L1: 각도 오차 +0.012°, BIN: made head 스캔 적중률 −5.2%p; 미분리).
 - 이전 절의 "refine의 speed 격자와 중복" 가설은 이 측정으로 지지된다.
 - 이 측정으로 oracle 교체와 speed map의 대상이 **정책이 실제로 치는 action이 아니었다**는 것이 확인됐다. verify+refine 출력 기준의 재측정이 필요하다(roadmap 우선순위 1번).
+
+### verify+refine 출력 기준 oracle 교체와 실패 예산 (2026-10-12 계획, 학습 없음)
+
+**왜**: 앞선 oracle 교체와 speed map은 pair head의 날것 출력(select) 기준이었다. 실제 정책은 verify+refine이라 made head가 각도 31 × 절대 speed 7개 격자에서 고른 값을 친다(위 "정정 2": head 출력과 친 속도가 거의 무관). 그래서 그 상한(각도 +9.9%p, speed +8.0%p)은 파이프라인의 개선 여지를 대표하지 못했다. **정책이 실제로 치는 최종 action 기준으로** 남은 실패가 각도, 속도, pair 선택 중 무엇인지 다시 잰다.
+**방법**: 깊이 4(대조로 control 2층, 학습 길이 실험의 깊이 6 1500 epoch), seed 0/1/2, label이 있는 모든 val state. label pair(후보 0)에서 made head의 verify+refine 격자(각도 ±0.3° 31개 × 절대 speed 7개)로 고른 **refined action**을 기준 R로 하고 실제로 친다.
+- R: refined action 그대로 (앞선 "label pair + refine"과 같은 값이어야 한다: 하네스 일치 확인)
+- Rs: refined 각도 + **label speed**, Ra: **label 각도** + refined speed
+- L: label action (teacher action, 성공 ≈ 98.8%여야 함)
+- P: 정책이 verify로 고른 pair의 refined action (실제 게임에서 치는 것)
+**실패 예산** (전체 실패 100% − P):
+- 선택 손실 = R − P (정책이 pair를 잘못 골라서 잃는 것)
+- 각도 손실 = Ra − R, speed 손실 = Rs − R (label pair에서 refine 후에도 남는 각도·speed 오차)
+- 그 외(결합·기타) = (L − R) − 각도 손실 − speed 손실, 그리고 L에도 못 미치는 나머지 = 100% − L
+**판단표** (R, Rs, Ra, L로 `oracle_row`와 같은 규칙; 위에서부터 먼저 맞는 행. 표본 오차 ±1%p)
+
+| # | 관측 | 해석 | 다음 행동 |
+|---|---|---|---|
+| A | L < 97% | 하네스 문제 | 해석 보류 |
+| B | 각도 손실 + speed 손실 < 0.5 · (L − R) | 각도와 speed가 함께 맞아야 한다(결합) | 따로 고치는 방법은 효과가 작다. 결합을 다루는 쪽(joint 모델링, 탐색) |
+| C | 각도 손실 ≥ 2 · speed 손실 (차이 ≥ 2%p) | refine 후에도 **각도**가 지배 | 각도 정밀도 쪽(loss 스케일, 폭 가중 손실, 표현, 탐색). speed 쪽은 접는다 |
+| D | speed 손실 ≥ 2 · 각도 손실 (차이 ≥ 2%p) | refine 후에도 **speed**가 지배 | speed 개선이 의미 있다. 단 proposal(head 출력)이 아니라 made head가 고르는 값을 겨냥해야 한다(격자 세분화, made head의 speed 정확도) |
+| E | 그 외 | 둘 다 기여 | 병행 |
+| 보조 | 선택 손실(R − P)이 각도·speed 손실보다 크다 | pair 선택이 최우선 | 선택/verify 쪽 |
