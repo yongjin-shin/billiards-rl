@@ -20,6 +20,8 @@ Two more parts (`--parts oracle visited`; default `--parts base` = the three abo
   visited roll the policy out for games and record each shot's balls left and previous shot's outcome: are the
           states the policy reaches harder than the teacher's val states? Judged by `visited_flags`. Also, for shots that
           follow a miss or a scratch: did the object balls stay where they were (cue ball aside)? `retry_row`
+  vroracle the oracle swap again, but on the action the policy really plays (verify+refine, made head picks from the grid):
+          swap the refined angle / speed for the label's, and split the failures into pair selection, angle, speed, rest
   speedmap  at the label angle, play a speed grid: where does the pair head's speed fall relative to the set of
           speeds that pocket (a gap between two modes, outside a single interval, or nothing works)? `speed_row`
 
@@ -518,9 +520,69 @@ def measure_speedmap(m: PairGNNPolicy, v: dict, seed: int, env, pm, cache: dict,
     return {"nl": v["nl"][idx], "flags": flags, "model_speed": model_speed, "model_ok": clean_flags(env, pm, v["obs"][idx], acts)}
 
 
+def measure_vr_oracle(m: PairGNNPolicy, v: dict, env, pm) -> dict:
+    """Oracle swap on the verify+refine action: the label pair's refined action R, and the policy's own played action P."""
+    configure(m, "verify_refine", E.ANG31, E.ABS_SPEEDS)
+    refined, played = [], []
+    for lo in range(0, len(v["rel"]), CHUNK):
+        x = v["rel"][lo:lo + CHUNK]
+        with torch.no_grad():
+            o = m.forward_full(x)
+            refined.append(to_env(m, refine_at(m, o, v["p0"][lo:lo + CHUNK])))
+            played.append(to_env(m, m.predict_unit(x)))
+    ref, label = np.concatenate(refined), np.asarray(v["label_act"], dtype=np.float32)
+    acts = {"R": ref, "Rs": substitute_action(ref, label, "model", "label"), "La": substitute_action(ref, label, "label", "model"),
+            "L": label, "P": np.concatenate(played)}
+    return {"lab": v["lab"], "nl": v["nl"], "ok": {k: clean_flags(env, pm, v["obs"], a) for k, a in acts.items()}}
+
+
+def failure_budget(p: float, r: float, rs: float, ra: float, l: float) -> dict[str, float]:
+    """
+    Where the failures of the played action go, in rate (0-1): p = policy's played action, r = label pair + refine,
+    rs / ra = r with the label's speed / angle, l = the label action.
+      selection = r − p     angle = ra − r     speed = rs − r     other = (l − r) − angle − speed     never_fixed = 1 − l
+    The parts sum to 1 − p when the two swaps are measured on the same states.
+    """
+    angle, speed = ra - r, rs - r
+    return {"selection": r - p, "angle": angle, "speed": speed, "other": (l - r) - angle - speed, "never_fixed": 1.0 - l}
+
+
 # ──────────────────────────────────────────────
 # Pooling and printing
 # ──────────────────────────────────────────────
+
+def summarize_vr_oracle(rs: list) -> dict:
+    lab = np.concatenate([r["lab"] for r in rs]); nl = np.concatenate([r["nl"] for r in rs])
+    ok = {k: np.concatenate([r["ok"][k] for r in rs]) for k in rs[0]["ok"]}
+    rate = lambda a, mask: float(a[mask].mean()) if mask.any() else float("nan")
+    groups = {"all": lab, **{str(b): lab & (nl == b) for b in (1, 2, 3)}}
+    out: dict = {"n": int(lab.sum()), "clean": {k: {g: rate(a, mk) for g, mk in groups.items()} for k, a in ok.items()}}
+    out["budget"] = {g: failure_budget(out["clean"]["P"][g], out["clean"]["R"][g], out["clean"]["Rs"][g], out["clean"]["La"][g], out["clean"]["L"][g])
+                     for g in groups}
+    c = out["clean"]
+    out["row"] = oracle_row(c["R"]["all"], c["Rs"]["all"], c["La"]["all"], c["L"]["all"])
+    b = out["budget"]["all"]
+    out["selection_first"] = bool(b["selection"] > max(b["angle"], b["speed"]))
+    return out
+
+
+def print_vr_oracle(label: str, s: dict) -> None:
+    f = "%-60s %8s %8s %8s %8s"
+    print(f"\n===== {label} oracle swap on the verify+refine action (val states with a label: {s['n']})")
+    print(f % ("clean (real shot, pocket, no scratch)", "1 left", "2 left", "3 left", "all"))
+    names = {"P": "P  policy's pair + refine (what is played in games)", "R": "R  label pair + refine", "Rs": "Rs refined angle + label speed",
+             "La": "La label angle + refined speed", "L": "L  label action (teacher)"}
+    for k, name in names.items():
+        c = s["clean"][k]
+        print(f % (name, *[f"{100 * c[g]:.1f}%" for g in ("1", "2", "3", "all")]))
+    print(f % ("failure budget (of the failures of P, in %p of all states):", "1 left", "2 left", "3 left", "all"))
+    for k, name in (("selection", "  pair selection (R − P)"), ("angle", "  angle, at the label pair (La − R)"), ("speed", "  speed, at the label pair (Rs − R)"),
+                    ("other", "  both together / other ((L − R) − angle − speed)"), ("never_fixed", "  not fixed even by the label action (1 − L)")):
+        print(f % (name, *[f"{100 * s['budget'][g][k]:+.1f}" for g in ("1", "2", "3", "all")]))
+    b = s["budget"]["all"]
+    print(f"  total failures of P {100 * (1 - s['clean']['P']['all']):.1f}%p = " + " + ".join(f"{k} {100 * b[k]:.1f}" for k in b)
+          + f"   → judgement row {s['row']}" + ("; pair selection is the largest part" if s["selection_first"] else ""))
+
 
 def summarize_speedmap(rs: list) -> dict:
     flags = np.concatenate([r["flags"] for r in rs]); ms = np.concatenate([r["model_speed"] for r in rs])
@@ -682,9 +744,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--n-scan", type=int, default=150, help="val states per seed for the scan")
     p.add_argument("--sample-states", type=int, default=600, help="val states per seed for the sampling test (0 = skip)")
     p.add_argument("--sample-draws", type=int, default=6)
-    p.add_argument("--parts", nargs="+", choices=["base", "oracle", "visited", "speedmap"], default=["base"],
+    p.add_argument("--parts", nargs="+", choices=["base", "oracle", "visited", "speedmap", "vroracle"], default=["base"],
                    help="base = split + scan + sample; oracle = swap angle/speed for the label's; visited = games vs val states; "
-                        "speedmap = speed grid at the label angle")
+                        "speedmap = speed grid at the label angle; vroracle = oracle swap on the verify+refine action")
     p.add_argument("--speedmap-states", type=int, default=0, help="val states per seed for the speed map (0 = all with a label)")
     p.add_argument("--speed-sample", action="store_true", help="models with a categorical speed head: sample the speed bin from its softmax instead of taking the most probable one")
     p.add_argument("--oracle-states", type=int, default=300, help="val states per seed for the grid oracle")
@@ -702,7 +764,7 @@ def main() -> None:
     pm = pocket_index_map(env)
     result, map_cache = {}, {}
     for label, pat in dict(a.split("=", 1) for a in args.runs).items():
-        split, scan, sample, oracle, visited, speedmap = [], [], [], [], [], []
+        split, scan, sample, oracle, visited, speedmap, vror = [], [], [], [], [], [], []
         for sd in args.seeds:
             found = glob.glob(pat.format(seed=sd))
             if len(found) != 1:
@@ -726,6 +788,8 @@ def main() -> None:
                 visited.append(measure_visited(m, v, env, pm, args.visited_games))
             if "speedmap" in args.parts:
                 speedmap.append(measure_speedmap(m, v, sd, env, pm, map_cache, args.speedmap_states))
+            if "vroracle" in args.parts:
+                vror.append(measure_vr_oracle(m, v, env, pm))
             print(f"{label} seed {sd} done", flush=True)
         result[label] = {}
         if split:
@@ -740,6 +804,9 @@ def main() -> None:
         if speedmap:
             result[label]["speedmap"] = summarize_speedmap(speedmap)
             print_speedmap(label, result[label]["speedmap"])
+        if vror:
+            result[label]["vroracle"] = summarize_vr_oracle(vror)
+            print_vr_oracle(label, result[label]["vroracle"])
     if args.out:
         os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
         json.dump(result, open(args.out, "w"), indent=2)

@@ -11,7 +11,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from exp16_wm.diagnose_action import (PREV_KINDS, candidate_grid, configure, grad_refine, gradient_toward_window, laplace_perturb,
                                        made_logit, oracle_row, previous_outcome, refine_at, rollout_shots, scan_baselines,
                                        shot_groups, signed_angle_diff_deg, substitute_action, summarize, summarize_oracle,
-                                       summarize_visited, visited_flags, retry_groups, retry_row, state_displacement, n_intervals, speed_failure_kind, speed_row, summarize_speedmap, SPEED_GRID)
+                                       summarize_visited, visited_flags, retry_groups, retry_row, state_displacement, n_intervals, speed_failure_kind, speed_row, summarize_speedmap, SPEED_GRID,
+                                       failure_budget, summarize_vr_oracle)
 from exp16_wm.gnn_policy import PairGNNPolicy
 from exp16_wm.obs_transform import relative_obs
 from exp16_wm.teacher_data import CLEAR_ENV
@@ -409,3 +410,37 @@ def test_summarize_speedmap_with_no_failure_has_nan_shares():
     r = {"nl": np.array([1]), "flags": np.ones((1, K), bool), "model_speed": np.array([1.0]), "model_ok": np.array([True])}
     s = summarize_speedmap([r])
     assert s["n_fail"] == 0 and np.isnan(s["fail_shares"]["gap"]) and s["row"] == "E"
+
+
+# ── oracle swap on the verify+refine action ───────────
+
+def test_failure_budget_parts_sum_to_the_failures_of_the_played_action():
+    b = failure_budget(p=0.80, r=0.84, rs=0.90, ra=0.92, l=0.98)
+    assert b["selection"] == pytest.approx(0.04) and b["angle"] == pytest.approx(0.08) and b["speed"] == pytest.approx(0.06)
+    assert b["other"] == pytest.approx((0.98 - 0.84) - 0.08 - 0.06) and b["never_fixed"] == pytest.approx(0.02)
+    assert sum(b.values()) == pytest.approx(1.0 - 0.80)                             # 1 − p, the failures of the played action
+
+
+def test_failure_budget_allows_negative_parts_and_keeps_the_sum():
+    b = failure_budget(p=0.85, r=0.80, rs=0.78, ra=0.90, l=0.99)                    # the played pair did better than the label pair; a swap hurt
+    assert b["selection"] < 0 and b["speed"] < 0
+    assert sum(b.values()) == pytest.approx(1.0 - 0.85)
+
+
+def _vr_seed(ok_p, ok_r, ok_rs, ok_la, ok_l, lab, nl):
+    return {"lab": np.array(lab), "nl": np.array(nl), "ok": {k: np.array(v) for k, v in
+            {"P": ok_p, "R": ok_r, "Rs": ok_rs, "La": ok_la, "L": ok_l}.items()}}
+
+
+def test_summarize_vr_oracle_pools_groups_ignores_unlabelled_states_and_picks_the_row():
+    # 8 labelled states in the 2-ball group: R fails on 4 of them, label speed repairs 3, label angle repairs 1
+    base = dict(lab=[True] * 8 + [False], nl=[2] * 8 + [3])
+    r = _vr_seed(ok_p=[1, 1, 1, 0, 0, 0, 0, 0, 1], ok_r=[1, 1, 1, 1, 0, 0, 0, 0, 1], ok_rs=[1, 1, 1, 1, 1, 1, 1, 0, 1],
+                 ok_la=[1, 1, 1, 1, 1, 0, 0, 0, 1], ok_l=[1] * 9, **base)
+    s = summarize_vr_oracle([r, r])
+    assert s["n"] == 16 and s["clean"]["R"]["all"] == 0.5 and s["clean"]["Rs"]["all"] == pytest.approx(7 / 8) and s["clean"]["L"]["all"] == 1.0
+    assert np.isnan(s["clean"]["R"]["3"])                                          # the only 3-ball state is unlabelled
+    b = s["budget"]["all"]
+    assert b["selection"] == pytest.approx(0.125) and b["speed"] == pytest.approx(0.375) and b["angle"] == pytest.approx(0.125)
+    assert b["never_fixed"] == 0.0 and sum(b.values()) == pytest.approx(1 - 3 / 8)
+    assert s["row"] == "D" and s["selection_first"] is False                       # speed (37.5) ≥ 2 × angle (12.5) and ≥ 2%p more; selection is not the largest
