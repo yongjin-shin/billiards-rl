@@ -531,6 +531,7 @@ policy의 shot 실패 분해(robust+pairs, val): chosen pair miss ~24%, chosen p
 - **[완료]** oracle 교체(label의 각도/speed로 바꿔 치기): 각도 +9.9%p, speed +8.0%p로 거의 가산적(판단표 E). (select 기준, 위 실패 예산으로 대체됨) **깊이 4는 각도 쪽만 개선**(speed는 그대로), 남은 공 2개의 약점은 각도
 - **[완료·참고용]** 기하 조준각 차이 입력 → 3.46 (상한 참고, 최종 모델 아님)
 - **[보류]** gradient refine ∇ₐP(made)(#15) — head가 proposal 밖 정보를 가질 때까지
+- **[완료·판단 불가]** 기하 look-ahead 보조 목표(`--geom-aux-weight 5`, 포켓 입구 편차·쿠션 거리·경로상 다른 공): 고정 encoder probe R²가 control과 같아 정보가 심기지 않았고(판단표 M), 보조 head 자신도 학습 state에서 R² 0.23~0.53(underfit), 게임 3.66 vs 3.55·success@1 −0.3~−2.3%p(seed 변동 안). 유용성은 미판단. 다음은 목표만 학습하는 encoder가 R² 0.8에 도달하는지 확인
 - **[미착수·아이디어]** made head를 proposal 앵커에서 풀기(입력 차이 제거 또는 proposal 무작위 섭동). 격자 oracle의 상한(99.2% vs 84.8%)은 크지만, 기하 입력을 준 made head도 verify+refine이 82.6%(2층)에 그쳐 학습된 verifier로 얼마나 따라갈지는 불확실하다
 - **[완료·기각]** 재시도 시 탐색(TODO 22): miss·scratch 직후 샷의 object ball 배치가 그대로인 비율은 22~24%뿐(대부분 새 배치). 그대로인 그룹이 더 어렵지만(−9.9%p) 전체 샷의 4%라 이득 상한 +0.4%p → 접음
 - **[완료·부정적]** speed 분포 head(TODO 21): L1과 구간별 확률(21구간) 모두 select 수준에서는 의도대로(select clean +3.2/+3.6%p, 틈 실패 70% → 43%) 그러나 verify+refine 파이프라인에서 게임이 나빠짐(3.55 → 3.78/3.82, 3 seed 모두). 실패가 틈에서 "잘못된 모드(아래)"로 이동. 채택하지 않음. 확률대로 뽑기도 도움 안 됨
@@ -557,7 +558,7 @@ policy의 shot 실패 분해(robust+pairs, val): chosen pair miss ~24%, chosen p
 |---|---|---|---|---|
 | – | ~~각도 정밀도: loss 스케일 `--angle-scale-deg 0.1`~~ / Kendall 자동 가중치 | **[완료·효과 없음]** 각도 가중치 4배: 각도 오차 0.097 → 0.096°(변화 없음, 판단표 C), 게임 3.62. Kendall: 각도 오차 +0.018°, 게임 3.83(기준보다 나쁨, 판단표 D). 각도 가중치는 병목이 아님 | – | – |
 | 2 | **각도 정밀도: 창 폭 가중 손실** (좁은 창에 정밀도를 몰아주기) | 각도 창 폭이 state마다 3.6배 이상 다름(실측). 점 label은 폭을 모름. 가설(미검증). 폭 계산이 선행(약 16분, 학습 없음) | 폭 계산 + 손실 코드·테스트 + BC 3 runs | 1번 결과 후 |
-| 3 | **각도 verifier**: made head가 각도를 고르지 못함(격자에 해 99.2% vs made head 84.8%). **search → distill 1단계(시뮬레이터 결과로 made head on-policy fine-tune, positive·negative 사용)는 효과 없음**(success@1 +0.2%p, 게임 +0.075 shots, 판단표 C). encoder를 고정한 made head는 데이터가 있어도 순위를 못 올림 → 다음은 기하 특징을 입력에 더한 verifier(같은 데이터로 오프라인 시험 가능) 또는 추론 때 시뮬레이터 검증 | 완벽한 verifier는 게임 3.55 → 3.02 shots(샷당 시뮬레이터 확인 평균 11회). 각도 손실이 proposal 때문인지 verifier 때문인지는 verifier 쪽으로 기움 | 설계 필요 | 지금 가능 |
+| 3 | **각도 verifier**: made head가 각도를 고르지 못함(격자에 해 99.2% vs made head 84.8%). **search → distill 1단계(시뮬레이터 결과로 made head on-policy fine-tune, positive·negative 사용)는 효과 없음**(success@1 +0.2%p, 게임 +0.075 shots, 판단표 C). encoder를 고정한 made head는 데이터가 있어도 순위를 못 올림. **기하 look-ahead 보조 목표도 encoder에 정보를 심지 못함**(판단표 M, 보조 head가 학습 state에서도 R² 0.23~0.53). 다음은 encoder가 기하 목표를 배울 수 있는지 확인 → 아니면 verifier 전용 encoder(원시 좌표) 또는 추론 때 시뮬레이터 검증 | 완벽한 verifier는 게임 3.55 → 3.02 shots(샷당 시뮬레이터 확인 평균 11회). 각도 손실이 proposal 때문인지 verifier 때문인지는 verifier 쪽으로 기움 | 설계 필요 | 지금 가능 |
 | 4 | **pair 선택** (손실 4.2%p, 3개 state 6.5%p) | 새 아이디어 없음. 3개 state에서 선택 손실이 각도와 비슷한 크기 | – | 보류 |
 | – | speed 개선 | **접음.** 최종 행동 기준 여지가 2.9%p뿐이고(select 기준 8.0%p는 refine이 풀어 줌), speed 분포 head는 게임이 나빠짐 | – | – |
 | – | cascade / 결합 모델링 | **접음.** 각도·speed 결합 손실이 1.9%p뿐이라 얻을 몫이 작음 | – | – |
