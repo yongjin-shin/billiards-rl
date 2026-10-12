@@ -686,6 +686,7 @@ def parse_args() -> argparse.Namespace:
                    help="base = split + scan + sample; oracle = swap angle/speed for the label's; visited = games vs val states; "
                         "speedmap = speed grid at the label angle")
     p.add_argument("--speedmap-states", type=int, default=0, help="val states per seed for the speed map (0 = all with a label)")
+    p.add_argument("--speed-sample", action="store_true", help="models with a categorical speed head: sample the speed bin from its softmax instead of taking the most probable one")
     p.add_argument("--oracle-states", type=int, default=300, help="val states per seed for the grid oracle")
     p.add_argument("--visited-games", type=int, default=500, help="games per seed")
     p.add_argument("--out", type=str, default=None)
@@ -709,6 +710,10 @@ def main() -> None:
             m = E.load_run(found[0])
             if not m.has_made2 or m.made2_geom:
                 raise SystemExit(f"{label}: needs a made2 head without the geometry input")
+            if args.speed_sample:
+                if not m.speed_bins:
+                    raise SystemExit(f"{label}: --speed-sample needs a model trained with --speed-bins")
+                m.speed_sample = True
             v = val_setup(raw, sd)
             if "base" in args.parts:
                 split.append(measure_split(m, v, env, pm))

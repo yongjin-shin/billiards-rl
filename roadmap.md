@@ -503,7 +503,7 @@ policy의 shot 실패 분해(robust+pairs, val): chosen pair miss ~24%, chosen p
 
 ### 아이디어 지도 (2026-10-12) — 주제별 2단계 정리
 
-현재 병목은 **고른 pair의 action 정밀도**다(깊이 4에서 label pair를 줘도 13.7%p 실패, pair 선택 손실은 4.2%p). 그 실패는 **각도(+9.9%p)와 speed(+8.0%p)가 거의 가산적**으로 만들고, 깊이 4는 각도만 개선했다. 상태 표기: **[완료]** 결과 있음 / **[진행]** 실행 중 / **[미착수]** 아직 안 함 / **[보류]** 사전에 멈춤. 숫자는 experiments.md의 해당 절.
+현재 병목은 **고른 pair의 action 정밀도**다(깊이 4에서 label pair를 줘도 13.7%p 실패, pair 선택 손실은 4.2%p). 그 실패는 (pair head 출력, select 기준으로) **각도(+9.9%p)와 speed(+8.0%p)가 거의 가산적**으로 만들고, 깊이 4는 각도만 개선했다. 단 실제 정책은 verify+refine이라 refine의 speed 격자가 speed 문제를 일부 풀고 있어, speed 상한 +8.0%p는 파이프라인의 개선 여지가 아니었다(speed 분포 head로 확인). 상태 표기: **[완료]** 결과 있음 / **[진행]** 실행 중 / **[미착수]** 아직 안 함 / **[보류]** 사전에 멈춤. 숫자는 experiments.md의 해당 절.
 
 **1. 데이터와 teacher**
 - **[완료]** label 없는 1.37% row를 WTA loss로 학습하던 문제 → `--no-wta-fallback`으로 4.51 → 4.14 (그 row가 train loss의 66%)
@@ -532,7 +532,7 @@ policy의 shot 실패 분해(robust+pairs, val): chosen pair miss ~24%, chosen p
 - **[보류]** gradient refine ∇ₐP(made)(#15) — head가 proposal 밖 정보를 가질 때까지
 - **[미착수·아이디어]** made head를 proposal 앵커에서 풀기(입력 차이 제거 또는 proposal 무작위 섭동). 격자 oracle의 상한(99.2% vs 84.8%)은 크지만, 기하 입력을 준 made head도 verify+refine이 82.6%(2층)에 그쳐 학습된 verifier로 얼마나 따라갈지는 불확실하다
 - **[완료·기각]** 재시도 시 탐색(TODO 22): miss·scratch 직후 샷의 object ball 배치가 그대로인 비율은 22~24%뿐(대부분 새 배치). 그대로인 그룹이 더 어렵지만(−9.9%p) 전체 샷의 4%라 이득 상한 +0.4%p → 접음
-- **[진행·사전 점검 완료]** speed head를 mode-aware하게(TODO 21), speed window map 결과 판단표 A: 모델 speed 실패의 70%가 두 모드 사이 틈, 53% state는 성공 speed 구간이 둘 이상. 처방은 mode-aware head 또는 성공 speed 집합에 대한 tolerant 손실: label speed는 1.0 m/s 76% / ≥2 m/s 24%의 두 모드인데 모델은 중간값을 낸다. oracle 교체에서 speed를 label로 맞추면 81.6 → 89.6%(+8.0%p, 상한)
+- **[완료·부정적]** speed 분포 head(TODO 21): L1과 구간별 확률(21구간) 모두 select 수준에서는 의도대로(select clean +3.2/+3.6%p, 틈 실패 70% → 43%) 그러나 verify+refine 파이프라인에서 게임이 나빠짐(3.55 → 3.78/3.82, 3 seed 모두). 실패가 틈에서 "잘못된 모드(아래)"로 이동. 채택하지 않음. 확률대로 뽑기도 도움 안 됨
 
 **5. 탐색 + 학습 (expert iteration, RL 연결)**
 - **[완료]** Laplace 샘플링: 샘플 하나를 그대로 치면 손해, 시뮬레이터가 6개 중 고르면 81.8 → 92.6% (추론 때 시뮬레이터가 있을 때의 상한)
@@ -553,9 +553,10 @@ policy의 shot 실패 분해(robust+pairs, val): chosen pair miss ~24%, chosen p
 
 | 순위 | 실험 | 상태·근거 | 비용 | 시점 |
 |---|---|---|---|---|
+| 1 | **verify+refine 출력 기준 oracle 교체 (학습 없음)**: 정책의 실제 v+r action에서 각도 / speed를 label로 바꿔 치고, 남은 실패가 각도·speed·pair 중 무엇인지 분해 | speed head 결과로 select 기준 oracle이 파이프라인을 대표하지 못함이 드러남. 이 재측정이 다음 투자처(각도 vs speed vs 선택)를 정함 | `diagnose_action`에 추가 약 30줄 + 테스트, 계산 약 5분 | 지금 |
 | – | oracle 교체 진단 | **[완료]** 각도 +9.9%p / speed +8.0%p, 거의 가산적(E). 깊이 4는 각도만 개선, 2개 state는 각도. 격자 oracle 99.2% vs made head 84.8% | – | – |
 | – | 정책이 가는 state vs teacher state (#16) | **[완료]** 분포 이동 없음, 실패 직후 state만 어려움(실패의 27%), 상한 +2.0%p(B) | – | – |
-| 1 | **speed 쪽 개선(TODO 21)** — 사전 점검(speed window map) **완료: 판단표 A**(실패의 70%가 틈). 다음: tolerant speed 손실(성공 speed 집합에 가장 가까운 점을 목표) 또는 mode-aware head 또는 L1 | speed를 label대로 하면 +8.0%p(상한), 틈 실패 완전 해소 시 label 각도에서 약 6.0%p. 깊이 4가 손대지 않은 항목 | 코드 + 테스트 + BC 3 runs(약 45분) | 깊이 4 1500 run 종료 후 |
+| – | speed 쪽 개선(TODO 21) | **[완료·부정적]** speed map 판단표 A → L1/구간별 확률 head: select는 좋아졌으나(+3.2/+3.6%p) 게임이 나빠짐(+0.23/+0.27 shots). refine의 speed 격자와 중복·간섭으로 보임. oracle의 "speed +8.0%p"는 select 기준이라 파이프라인의 여지가 아니었음(정정) | 코드 + 테스트 + BC 3 runs(약 45분) | 깊이 4 1500 run 종료 후 |
 | 2 | **loss 스케일 `--angle-scale-deg 0.1`** (깊이 4, 500 epoch, seed 0/1/2) | 각도가 병목(특히 2개 state)인데 baseline 측정(깊이 2)에서 train loss의 59%가 speed. 깊이 4에서는 안 잼. 코드 변경 없음 | BC 약 45분 | 1번과 병행 가능 |
 | 3 | **search → distill 최소 버전(#19)**: A(positives-only) vs C(경계 중앙 label), label만 교체 | 격자 oracle 상한이 크다(해가 99.2%). state 분포는 teacher state로 충분(실패의 73%가 첫 샷·적중 직후, 정책 state의 이득 상한 +2.0%p). 단 teacher label이 이미 중앙이라 null일 수 있음 | 시뮬레이터 약 120k 샷(약 5분) + BC 6 runs | 1·2번 뒤 |
 | 4 | ~~residual/LayerNorm 코드 준비(#18)~~ **[보류]** | 깊이 6이 1500 epoch에서 수렴해(3.77 → 3.51) 구조적 불안정이 아니라 학습 예산 문제였다. 깊이 6이 깊이 4를 못 넘었으므로 필요성이 낮다 | – | – |
@@ -602,7 +603,7 @@ policy의 shot 실패 분해(robust+pairs, val): chosen pair miss ~24%, chosen p
 | 17 | **2개 state 약점의 구조적 원인** | 용량으로 안 풀리면 입력 분포·최적화 쪽(남은 공 2개 state만 각도 오차 2배) | – | 13 결과에 따라 |
 | 18 | ~~깊이 > 4 최적화 안정화~~ **[보류]**: encoder MLP에 residual connection 또는 LayerNorm, lr 3e-4로 6/8층 재시도 | 깊이 6이 1500 epoch에서 수렴해 필요성이 줄었고, 깊이 6이 깊이 4를 못 넘음 | – | – |
 | 19 | **search → distill (expert iteration)**: head가 분포(Laplace/mixture)를 내고, 샘플 N개를 시뮬레이터로 쳐서 성공한 샘플을 label로 재학습(filtered BC). 샷 단위 contextual bandit(shots/game ≈ 3 / 샷 성공률이 모든 모델에서 맞음) | 같은 label pair에서 샘플 6개 중 하나라도 성공하는 비율이 b = 0.10°에서 깊이 4 81.8% → 92.6%, 격자 oracle은 각도 31 × speed 7 중 99.2%(made head는 84.8%). critic이 필요 없고(시뮬레이터가 진짜 1-step return) 추론은 정책 단독. RL 대응은 experiments.md "head에서 샘플링해서 치면?" | 시뮬레이터 약 100k 샷/라운드(약 4분, 추정) + BC | **사용자 결정**(열린 결정 2) |
-| 21 | **speed 쪽 개선**: speed head를 mode-aware하게(label speed가 1.0 m/s 76% / ≥2 m/s 24%의 두 모드인데 모델은 중간값을 냄) 또는 speed에만 L1 loss | oracle 교체에서 speed를 label로 바꾸면 81.6 → 89.6%(+8.0%p, 상한). 깊이 4는 speed를 안 고쳤다(r_s +7.5 → +8.0%p) | 코드 + 테스트 + BC 3 runs | – |
+| 21 | ~~speed 쪽 개선~~ **완료·부정적(2026-10-12)**: speed head를 L1 / 구간별 확률(21구간)로 바꿨더니 select clean은 +3.2/+3.6%p 오르고 틈 실패 70% → 43%였지만 verify+refine 게임이 3.55 → 3.78/3.82(3 seed 모두 나쁨). 채택하지 않음. 남은 의문: verify+refine 출력 기준으로 speed·각도 중 무엇이 남았는가(아래 우선순위 1번) | oracle 교체의 speed +8.0%p는 select 기준이라 파이프라인의 여지가 아니었음(정정) | – | – |
 | 22 | ~~재시도 시 탐색~~ **완료·기각(2026-10-12)**: miss 직후 배치가 그대로인 비율 22~24%(판단표 B), 이득 상한 +0.4%p. 원래 제안: 직전 샷이 miss였고 state가 거의 같으면 각도에 노이즈를 주는 롤아웃 | miss 직후 성공률 70.4% vs 정상 82.2%. 결정론적 정책이 같은 action을 반복해 또 실패하는 것일 수 있음(미검증). 샘플링이 이득이 되는 경우 | 학습 없음, 롤아웃 | – |
 | 20 | **Laplace NLL(고정 scale)을 robust loss로**: 제곱 오차 대체 | train loss의 66%가 label 없는 1.4% row에서 나왔고 loss가 소수 row에 지배됨. 샘플별 scale 학습은 어려운 2개 state를 덜 보게 할 위험이 있어 고정 | BC | – |
 
