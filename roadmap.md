@@ -527,7 +527,8 @@ policy의 shot 실패 분해(robust+pairs, val): chosen pair miss ~24%, chosen p
 **4. 추론 때 보정 (made head, verify/refine)**
 - **[완료]** made head + verify + refine(각도 31 × 절대 speed 7) → 3.90. refine의 이득은 각도가 아니라 speed에서 나옴. 각도만 조정(격자·gradient)은 이득 0
 - **[완료]** made head의 "스캔 argmax가 창 안"은 proposal 적중률과 같은 값(정정), head는 proposal에 앵커됨
-- **[완료]** oracle 교체(label의 각도/speed로 바꿔 치기): 각도 +9.9%p, speed +8.0%p로 거의 가산적(판단표 E). **깊이 4는 각도 쪽만 개선**(speed는 그대로), 남은 공 2개의 약점은 각도
+- **[완료]** verify+refine 출력 기준 oracle 교체와 실패 예산(판단표 C): 정책 실패 17.8%p = 각도 7.7 + pair 선택 4.2 + speed 2.9 + 결합·기타 1.9 + 못 고침 1.2. speed 여지는 select 기준 8.0이 아니라 2.9%p, 각도·speed 결합은 1.9%p로 작음(cascade 불필요). 남은 공 2개 각도 손실 16.3%p
+- **[완료]** oracle 교체(label의 각도/speed로 바꿔 치기): 각도 +9.9%p, speed +8.0%p로 거의 가산적(판단표 E). (select 기준, 위 실패 예산으로 대체됨) **깊이 4는 각도 쪽만 개선**(speed는 그대로), 남은 공 2개의 약점은 각도
 - **[완료·참고용]** 기하 조준각 차이 입력 → 3.46 (상한 참고, 최종 모델 아님)
 - **[보류]** gradient refine ∇ₐP(made)(#15) — head가 proposal 밖 정보를 가질 때까지
 - **[미착수·아이디어]** made head를 proposal 앵커에서 풀기(입력 차이 제거 또는 proposal 무작위 섭동). 격자 oracle의 상한(99.2% vs 84.8%)은 크지만, 기하 입력을 준 made head도 verify+refine이 82.6%(2층)에 그쳐 학습된 verifier로 얼마나 따라갈지는 불확실하다
@@ -547,24 +548,23 @@ policy의 shot 실패 분해(robust+pairs, val): chosen pair miss ~24%, chosen p
 
 **결정 대기**: (1) 기하 조준각 입력을 made head에만 허용할지(bitter lesson과 충돌), (2) 다음 단계를 search → distill로 갈지 residual/LayerNorm 깊이 재시도로 갈지.
 
-### 지금 실험할 만한 것 (2026-10-12, 우선순위, 진단 두 가지 결과 반영)
+### 지금 실험할 만한 것 (2026-10-12, 우선순위, verify+refine 기준 실패 예산 반영)
 
-기준: 병목(action 정밀도)에 직접 닿고, 결과가 다음 결정을 바꾸는 것. 자원: 학습 길이 실험이 끝나 CPU가 비었다(2026-10-12 10:17). 판단표는 실행 직전에 결과를 보기 전에 정한다(experiments.md 규칙).
+**기준 데이터 — 정책이 실제로 치는 행동의 실패 예산(깊이 4, 실패 17.8%p)**: **각도 7.7 (43%)** / pair 선택 4.2 (23%) / speed 2.9 (16%) / 각도·speed 결합·기타 1.9 / label action으로도 못 고침 1.2. 남은 공 2개 state의 각도 손실은 16.3%p, 3개 state의 pair 선택은 6.5%p. 판단표 C(각도 지배). 상세는 experiments.md "verify+refine 출력 기준 oracle 교체와 실패 예산".
+자원: 학습 길이 실험이 끝나 CPU가 비었다. 판단표는 실행 직전에 결과를 보기 전에 정한다(experiments.md 규칙).
 
-| 순위 | 실험 | 상태·근거 | 비용 | 시점 |
+| 순위 | 실험 | 겨냥하는 몫과 근거 | 비용 | 시점 |
 |---|---|---|---|---|
-| 1 | **verify+refine 출력 기준 oracle 교체 (학습 없음)**: 정책의 실제 v+r action에서 각도 / speed를 label로 바꿔 치고, 남은 실패가 각도·speed·pair 중 무엇인지 분해 | speed head 결과로 select 기준 oracle이 파이프라인을 대표하지 못함이 드러남. 이 재측정이 다음 투자처(각도 vs speed vs 선택)를 정함 | `diagnose_action`에 추가 약 30줄 + 테스트, 계산 약 5분 | 지금 |
-| – | oracle 교체 진단 | **[완료]** 각도 +9.9%p / speed +8.0%p, 거의 가산적(E). 깊이 4는 각도만 개선, 2개 state는 각도. 격자 oracle 99.2% vs made head 84.8% | – | – |
-| – | 정책이 가는 state vs teacher state (#16) | **[완료]** 분포 이동 없음, 실패 직후 state만 어려움(실패의 27%), 상한 +2.0%p(B) | – | – |
-| – | speed 쪽 개선(TODO 21) | **[완료·부정적]** speed map 판단표 A → L1/구간별 확률 head: select는 좋아졌으나(+3.2/+3.6%p) 게임이 나빠짐(+0.23/+0.27 shots). refine의 speed 격자와 중복·간섭으로 보임. oracle의 "speed +8.0%p"는 select 기준이라 파이프라인의 여지가 아니었음(정정) | 코드 + 테스트 + BC 3 runs(약 45분) | 깊이 4 1500 run 종료 후 |
-| 2 | **loss 스케일 `--angle-scale-deg 0.1`** (깊이 4, 500 epoch, seed 0/1/2) | 각도가 병목(특히 2개 state)인데 baseline 측정(깊이 2)에서 train loss의 59%가 speed. 깊이 4에서는 안 잼. 코드 변경 없음 | BC 약 45분 | 1번과 병행 가능 |
-| 3 | **search → distill 최소 버전(#19)**: A(positives-only) vs C(경계 중앙 label), label만 교체 | 격자 oracle 상한이 크다(해가 99.2%). state 분포는 teacher state로 충분(실패의 73%가 첫 샷·적중 직후, 정책 state의 이득 상한 +2.0%p). 단 teacher label이 이미 중앙이라 null일 수 있음 | 시뮬레이터 약 120k 샷(약 5분) + BC 6 runs | 1·2번 뒤 |
-| 4 | ~~residual/LayerNorm 코드 준비(#18)~~ **[보류]** | 깊이 6이 1500 epoch에서 수렴해(3.77 → 3.51) 구조적 불안정이 아니라 학습 예산 문제였다. 깊이 6이 깊이 4를 못 넘었으므로 필요성이 낮다 | – | – |
-| – | 재시도 시 탐색 사전 측정(TODO 22) | **[완료·기각]** 판단표 B: 배치 그대로 22~24% < 50%, 이득 상한 +0.4%p. 2단계(노이즈 롤아웃)는 접음 | – | – |
-| 6 | 폭 256 + 깊이 4 결합 | 폭 효과가 작고 seed가 불안정해 우선순위 낮음 | 코드 없음, 3 runs | 여유 있을 때 |
+| 1 | **각도 정밀도: loss 스케일 `--angle-scale-deg 0.1`** (깊이 4, 500 epoch, seed 0/1/2) | 각도 손실 7.7%p(2개 state 16.3%p)가 최대 항목. 이전 스케일 실험은 MLP 시절 1회뿐, 깊이 4에서는 안 잼. 코드 변경 없음 | BC 약 45분 | 지금 가능 |
+| 2 | **각도 정밀도: 창 폭 가중 손실** (좁은 창에 정밀도를 몰아주기) | 각도 창 폭이 state마다 3.6배 이상 다름(실측). 점 label은 폭을 모름. 가설(미검증). 폭 계산이 선행(약 16분, 학습 없음) | 폭 계산 + 손실 코드·테스트 + BC 3 runs | 1번 결과 후 |
+| 3 | **각도 verifier**: made head가 각도를 고르지 못함(격자에 해 99.2% vs made head 84.8%). 시뮬레이터 검증/탐색(#19) 또는 made head의 각도 해상도 개선 | 각도 손실이 proposal 정밀도 때문인지 verifier 때문인지 가르는 실험이 먼저. #19의 각도 이득은 teacher label이 이미 창 중앙이라 약할 수 있음 | 설계 필요 | 1·2번 뒤 |
+| 4 | **pair 선택** (손실 4.2%p, 3개 state 6.5%p) | 새 아이디어 없음. 3개 state에서 선택 손실이 각도와 비슷한 크기 | – | 보류 |
+| – | speed 개선 | **접음.** 최종 행동 기준 여지가 2.9%p뿐이고(select 기준 8.0%p는 refine이 풀어 줌), speed 분포 head는 게임이 나빠짐 | – | – |
+| – | cascade / 결합 모델링 | **접음.** 각도·speed 결합 손실이 1.9%p뿐이라 얻을 몫이 작음 | – | – |
+| – | 깊이 / 학습 길이 / 재시도 노이즈 / DAgger | **닫음.** 깊이 4, 500 epoch이 비용 대비 최선(각도 손실은 깊이가 줄이나 speed·선택이 늘어 깊이 6도 P가 같음). 재시도 이득 상한 +0.4%p, 정책 state 이득 상한 +2.0%p | – | – |
 | 상시 | 새 run부터 **마지막 epoch 가중치도 저장**(#9) | 최댓값 선택의 낙관 편향 보정(best-vs-last 비교) | 코드 약 5줄 + 테스트 | 다음 학습 run 전에 |
 
-**일단 보류**: sin/cos 표현(#14)과 Laplace NLL(#20)은 깊이·loss 스케일 결과가 나온 뒤, gradient refine(#15)과 made head 앵커 해소는 기하 입력 결정 후(상한은 크지만 학습된 verifier가 따라갈지 불확실), DAgger(#10)는 위 결과로 우선순위 낮음.
+**일단 보류**: sin/cos 표현(#14)과 Laplace NLL(#20)은 loss 스케일 결과가 나온 뒤, gradient refine(#15)과 made head 앵커 해소는 기하 입력 결정 후(상한은 크지만 학습된 verifier가 따라갈지 불확실), 폭 256 + 깊이 4 결합은 효과가 작아 보류.
 
 ### 다음 방향 (판단 트리)
 
