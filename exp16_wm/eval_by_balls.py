@@ -91,7 +91,8 @@ def load_run(run_dir: str) -> PairGNNPolicy:
     m = PairGNNPolicy(a["gnn_hidden"], factorized=a.get("selection") == "factorized",
                       scratch_head=bool(a.get("scratch_head")), made_head=bool(a.get("made_head")),
                       made2_head=bool(a.get("made2_head")), geom_angle=bool(a.get("geom_angle")),
-                      made2_geom=bool(a.get("made2_geom")), enc_layers=a.get("gnn_layers", 2))
+                      made2_geom=bool(a.get("made2_geom")), enc_layers=a.get("gnn_layers", 2),
+                      speed_loss=a.get("speed_loss", "mse"), speed_bins=int(a.get("speed_bins", 0)))
     m.load_state_dict(torch.load(os.path.join(run_dir, "bc_model.pt"))["gnn"])
     return m.eval()
 

@@ -57,13 +57,42 @@ def _mlp(i: int, h: int, o: int, layers: int = 2) -> nn.Sequential:
     return nn.Sequential(*mods, nn.Linear(h, o))
 
 
+def speed_bin_centers(n_bins: int) -> torch.Tensor:
+    """n_bins centre speeds (m/s), log-spaced from the lowest to the highest speed of the action range.
+    With 21 centres the ratio is 16^(1/20) and 0.5, 1.0, 2.0, 4.0, 8.0 m/s are centres (the label speeds sit on 1.0 m/s)."""
+    lo, hi = float(ACT_LOW[1]), float(ACT_HIGH[1])
+    return lo * (hi / lo) ** (torch.arange(n_bins, dtype=torch.float32) / (n_bins - 1))
+
+
+def speed_bin_edges(n_bins: int) -> torch.Tensor:
+    """n_bins − 1 inner edges: the geometric mean of neighbouring centres (so no label speed of interest lies on an edge)."""
+    c = speed_bin_centers(n_bins)
+    return torch.sqrt(c[:-1] * c[1:])
+
+
+def speed_to_bin(speed_ms: torch.Tensor, n_bins: int) -> torch.Tensor:
+    """Speeds (m/s) → index of the nearest centre in log space, in [0, n_bins − 1] (out-of-range values go to the end bins)."""
+    return torch.bucketize(speed_ms, speed_bin_edges(n_bins).to(speed_ms.device))
+
+
+def bin_center_ms(idx: torch.Tensor, n_bins: int) -> torch.Tensor:
+    """Bin index → centre speed in m/s."""
+    return speed_bin_centers(n_bins).to(idx.device)[idx]
+
+
 class PairGNNPolicy(nn.Module):
     def __init__(self, hidden: int = 128, wta_eps: float = 0.05, sel_weight: float = 10.0,
                  factorized: bool = False, scratch_head: bool = False, made_head: bool = False,
                  made2_head: bool = False, geom_angle: bool = False, made2_geom: bool = False,
-                 enc_layers: int = 2):
+                 enc_layers: int = 2, speed_loss: str = "mse", speed_bins: int = 0):
         super().__init__()
+        if speed_loss not in ("mse", "l1"):
+            raise ValueError(f"speed_loss must be mse or l1, got {speed_loss!r}")
+        if speed_bins < 0 or speed_bins == 1:
+            raise ValueError(f"speed_bins must be 0 (off) or ≥ 2, got {speed_bins}")
         H = hidden
+        self.speed_loss, self.speed_bins = speed_loss, speed_bins   # speed term of the pair loss: squared / absolute error, or a categorical head over speed bins
+        self.speed_sample = False                       # inference with speed_bins: sample the bin from the softmax instead of taking the most probable one
         self.wta_eps, self.sel_weight = wta_eps, sel_weight
         self.factorized = factorized
         self.scratch_lambda = 0.0         # inference: penalise pairs the scratch head expects to scratch
@@ -86,6 +115,8 @@ class PairGNNPolicy(nn.Module):
         self.head_a = nn.Linear(H, 2)
         if geom_angle:
             self.head_ang = nn.Linear(H, 1)       # angle only; head_a's angle output is then unused (speed still from e)
+        if speed_bins:
+            self.head_speed_bins = nn.Linear(H, speed_bins)   # logits over log-spaced speed bins; replaces the speed output of head_a
         self.head_s = nn.Linear(H, 1)             # global mode: pair score; factorized mode: pocket logit within a ball
         if factorized:
             self.head_ball = nn.Linear(2 * H, 1)  # which ball: [h_i, max_j e_ij]
@@ -153,7 +184,15 @@ class PairGNNPolicy(nn.Module):
         means = torch.tanh(self.head_a(e))
         if e_geo is not None:
             means = torch.cat([torch.tanh(self.head_ang(e_geo)), means[..., 1:]], dim=-1)
+        if self.speed_bins:
+            sp_logits = self.head_speed_bins(e)                                   # (B, 18, bins)
+            idx = (torch.multinomial(F.softmax(sp_logits, -1).reshape(-1, self.speed_bins), 1).reshape(sp_logits.shape[:2])
+                   if self.speed_sample else sp_logits.argmax(-1))
+            sp_unit = (bin_center_ms(idx, self.speed_bins) - self.act_bias[1]) / self.act_scale[1]
+            means = torch.cat([means[..., :1], sp_unit[..., None]], dim=-1)       # the proposal's speed is the chosen bin's centre
         out = {"means": means, "valid": valid, "e": e}
+        if self.speed_bins:
+            out["speed_logits"] = sp_logits
         if self.made2_geom:
             out["aim"] = self._geometric_aim(rel)
         pocket = self.head_s(e).squeeze(-1)
@@ -274,6 +313,10 @@ class PairGNNPolicy(nn.Module):
         selection head is trained to pick those pairs (fixed targets instead of a moving winner).
         Rows with no labelled pair fall back to winner-takes-all.
         """
+        if self.speed_bins or self.speed_loss != "mse":
+            if self.mod is not None or self.factorized or pairs is None or self.wta_fallback:
+                raise ValueError("speed_loss / speed_bins are implemented for the plain pair-supervised loss only "
+                                 "(--pair-supervision --no-wta-fallback, global selection, no modular loss)")
         if self.mod is not None:
             return self._mod_loss(rel, good_u, pairs, extras, w)
         if self.factorized:
@@ -419,6 +462,8 @@ class PairGNNPolicy(nn.Module):
     def _pair_loss(self, rel: torch.Tensor, good_u: torch.Tensor, pairs: torch.Tensor,
                    w: torch.Tensor | None) -> torch.Tensor:
         w = torch.ones(2, device=rel.device) if w is None else w
+        if self.speed_bins or self.speed_loss != "mse":
+            return self._pair_loss_speed(rel, good_u, pairs, w)
         means, logits, _ = self(rel)
         B, K = pairs.shape
         has = pairs >= 0
@@ -430,6 +475,36 @@ class PairGNNPolicy(nn.Module):
         logp = F.log_softmax(logits, dim=1).gather(1, pidx)
         ce = -(logp * has).sum(dim=1) / n
         return (reg + self.sel_weight * ce).mean()
+
+    def _pair_loss_speed(self, rel: torch.Tensor, good_u: torch.Tensor, pairs: torch.Tensor, w: torch.Tensor) -> torch.Tensor:
+        """
+        _pair_loss with a different speed term. angle: squared error as before. speed:
+          speed_loss "l1"   → |Δspeed · w| instead of (Δspeed · w)²  (the model's value is then a median)
+          speed_bins > 0    → no regression on speed; sel_weight · cross-entropy of the pair's speed-bin logits on the
+                              bin of the label speed (the model's value at inference is a bin centre)
+        """
+        o = self.forward_full(rel)
+        means, logits = o["means"], o["logits"]
+        B, K = pairs.shape
+        has = pairs >= 0
+        pidx = pairs.clamp(min=0)
+        m = means.gather(1, pidx[..., None].expand(B, K, 2))
+        g = torch.nan_to_num(good_u)
+        diff = action_diff(m, g) * w
+        d = diff[..., 0] ** 2
+        if not self.speed_bins:
+            d = d + (diff[..., 1].abs() if self.speed_loss == "l1" else diff[..., 1] ** 2)
+        n = has.sum(dim=1).clamp(min=1)
+        reg = (d * has).sum(dim=1) / n
+        logp = F.log_softmax(logits, dim=1).gather(1, pidx)
+        ce = -(logp * has).sum(dim=1) / n
+        total = reg + self.sel_weight * ce
+        if self.speed_bins:
+            sp = o["speed_logits"].gather(1, pidx[..., None].expand(B, K, self.speed_bins))          # (B, K, bins)
+            tbin = speed_to_bin(g[..., 1] * self.act_scale[1] + self.act_bias[1], self.speed_bins)
+            ce_sp = F.cross_entropy(sp.reshape(-1, self.speed_bins), tbin.reshape(-1), reduction="none").reshape(B, K)
+            total = total + self.sel_weight * (ce_sp * has).sum(dim=1) / n
+        return total.mean()
 
     def _wta_loss(self, rel: torch.Tensor, teacher_u: torch.Tensor, good_u: torch.Tensor,
                   w: torch.Tensor | None = None) -> torch.Tensor:
@@ -478,7 +553,8 @@ class PairGNNPolicy(nn.Module):
         torch.save({"gnn": self.state_dict(), "factorized": self.factorized, "has_scratch": self.has_scratch,
                     "has_made": self.has_made, "has_made2": self.has_made2,
                     "geom_angle": self.geom_angle, "made2_geom": self.made2_geom,
-                    "hidden": self.hidden, "enc_layers": self.enc_layers}, path)
+                    "hidden": self.hidden, "enc_layers": self.enc_layers,
+                    "speed_loss": self.speed_loss, "speed_bins": self.speed_bins}, path)
 
 
 assert REL_DIM == 3 * N_BALLS + 2 * N_POCKETS
