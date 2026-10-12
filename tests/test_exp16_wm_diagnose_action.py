@@ -11,7 +11,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from exp16_wm.diagnose_action import (PREV_KINDS, candidate_grid, configure, grad_refine, gradient_toward_window, laplace_perturb,
                                        made_logit, oracle_row, previous_outcome, refine_at, rollout_shots, scan_baselines,
                                        shot_groups, signed_angle_diff_deg, substitute_action, summarize, summarize_oracle,
-                                       summarize_visited, visited_flags, retry_groups, retry_row, state_displacement)
+                                       summarize_visited, visited_flags, retry_groups, retry_row, state_displacement, n_intervals, speed_failure_kind, speed_row, summarize_speedmap, SPEED_GRID)
 from exp16_wm.gnn_policy import PairGNNPolicy
 from exp16_wm.obs_transform import relative_obs
 from exp16_wm.teacher_data import CLEAR_ENV
@@ -361,3 +361,51 @@ def test_rollout_shots_displacements_are_nan_on_first_shots_and_finite_afterward
     first = r["prev"] == "first"
     assert np.isnan(r["obj_move"][first]).all() and np.isnan(r["cue_move"][first]).all()
     assert np.isfinite(r["cue_move"][~first]).all() and len(r["cue_move"]) == len(r["clean"])
+
+
+# ── speed window map ──────────────────────────────────
+
+def test_n_intervals_counts_separate_runs():
+    assert n_intervals([True, True, False, True]) == 2
+    assert n_intervals([False, False]) == 0 and n_intervals([True, True, True]) == 1
+    assert n_intervals([True, False, True, False, True]) == 3 and n_intervals([]) == 0
+
+
+def test_speed_failure_kind_places_a_failing_speed_among_the_successes():
+    sp = np.array([0.5, 1.0, 1.5, 2.0, 3.0]); ok = np.array([False, True, False, True, False])
+    assert speed_failure_kind(1.5, sp, ok) == "gap"                              # between the 1.0 and 2.0 modes
+    assert speed_failure_kind(0.6, sp, ok) == "below" and speed_failure_kind(2.8, sp, ok) == "above"
+    assert speed_failure_kind(1.0, sp, np.zeros(5, bool)) == "empty"
+    assert speed_failure_kind(2.0, sp, ok) == "gap"                              # on a successful grid speed but failing: inside the range
+    assert speed_failure_kind(1.0, sp, np.array([False, True, False, False, False])) == "gap"   # a single success: only itself is inside
+
+
+def test_speed_row_follows_the_preregistered_order():
+    mk = lambda e, g, b, a: {"empty": e, "gap": g, "below": b, "above": a}
+    assert speed_row(mk(0.0, 0.5, 0.3, 0.2), 29) == "E"                          # too few failing states wins over everything
+    assert speed_row(mk(0.3, 0.5, 0.1, 0.1), 100) == "C"                         # empty is checked before gap
+    assert speed_row(mk(0.1, 0.4, 0.3, 0.2), 100) == "A"
+    assert speed_row(mk(0.1, 0.3, 0.4, 0.2), 100) == "B"
+    assert speed_row(mk(0.1, 0.35, 0.3, 0.25), 100) == "D"                       # gap 35% < 40% and below+above 55% < 60%
+
+
+def test_summarize_speedmap_classifies_failures_and_counts_map_structure():
+    K = len(SPEED_GRID)
+    two_modes = np.zeros(K, bool); two_modes[[5, 11]] = True                     # successes at 1.0 and 2.0 m/s
+    one = np.zeros(K, bool); one[8:12] = True
+    none = np.zeros(K, bool)
+    r = {"nl": np.array([1, 2, 3, 3]), "flags": np.stack([two_modes, one, none, one]), "model_speed": np.array([1.5, 0.6, 1.0, 1.6]),
+         "model_ok": np.array([False, False, False, True])}
+    s = summarize_speedmap([r])
+    assert s["n"] == 4 and s["model_ok"] == 0.25 and s["n_fail"] == 3
+    assert s["fail_shares"] == {"empty": pytest.approx(1 / 3), "gap": pytest.approx(1 / 3), "below": pytest.approx(1 / 3), "above": 0.0}
+    assert s["map"]["share_empty"] == 0.25 and s["map"]["share_multi_interval"] == 0.25 and s["map"]["share_single_interval"] == 0.5
+    assert s["map"]["range_ratio_quantiles"]["50"] == pytest.approx(2.0 / 1.0, rel=0.5) and s["row"] == "E"      # 3 failing states: judged E
+    assert s["fail_by_balls"] == {"1": 1, "2": 1, "3": 1}
+
+
+def test_summarize_speedmap_with_no_failure_has_nan_shares():
+    K = len(SPEED_GRID)
+    r = {"nl": np.array([1]), "flags": np.ones((1, K), bool), "model_speed": np.array([1.0]), "model_ok": np.array([True])}
+    s = summarize_speedmap([r])
+    assert s["n_fail"] == 0 and np.isnan(s["fail_shares"]["gap"]) and s["row"] == "E"

@@ -20,6 +20,8 @@ Two more parts (`--parts oracle visited`; default `--parts base` = the three abo
   visited roll the policy out for games and record each shot's balls left and previous shot's outcome: are the
           states the policy reaches harder than the teacher's val states? Judged by `visited_flags`. Also, for shots that
           follow a miss or a scratch: did the object balls stay where they were (cue ball aside)? `retry_row`
+  speedmap  at the label angle, play a speed grid: where does the pair head's speed fall relative to the set of
+          speeds that pocket (a gap between two modes, outside a single interval, or nothing works)? `speed_row`
 
 Usage:
     python -m exp16_wm.diagnose_action --runs L4="logs/experiments/*_L4_m2w1_*_s{seed}_*" --seeds 0 1 2 \
@@ -51,6 +53,8 @@ SAMPLE_SCALES_DEG = (0.0, 0.05, 0.1, 0.2)                 # Laplace scale b of t
 DIST_BINS = ((0.0, 0.15), (0.15, 0.30), (0.30, 1.0))      # gradient check: distance of an offset from the window edge
 PREV_KINDS = ("first", "after_hit", "after_miss", "after_scratch")   # how the previous shot of the game ended
 GRID_MODES = {"speed7": "speed", "angle31": "angle", "both217": "both"}
+SPEED_GRID = (0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.25, 1.4, 1.6, 1.8, 2.0, 2.3, 2.6, 3.0, 3.5, 4.0, 5.0, 6.0, 8.0)   # m/s
+SPEED_KINDS = ("empty", "gap", "below", "above")
 
 
 # ──────────────────────────────────────────────
@@ -256,6 +260,40 @@ def retry_row(g: dict) -> str:
     return "C"
 
 
+def n_intervals(ok: np.ndarray) -> int:
+    """Number of separate runs of True in a boolean vector ordered by speed."""
+    ok = np.asarray(ok, dtype=bool)
+    return int((ok & ~np.concatenate([[False], ok[:-1]])).sum())
+
+
+def speed_failure_kind(speed: float, speeds: np.ndarray, ok: np.ndarray) -> str:
+    """
+    Where a failing speed lies relative to the speeds that pocket (speeds ascending, ok = pocketed at that speed):
+    empty (none does), below / above (outside all of them), gap (between the slowest and fastest success, but failing).
+    """
+    ok = np.asarray(ok, dtype=bool)
+    if not ok.any():
+        return "empty"
+    lo, hi = np.asarray(speeds)[ok].min(), np.asarray(speeds)[ok].max()
+    return "below" if speed < lo else ("above" if speed > hi else "gap")
+
+
+def speed_row(shares: dict, n_fail: int) -> str:
+    """
+    Row of the speed-map judgement table (experiments.md 2026-10-12); shares = fraction of the failing states per kind.
+      E  fewer than 30 failing states     C  empty ≥ 30%     A  gap ≥ 40%     B  below + above ≥ 60%     D  otherwise
+    """
+    if n_fail < 30:
+        return "E"
+    if shares["empty"] >= 0.30:
+        return "C"
+    if shares["gap"] >= 0.40:
+        return "A"
+    if shares["below"] + shares["above"] >= 0.60:
+        return "B"
+    return "D"
+
+
 # ──────────────────────────────────────────────
 # Model-side helpers
 # ──────────────────────────────────────────────
@@ -459,9 +497,59 @@ def measure_visited(m: PairGNNPolicy, v: dict, env, pm, n_games: int) -> dict:
             "games": rollout_shots(m, n_games, CLEAR_ENV)}
 
 
+def speed_map(v: dict, env, pm, idx: np.ndarray) -> np.ndarray:
+    """(len(idx), K) did [label angle, speed] pocket cleanly, for each speed of SPEED_GRID (depends on the state only)."""
+    return np.array([[bool((lambda x: x[0].any() and not x[1])(E.play(env, pm, v["obs"][j], np.array([v["label_act"][j][0], sp], np.float32))))
+                      for sp in SPEED_GRID] for j in idx])
+
+
+def measure_speedmap(m: PairGNNPolicy, v: dict, seed: int, env, pm, cache: dict, n_states: int = 0) -> dict:
+    idx = np.where(v["lab"])[0]
+    if n_states:
+        idx = np.sort(np.random.default_rng(300 + seed).choice(idx, size=min(n_states, len(idx)), replace=False))
+    if (seed, n_states) not in cache:                                  # the map does not depend on the model: reuse it
+        cache[(seed, n_states)] = speed_map(v, env, pm, idx)
+    flags = cache[(seed, n_states)]
+    with torch.no_grad():
+        o = m.forward_full(v["rel"][idx])
+        a = to_env(m, o["means"][torch.arange(len(idx)), v["p0"][idx]])        # the pair head's own action at the label pair
+    model_speed = a[:, 1].astype(np.float64)
+    acts = np.stack([np.asarray(v["label_act"][idx], dtype=np.float32)[:, 0], model_speed.astype(np.float32)], 1)
+    return {"nl": v["nl"][idx], "flags": flags, "model_speed": model_speed, "model_ok": clean_flags(env, pm, v["obs"][idx], acts)}
+
+
 # ──────────────────────────────────────────────
 # Pooling and printing
 # ──────────────────────────────────────────────
+
+def summarize_speedmap(rs: list) -> dict:
+    flags = np.concatenate([r["flags"] for r in rs]); ms = np.concatenate([r["model_speed"] for r in rs])
+    ok = np.concatenate([r["model_ok"] for r in rs]); nl = np.concatenate([r["nl"] for r in rs])
+    speeds = np.asarray(SPEED_GRID)
+    ni = np.array([n_intervals(f) for f in flags])
+    nonempty = flags.any(1)
+    ratio = np.array([speeds[f].max() / speeds[f].min() for f in flags[nonempty]]) if nonempty.any() else np.array([])
+    fail = np.where(~ok)[0]
+    kinds = [speed_failure_kind(ms[i], speeds, flags[i]) for i in fail]
+    shares = {k: (sum(x == k for x in kinds) / len(kinds) if kinds else float("nan")) for k in SPEED_KINDS}
+    q = lambda x, f: float(np.percentile(x, f)) if len(x) else float("nan")
+    return {"n": int(len(ok)), "model_ok": float(ok.mean()), "n_fail": int(len(fail)), "fail_shares": shares,
+            "map": {"share_empty": float((~nonempty).mean()), "share_multi_interval": float((ni >= 2).mean()),
+                    "share_single_interval": float((ni == 1).mean()), "range_ratio_quantiles": {str(f): q(ratio, f) for f in (10, 50, 90)}},
+            "fail_by_balls": {str(b): int(((nl == b) & ~ok).sum()) for b in (1, 2, 3)},
+            "model_speed_quantiles_failing": {str(f): q(ms[fail], f) for f in (10, 50, 90)}, "row": speed_row(shares, len(fail))}
+
+
+def print_speedmap(label: str, s: dict) -> None:
+    m, sh = s["map"], s["fail_shares"]
+    print(f"\n===== {label} speed window map at the label angle (val states with a label: {s['n']}; grid of {len(SPEED_GRID)} speeds, {SPEED_GRID[0]}-{SPEED_GRID[-1]} m/s)")
+    print(f"  map: no speed pockets {100 * m['share_empty']:.1f}% | one interval {100 * m['share_single_interval']:.1f}% | two or more intervals {100 * m['share_multi_interval']:.1f}% | "
+          f"fastest/slowest successful speed p10/p50/p90 = " + " / ".join(f"{m['range_ratio_quantiles'][k]:.1f}x" for k in ('10', '50', '90')))
+    print(f"  the pair head's speed at the label angle pockets in {100 * s['model_ok']:.1f}% ({s['n_fail']} failing states; by balls left "
+          + "/".join(str(s['fail_by_balls'][b]) for b in ('1', '2', '3')) + ")")
+    print("  where the failing speed lies: " + " | ".join(f"{k} {100 * sh[k]:.1f}%" for k in SPEED_KINDS) +
+          "   failing model speed p10/p50/p90 = " + " / ".join(f"{s['model_speed_quantiles_failing'][k]:.2f}" for k in ('10', '50', '90')) + f" m/s   → judgement row {s['row']}")
+
 
 def summarize_oracle(rs: list) -> dict:
     lab = np.concatenate([r["lab"] for r in rs]); nl = np.concatenate([r["nl"] for r in rs])
@@ -594,8 +682,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--n-scan", type=int, default=150, help="val states per seed for the scan")
     p.add_argument("--sample-states", type=int, default=600, help="val states per seed for the sampling test (0 = skip)")
     p.add_argument("--sample-draws", type=int, default=6)
-    p.add_argument("--parts", nargs="+", choices=["base", "oracle", "visited"], default=["base"],
-                   help="base = split + scan + sample; oracle = swap angle/speed for the label's; visited = games vs val states")
+    p.add_argument("--parts", nargs="+", choices=["base", "oracle", "visited", "speedmap"], default=["base"],
+                   help="base = split + scan + sample; oracle = swap angle/speed for the label's; visited = games vs val states; "
+                        "speedmap = speed grid at the label angle")
+    p.add_argument("--speedmap-states", type=int, default=0, help="val states per seed for the speed map (0 = all with a label)")
     p.add_argument("--oracle-states", type=int, default=300, help="val states per seed for the grid oracle")
     p.add_argument("--visited-games", type=int, default=500, help="games per seed")
     p.add_argument("--out", type=str, default=None)
@@ -609,9 +699,9 @@ def main() -> None:
     env = BilliardsEnv(**CLEAR_ENV)
     env.reset(seed=0)
     pm = pocket_index_map(env)
-    result = {}
+    result, map_cache = {}, {}
     for label, pat in dict(a.split("=", 1) for a in args.runs).items():
-        split, scan, sample, oracle, visited = [], [], [], [], []
+        split, scan, sample, oracle, visited, speedmap = [], [], [], [], [], []
         for sd in args.seeds:
             found = glob.glob(pat.format(seed=sd))
             if len(found) != 1:
@@ -629,6 +719,8 @@ def main() -> None:
                 oracle.append(measure_oracle(m, v, sd, env, pm, args.oracle_states))
             if "visited" in args.parts:
                 visited.append(measure_visited(m, v, env, pm, args.visited_games))
+            if "speedmap" in args.parts:
+                speedmap.append(measure_speedmap(m, v, sd, env, pm, map_cache, args.speedmap_states))
             print(f"{label} seed {sd} done", flush=True)
         result[label] = {}
         if split:
@@ -640,6 +732,9 @@ def main() -> None:
         if visited:
             result[label]["visited"] = summarize_visited(visited)
             print_visited(label, result[label]["visited"])
+        if speedmap:
+            result[label]["speedmap"] = summarize_speedmap(speedmap)
+            print_speedmap(label, result[label]["speedmap"])
     if args.out:
         os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
         json.dump(result, open(args.out, "w"), indent=2)
