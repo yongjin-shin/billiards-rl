@@ -160,3 +160,22 @@ def test_aux_weight_zero_leaves_the_training_loss_unchanged():
                        w=dim_weights(0.2, 0.5), aux=aux if use_aux else None, aux_weight=0.0)
         hist.append(fit["history"][0][1])
     assert hist[0] == pytest.approx(hist[1], rel=1e-6)                              # weight 0 → identical training loss
+
+
+def test_aux_history_logs_train_and_val_mse_per_epoch_without_changing_training():
+    raws, rel = _rel_rows(40, seed=4)
+    n = len(rel); t, v = pair_geometry(raws, TABLE); tr = np.arange(n) < 30; aux, _, _ = standardize(t, v, tr)
+    data = {"obs": rel, "action": np.tile([[0.3, 4.0]], (n, 1)).astype(np.float32),
+            "good_actions": np.tile(np.array([[[0.3, 4.0]]], np.float32), (n, 1, 1))}
+    fits = []
+    for w_aux in (0.0, 5.0):
+        torch.manual_seed(0)
+        m = PairGNNPolicy(hidden=16, aux_dim=N_AUX)
+        fits.append(train_bc(m, data, tr, ~tr, "nearest_good", epochs=4, batch=16, lr=3e-3, patience=10, seed=0, log_every=0,
+                             select="loss", w=dim_weights(0.2, 0.5), aux=aux, aux_weight=w_aux))
+    assert fits[0]["aux_history"] == []                                              # weight 0 → nothing logged
+    h = np.array(fits[1]["aux_history"])
+    assert h.shape == (4, 3) and (h[:, 0] == np.arange(4)).all() and np.isfinite(h[:, 1:]).all() and (h[:, 1:] > 0).all()
+    assert h[-1, 1] < h[0, 1]                                                        # the train aux MSE falls over a few epochs
+    # logging adds only a (detached) value: the main loss at epoch 0 minus the weighted aux term equals the weight-0 run
+    assert fits[1]["history"][0][1] - 5.0 * h[0, 1] == pytest.approx(fits[0]["history"][0][1], abs=0.05)   # the term is ~5 of ~55000

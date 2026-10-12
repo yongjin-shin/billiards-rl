@@ -53,6 +53,10 @@ if [ "$1" = "geom" ]; then               # 기하 look-ahead 보조 목표(--geo
   done
   wait; exit
 fi
+if [ "$1" = "geomlog" ]; then            # 보조 loss 곡선 확인: 이전 geom seed 0 run과 같은 인자, epoch별 보조 MSE 기록(experiments.md 2026-10-13)
+  run geomlog_ga5_s0 --out-root logs/experiments_geomlog --pair-supervision --no-wta-fallback --made2-head --gnn-layers 4 --geom-aux-weight 5 --seed 0
+  wait; exit
+fi
 if [ "$1" = "capacity" ]; then           # encoder 용량: 폭 256 / 깊이 4, made2 head 포함, seed 0/1/2
   for sd in 0 1 2; do
     run cap_H256_s$sd --pair-supervision --no-wta-fallback --made2-head --gnn-hidden 256 --seed $sd

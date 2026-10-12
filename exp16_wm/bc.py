@@ -334,10 +334,12 @@ def train_bc(agent: VanillaSAC, data: dict[str, np.ndarray], train: np.ndarray, 
         s_mask = sims["made"]; s_scr = torch.as_tensor(sims["scratch"])   # made bitmask decoded per batch
 
     best_score, best_val, best_state, best_epoch, history = -float("inf"), float("inf"), None, -1, []
+    use_aux = aux_t is not None and aux_weight > 0
+    aux_history: list[tuple[int, float, float]] = []             # (epoch, train aux MSE, val aux MSE), standardised targets
     for ep in range(epochs):
         model.module.train()
         perm = rng.permutation(tr_idx)
-        tr_loss = 0.0
+        tr_loss = tr_aux = 0.0
         for i in range(0, len(perm), batch):
             b = perm[i:i + batch]
             l = model.train_loss(obs[b], t_u[b], g_u[b], w, pairs=None if pr is None else pr[b],
@@ -346,13 +348,16 @@ def train_bc(agent: VanillaSAC, data: dict[str, np.ndarray], train: np.ndarray, 
                 sb = rng.choice(sims_tr, size=min(sims_batch, len(sims_tr)), replace=False)
                 made_b = torch.as_tensor(from_bitmask(s_mask[sb]))
                 l = l + made2_weight * model.module.made2_loss(obs[s_row[sb]], s_a[sb], made_b, s_scr[sb])
-            if aux_t is not None and aux_weight > 0:
-                l = l + aux_weight * model.module.aux_loss(obs[b], aux_t[b])
+            if use_aux:
+                la = model.module.aux_loss(obs[b], aux_t[b])
+                l = l + aux_weight * la
+                tr_aux += la.item() * len(b)
             opt.zero_grad()
             l.backward()
             opt.step()
             tr_loss += l.item() * len(b)
         tr_loss /= max(1, len(perm))
+        tr_aux /= max(1, len(perm))
         model.module.eval()
         with torch.no_grad():
             pred_va = model.predict_unit(obs[va_idx])
@@ -360,7 +365,10 @@ def train_bc(agent: VanillaSAC, data: dict[str, np.ndarray], train: np.ndarray, 
                                              pairs=None if pr is None else pr[va_idx],
                                              extras=None if ex is None else {k: v[va_idx] for k, v in ex.items()}))
             va_within = within_rate(pred_va, g_u[va_idx], select_thresh_deg)
+            va_aux = float(model.module.aux_loss(obs[va_idx], aux_t[va_idx])) if use_aux else float("nan")
         history.append((ep, tr_loss, va_loss, va_within))
+        if use_aux:
+            aux_history.append((ep, tr_aux, va_aux))
         if sched is not None:
             sched.step()
         score = -va_loss if select == "loss" else (va_within if va_within == va_within else -float("inf"))
@@ -370,14 +378,16 @@ def train_bc(agent: VanillaSAC, data: dict[str, np.ndarray], train: np.ndarray, 
         if log_every and ep % log_every == 0:
             kw = ("  logvar[ang,spd,sel] " + " ".join(f"{x:+.2f}" for x in model.module.log_var.detach().clamp(-3, 3).tolist())
                   if getattr(model.module, "uncertainty_weights", False) else "")
+            ax = f"  aux train {tr_aux:.4f} val {va_aux:.4f}" if use_aux else ""
             print(f"  epoch {ep:>4}  train {tr_loss:.6f}  val {va_loss:.6f}  within{select_thresh_deg:g} "
-                  f"{va_within:.4f}  best@{best_epoch}{kw}", flush=True)
+                  f"{va_within:.4f}  best@{best_epoch}{ax}{kw}", flush=True)
         if ep - best_epoch >= patience:
             break
     model.module.load_state_dict(best_state)
     model.module.eval()
     return {"best_val_loss": best_val, "best_epoch": best_epoch, "epochs_run": len(history),
-            "select": select, "best_score": best_score, "final_lr": opt.param_groups[0]["lr"], "history": history}
+            "select": select, "best_score": best_score, "final_lr": opt.param_groups[0]["lr"], "history": history,
+            "aux_history": aux_history}
 
 
 def val_metrics(agent: "VanillaSAC | PairGNNPolicy", data: dict[str, np.ndarray], val: np.ndarray) -> dict:
@@ -673,7 +683,7 @@ def main():
     results = {"name": name, "teacher": teacher, "loss": args.loss, "data": paths, "eval_infer_modes": ev_modes,
                "train_only_data": extra_paths if args.train_only_data else None, "eval_scratch_penalty": ev_pen,
                "n_shots": int(len(data["shot"])), "n_train": int(train.sum()), "n_val": int(val.sum()),
-               "train": {k: v for k, v in fit.items() if k != "history"}, "val": vm, "eval": ev,
+               "train": {k: v for k, v in fit.items() if k not in ("history", "aux_history")}, "val": vm, "eval": ev,
                "args": vars(args)}
     if getattr(agent, "uncertainty_weights", False):      # log σ² of (angle, speed, selection) at the saved (best) epoch
         results["log_var"] = agent.log_var.detach().clamp(-3, 3).tolist()
@@ -681,6 +691,8 @@ def main():
     with open(os.path.join(out_dir, "results.json"), "w") as f:
         json.dump(results, f, indent=2)
     np.save(os.path.join(out_dir, "history.npy"), np.array(fit["history"]))
+    if fit["aux_history"]:                                  # (epoch, train, val) auxiliary MSE per epoch
+        np.save(os.path.join(out_dir, "aux_history.npy"), np.array(fit["aux_history"]))
     print(f"  saved → {out_dir}", flush=True)
 
 
