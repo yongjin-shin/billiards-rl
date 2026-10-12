@@ -62,6 +62,16 @@ def first_success_rank(ok_in_rank_order: np.ndarray) -> int:
     return int(idx[0]) + 1 if len(idx) else NEVER
 
 
+def first_success_lazy(items, ok) -> tuple[int, int]:
+    """(1-based rank of the first item with ok(item) true, NEVER if none; number of ok() calls). Stops at the first success."""
+    n = 0
+    for i, it in enumerate(items):
+        n += 1
+        if ok(it):
+            return i + 1, n
+    return NEVER, n
+
+
 def success_at_k(ranks: np.ndarray, ks: tuple = KS) -> dict[int, float]:
     """Share of states whose first success has rank ≤ k."""
     r = np.asarray(ranks)
@@ -219,6 +229,8 @@ def eval_model(args) -> None:
     heads = {"original": old_head}
     if args.head:
         heads["distilled"] = torch.load(args.head)
+    if args.only:
+        heads = {args.only: heads[args.only]}
     clean = lambda obs, a: bool((lambda x: x[0].any() and not x[1])(made_slots(env, obs, np.asarray(a, np.float32), pm)))
     out = {}
     # candidate sample with labels on val states (12 from the original head's top-20, 12 uniform) for BCE / within-state AUC
@@ -246,7 +258,7 @@ def eval_model(args) -> None:
         ranks = []
         for j in idx:
             _, c = _ranked(m, v["rel"][j:j + 1])
-            ranks.append(first_success_rank([clean(v["obs"][j], a) for a in c]))
+            ranks.append(first_success_lazy(c, lambda a, j=j: clean(v["obs"][j], a))[0])
         out[name]["success_at_k"] = success_at_k(np.array(ranks))
         if args.games:
             m.infer, m.refine_deg, m.refine_speed, m.refine_speed_abs = "verify_refine", E.ANG31, (1.0,), E.ABS_SPEEDS
@@ -273,7 +285,7 @@ def main() -> None:
             s.add_argument("--data", required=True); s.add_argument("--out", required=True); s.add_argument("--epochs", type=int, default=30)
             s.add_argument("--lr", type=float, default=3e-4)
         if name == "eval":
-            s.add_argument("--head", default=None); s.add_argument("--games", type=int, default=500); s.add_argument("--n-auc-states", type=int, default=600)
+            s.add_argument("--head", default=None); s.add_argument("--only", choices=["original", "distilled"], default=None, help="evaluate just this head"); s.add_argument("--games", type=int, default=500); s.add_argument("--n-auc-states", type=int, default=600)
             s.add_argument("--max-val-states", type=int, default=0, help="limit the val states of success@k (0 = all with a label; for smoke tests)")
             s.add_argument("--out", default=None)
     args = p.parse_args()

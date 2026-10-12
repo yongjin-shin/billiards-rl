@@ -10,7 +10,7 @@ import torch
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from exp16_wm.gnn_policy import PairGNNPolicy
-from exp16_wm.verifier_distill import (NEVER, encode_cache, finetune_head, first_success_rank, holdout_states, made2_bce,
+from exp16_wm.verifier_distill import (NEVER, encode_cache, finetune_head, first_success_lazy, first_success_rank, holdout_states, made2_bce,
                                        sample_candidates, state_auc, success_at_k)
 from test_exp16_wm_speed_head import _rel
 
@@ -105,3 +105,13 @@ def test_scratch_candidates_count_as_negatives():
     scr2 = np.ones(len(sid), bool)                                                  # the cue ball went in → target 0 for every pair
     all_neg = made2_bce(m, cache, torch.as_tensor(sid), torch.as_tensor(a), torch.as_tensor(made), torch.as_tensor(scr2))
     assert float(all_pos) != pytest.approx(float(all_neg))
+
+
+def test_first_success_lazy_stops_at_the_first_success_and_counts_checks():
+    calls = []
+    def ok(x):
+        calls.append(x); return x >= 3
+    assert first_success_lazy([0, 1, 3, 5, 7], ok) == (3, 3) and calls == [0, 1, 3]        # 5 and 7 were never checked
+    assert first_success_lazy([0, 1], lambda x: False) == (NEVER, 2)
+    assert first_success_lazy([], lambda x: True) == (NEVER, 0)
+    assert first_success_lazy(iter([9]), lambda x: True) == (1, 1)                          # works on a generator too
