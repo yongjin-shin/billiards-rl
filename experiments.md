@@ -5173,3 +5173,21 @@ k = 1이 82.2%로 앞선 "정책 pair + refine"(P)과 같다(하네스 일치). 
 - **검증 비용은 작다**: 샷당 평균 11회, 중앙값 1회(대부분의 샷은 made head의 1순위가 이미 성공해 1회로 끝남), p90 20회. 실패하는 18%의 state만 평균 약 67회가 필요하다((12.8 − 0.82) / 0.18).
 - **made head의 순위는 1순위 이후로는 거의 쓸모가 없다**: success@k가 k = 2, 3, 5에서 +0.8, +0.7, +1.2%p씩만 오르고, 91.7%에 도달하려면 50개를 확인해야 한다. 상위 후보들이 서로 격자에서 이웃한 사실상 같은 행동일 가능성이 있다(미검증).
 - 한계: **추론 때 시뮬레이터를 쓰는 값**이라 정책 단독 성능이 아니다. 깊이 4 500 epoch 모델(seed 3개) 기준이고, 후보 격자는 pair head의 proposal 주변 ±0.3°·7개 speed로 한정된다. 게임 성공률은 포켓 + scratch 없음 기준이다.
+
+### search → distill 1단계: 시뮬레이터 결과로 made head(verifier)를 on-policy 학습 (TODO 19, 2026-10-12 계획)
+
+**왜 (사용자가 계속 제안한 것)**: 시뮬레이터로 후보를 쳐서 positive(성공)와 negative(실패)를 모두 써서 학습한다. 앞선 oracle 결과(정책 3.55 vs 완벽한 verifier 3.02 shots)가 격차 0.54 shots의 거의 전부가 **made head의 선택 오류**임을 보였고, made head의 순위는 1순위 이후 거의 쓸모가 없었다(success@5 84.9%, @20 89.1%, @217 98.8%). 현재 made head는 teacher 계획기가 만든 coarse 후보의 시뮬레이션으로 학습돼 있어, 실제로 순위를 매기는 **pair head proposal 주변 격자(각도 ±0.3° × 절대 speed 7개)** 의 분포와 다르다. 그 분포에서 시뮬레이터 결과로 직접 학습한다. 이것은 "검증을 증류한다"는 뜻이고, 같은 데이터는 이후 pair head(actor) 증류(2단계)에도 쓴다.
+**데이터 생성**: 모델(깊이 4, 500 epoch)의 seed별 **train state**(label pair가 있는 것, 약 15k개) 각각에서 label pair의 proposal 주변 후보 217개 중 24개를 뽑아 시뮬레이터로 친다: **12개는 현재 made head의 상위 20개 중에서(어려운 negative 포함), 12개는 나머지에서 균등**. 각 시뮬레이션에서 18 pair 전체의 `made`와 `scratch`를 기록한다(`made2_loss`의 목표 `made & ~scratch`와 같은 정의). seed당 약 36만 샷.
+**학습**: encoder, pair head, selection head는 **고정**(proposal 분포를 데이터 생성 때와 같게 유지)하고 `head_made2`만 `made2_loss`(18-way BCE)로 fine-tune. lr 3e-4, 최대 30 epoch, train state의 10%를 holdout으로 두고 holdout BCE가 최소인 epoch을 쓴다.
+**평가 (val state, 학습에 안 쓴 state)**: ① success@k: 정책이 verify로 고른 pair의 후보 217개를 새 made head 점수 순으로 시뮬레이터에 쳐서 상위 k개 안의 성공 비율(k = 1, 2, 5, 20, 217). 기존 made head와 같은 proposal·같은 후보에서 비교(k = 1은 verify+refine clean과 같다) ② 게임 500판 shots/game(verify+refine, 새 made head) ③ 보조: 같은 후보 표본에서 BCE·state 내 AUC.
+**비교 기준**: 같은 모델의 기존 made head(결과를 같은 스크립트로 다시 잰다). seed 0/1/2.
+**"효과 인정"**: seed 3개 모두 개선 + 평균 success@1 ≥ +2%p (게임은 ≥ 0.15 shots).
+
+| # | 관측 | 해석 | 다음 행동 |
+|---|---|---|---|
+| E | 새 made head가 기존보다 나쁨(success@1 −2%p 이하) | on-policy 데이터가 과적합이거나 분포 이동 | 원래 sims와 혼합, 정규화 |
+| A | success@1 효과 인정이고 게임도 효과 인정 | 시뮬레이터 결과를 on-policy로 학습하면 verifier가 개선된다 | 데이터 늘리기(후보 수·pair), 2단계(pair head 증류), 반복(expert iteration) |
+| B | success@1은 효과 인정인데 게임은 미달 | 순위는 좋아졌지만 게임에서는 pair 선택 등 다른 항목이 병목 | pair 선택 쪽 |
+| D | success@1 변화 < 2%p인데 success@5·20은 개선 | 상위권 순위만 개선 | 상위 k개를 시뮬레이터로 검증하는 하이브리드(비용 대비 효과 평가) |
+| C | success@1과 success@20 모두 변화 < 2%p | 이 입력 표현의 made head는 on-policy 데이터로도 순위를 못 올린다(표현·해상도 한계) | 기하 입력 허용(열린 결정 1)이나 추론 때 시뮬레이터 검증 유지 |
+| G | seed 하나만 반대 | 불확실 | seed 5개 |
