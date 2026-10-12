@@ -18,7 +18,8 @@ Two more parts (`--parts oracle visited`; default `--parts base` = the three abo
           failure the angle, the speed, or both together? Plus simulator-picked best over a speed grid / angle grid /
           both (an upper bound for refine with a perfect verifier). Judged by `oracle_row` (experiments.md table)
   visited roll the policy out for games and record each shot's balls left and previous shot's outcome: are the
-          states the policy reaches harder than the teacher's val states? Judged by `visited_flags`
+          states the policy reaches harder than the teacher's val states? Judged by `visited_flags`. Also, for shots that
+          follow a miss or a scratch: did the object balls stay where they were (cue ball aside)? `retry_row`
 
 Usage:
     python -m exp16_wm.diagnose_action --runs L4="logs/experiments/*_L4_m2w1_*_s{seed}_*" --seeds 0 1 2 \
@@ -206,6 +207,55 @@ def visited_flags(game: dict, val: dict, normal: float, after_fail: float) -> di
             "D": bool(diffs) and all(d >= 0.05 for d in diffs)}
 
 
+def state_displacement(prev_obs: np.ndarray, obs: np.ndarray) -> tuple[float, float]:
+    """
+    Between two raw (23,) observations (cue xy, 3 × (x, y, pocketed flag), pockets), in obs units:
+    (how far the cue ball moved, the largest move of an object ball that is unpocketed in both; nan if there is none).
+    """
+    p, c = np.asarray(prev_obs, dtype=np.float64), np.asarray(obs, dtype=np.float64)
+    cue = float(np.hypot(*(c[:2] - p[:2])))
+    pb, cb = p[2:11].reshape(3, 3), c[2:11].reshape(3, 3)
+    alive = (pb[:, 2] <= 0.5) & (cb[:, 2] <= 0.5)
+    if not alive.any():
+        return cue, float("nan")
+    return cue, float(np.hypot(*(cb[alive, :2] - pb[alive, :2]).T).max())
+
+
+def retry_groups(prev: np.ndarray, obj_move: np.ndarray, cue_move: np.ndarray, clean: np.ndarray, tol: float = 1e-3) -> dict:
+    """
+    Shots that follow a miss or a scratch, split by whether the object balls stayed (move < tol) or moved.
+    Shots with no object ball left in both states (nan) are counted separately.
+    """
+    nan = float("nan")
+    after = np.isin(prev, ("after_miss", "after_scratch"))
+    stayed = after & (obj_move < tol)
+    moved = after & (obj_move >= tol)
+    n_after = int(after.sum())
+    rate = lambda m: float(clean[m].mean()) if m.any() else nan
+    q = lambda x, f: float(np.nanpercentile(x, f)) if np.isfinite(x).any() else nan
+    return {"n_after": n_after, "n_stayed": int(stayed.sum()), "n_moved": int(moved.sum()), "n_nan": int((after & np.isnan(obj_move)).sum()),
+            "share_stayed": (float(stayed.sum()) / n_after if n_after else nan), "rate_stayed": rate(stayed), "rate_moved": rate(moved),
+            "obj_move_quantiles": {str(f): q(obj_move[after], f) for f in (10, 50, 90)},
+            "cue_move_quantiles": {str(f): q(cue_move[after], f) for f in (10, 50, 90)}}
+
+
+def retry_row(g: dict) -> str:
+    """
+    Row of the TODO 22 judgement table (experiments.md 2026-10-12), g = retry_groups(...):
+      D  fewer than 30 shots with the object balls staying   not enough to judge
+      A  stayed share ≥ 50% and their success ≥ 5%p below the moved group   repeated failure on the same target
+      C  stayed share ≥ 50% but no such gap                  no repeated-failure tendency
+      B  stayed share < 50%                                  mostly new layouts
+    """
+    if g["n_stayed"] < 30:
+        return "D"
+    if g["share_stayed"] < 0.5:
+        return "B"
+    if np.isfinite(g["rate_moved"]) and g["rate_moved"] - g["rate_stayed"] >= 0.05:
+        return "A"
+    return "C"
+
+
 # ──────────────────────────────────────────────
 # Model-side helpers
 # ──────────────────────────────────────────────
@@ -382,19 +432,23 @@ def rollout_shots(m: PairGNNPolicy, n_games: int, env_kw: dict, seed: int = 0) -
     """
     env = BilliardsEnv(**env_kw)
     env.reset(seed=seed)
-    n_left, prev, clean = [], [], []
+    n_left, prev, clean, cue_move, obj_move = [], [], [], [], []
     for _ in range(n_games):
         obs, _ = env.reset()
-        last, done = "first", False
+        last, last_obs, done = "first", None, False
         while not done:
             n_left.append(int(E.balls_left(obs[None])[0]))
             prev.append(last)
+            cm, om = (float("nan"), float("nan")) if last_obs is None else state_displacement(last_obs, obs)
+            cue_move.append(cm); obj_move.append(om)
+            last_obs = obs
             obs, _, term, trunc, info = env.step(m.act(TRANSFORMS["relative"](obs)))
             hit, scr = info["pocketed_this_step"] > 0, bool(info["scratch"])
             clean.append(bool(hit and not scr))
             last, done = previous_outcome(hit, scr), term or trunc
     env.close()
-    return {"n_left": np.array(n_left), "prev": np.array(prev), "clean": np.array(clean)}
+    return {"n_left": np.array(n_left), "prev": np.array(prev), "clean": np.array(clean),
+            "cue_move": np.array(cue_move), "obj_move": np.array(obj_move)}
 
 
 def measure_visited(m: PairGNNPolicy, v: dict, env, pm, n_games: int) -> dict:
@@ -429,8 +483,11 @@ def summarize_visited(rs: list) -> dict:
     nl, lab, clean = cat(lambda r: r["val"]["nl"]), cat(lambda r: r["val"]["lab"]), cat(lambda r: r["val"]["clean"])
     val = {b: (float(clean[lab & (nl == b)].mean()) if (lab & (nl == b)).any() else float("nan")) for b in (1, 2, 3)}
     game = {b: games["by_balls"][b]["rate"] for b in (1, 2, 3)}
+    retry = retry_groups(cat(lambda r: r["games"]["prev"]), cat(lambda r: r["games"]["obj_move"]),
+                         cat(lambda r: r["games"]["cue_move"]), cat(lambda r: r["games"]["clean"]))
+    retry["row"] = retry_row(retry)
     return {"games": games, "val": {"by_balls": val, "all": float(clean[lab].mean()), "n": int(lab.sum())},
-            "flags": visited_flags(game, val, games["normal"], games["after_fail"])}
+            "flags": visited_flags(game, val, games["normal"], games["after_fail"]), "retry": retry}
 
 def summarize(label: str, split: list, scan: list, sample: list | None) -> dict:
     nl = np.concatenate([r["nl"] for r in split]); lab = np.concatenate([r["lab"] for r in split])
@@ -523,6 +580,11 @@ def print_visited(label: str, s: dict) -> None:
     print("  by how the previous shot ended (games):  " + " | ".join(f"{k} {100 * d['rate']:.1f}% (n {d['n']})" for k, d in g["by_prev"].items()))
     print(f"  first shot + after hit {100 * g['normal']:.1f}%  vs  after miss/scratch {100 * g['after_fail']:.1f}% (n {g['n_after_fail']})")
     print("  judgement rows that hold: " + (", ".join(k for k, x in s["flags"].items() if x) or "none"))
+    r = s["retry"]
+    print(f"  shots after a miss or scratch: {r['n_after']}  (object balls stayed: {r['n_stayed']} = {100 * r['share_stayed']:.1f}%, moved: {r['n_moved']}, none left: {r['n_nan']})")
+    print(f"    clean rate: object balls stayed {100 * r['rate_stayed']:.1f}%  |  moved {100 * r['rate_moved']:.1f}%")
+    print("    object-ball move (p10/p50/p90): " + " / ".join(f"{r['obj_move_quantiles'][k]:.4f}" for k in ('10', '50', '90')) +
+          "   cue-ball move (p10/p50/p90): " + " / ".join(f"{r['cue_move_quantiles'][k]:.3f}" for k in ('10', '50', '90')) + f"   → TODO 22 judgement row {r['row']}")
 
 
 def parse_args() -> argparse.Namespace:

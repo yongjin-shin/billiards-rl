@@ -11,7 +11,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from exp16_wm.diagnose_action import (PREV_KINDS, candidate_grid, configure, grad_refine, gradient_toward_window, laplace_perturb,
                                        made_logit, oracle_row, previous_outcome, refine_at, rollout_shots, scan_baselines,
                                        shot_groups, signed_angle_diff_deg, substitute_action, summarize, summarize_oracle,
-                                       summarize_visited, visited_flags)
+                                       summarize_visited, visited_flags, retry_groups, retry_row, state_displacement)
 from exp16_wm.gnn_policy import PairGNNPolicy
 from exp16_wm.obs_transform import relative_obs
 from exp16_wm.teacher_data import CLEAR_ENV
@@ -279,12 +279,14 @@ def test_summarize_oracle_pools_seeds_ignores_unlabelled_states_and_names_the_ro
 
 def test_summarize_visited_compares_games_with_labelled_val_states():
     game = {"n_left": np.array([3, 2, 2, 1]), "prev": np.array(["first", "after_hit", "after_miss", "after_hit"]),
-            "clean": np.array([True, True, False, True])}
+            "clean": np.array([True, True, False, True]), "obj_move": np.array([np.nan, 0.1, 0.0, 0.2]),
+            "cue_move": np.array([np.nan, 0.3, 0.2, 0.1])}
     val = {"nl": np.array([3, 2, 1, 1]), "lab": np.array([True, True, True, False]), "clean": np.array([True, False, True, False])}
     s = summarize_visited([{"games": game, "val": val}])
     assert s["val"]["by_balls"][1] == 1.0 and s["val"]["by_balls"][2] == 0.0 and s["val"]["n"] == 3     # the unlabelled 1-ball state is dropped
     assert s["games"]["by_balls"][2]["rate"] == 0.5 and s["games"]["after_fail"] == 0.0
     assert set(s["flags"]) == {"A", "B", "C", "D"}
+    assert s["retry"]["n_after"] == 1 and s["retry"]["n_stayed"] == 1 and s["retry"]["row"] == "D"      # one shot after a miss: too few to judge
 
 
 # ── rollout smoke test on the real env ────────────────
@@ -298,3 +300,64 @@ def test_rollout_shots_records_one_row_per_shot_with_valid_labels():
     assert set(r["prev"]) <= set(PREV_KINDS) and int((r["prev"] == "first").sum()) == 2      # one first shot per game
     assert set(r["n_left"]) <= {1, 2, 3} and (r["n_left"][r["prev"] == "first"] == 3).all()
     assert r["clean"].dtype == bool
+
+
+# ── TODO 22: displacement and retry grouping ──────────
+
+def _obs(cue=(0.5, 0.5), balls=((0.2, 0.3, 0.0), (0.6, 0.7, 0.0), (0.8, 0.2, 0.0))):
+    return np.array([*cue, *[v for b in balls for v in b], *POCKETS], dtype=np.float64)
+
+
+def test_state_displacement_reports_cue_and_the_largest_object_ball_move():
+    a = _obs()
+    b = _obs(cue=(0.5, 0.9), balls=((0.2, 0.3, 0.0), (0.6, 0.7, 0.0), (0.8, 0.2, 0.0)))
+    assert state_displacement(a, b) == pytest.approx((0.4, 0.0))               # only the cue ball rolled
+    c = _obs(cue=(0.5, 0.5), balls=((0.2, 0.3, 0.0), (0.63, 0.74, 0.0), (0.8, 0.21, 0.0)))
+    cue, obj = state_displacement(a, c)
+    assert cue == 0.0 and obj == pytest.approx(0.05)                           # the 3-4-5 move of the second ball
+
+
+def test_state_displacement_ignores_balls_pocketed_in_either_state_and_gives_nan_when_none_is_left():
+    a = _obs()
+    after_pocket = _obs(balls=((0.2, 0.3, 1.0), (0.6, 0.7, 0.0), (0.8, 0.2, 0.0)))        # ball 1 pocketed by the previous shot
+    assert state_displacement(a, after_pocket) == pytest.approx((0.0, 0.0))    # ball 1 would otherwise show a move
+    gone = _obs(balls=((0, 0, 1.0), (0, 0, 1.0), (0, 0, 1.0)))
+    assert np.isnan(state_displacement(a, gone)[1])
+
+
+def test_retry_groups_split_after_failures_by_whether_the_objects_stayed():
+    prev = np.array(["first", "after_miss", "after_miss", "after_scratch", "after_hit", "after_miss"])
+    obj = np.array([np.nan, 0.0, 0.2, 0.0005, 0.0, np.nan])
+    cue = np.array([np.nan, 0.3, 0.4, 0.5, 0.1, 0.2])
+    clean = np.array([True, False, True, False, True, True])
+    g = retry_groups(prev, obj, cue, clean)
+    assert g["n_after"] == 4 and g["n_stayed"] == 2 and g["n_moved"] == 1 and g["n_nan"] == 1       # after_hit and first shots are not counted
+    assert g["share_stayed"] == 0.5 and g["rate_stayed"] == 0.0 and g["rate_moved"] == 1.0
+    assert g["obj_move_quantiles"]["50"] == pytest.approx(0.0005, abs=1e-9) and g["cue_move_quantiles"]["50"] == pytest.approx(0.3, abs=0.11)
+
+
+def test_retry_groups_without_any_failure_is_nan_not_an_error():
+    g = retry_groups(np.array(["first", "after_hit"]), np.array([np.nan, 0.1]), np.array([np.nan, 0.1]), np.array([True, True]))
+    assert g["n_after"] == 0 and np.isnan(g["share_stayed"]) and np.isnan(g["rate_stayed"]) and np.isnan(g["obj_move_quantiles"]["50"])
+
+
+def _g(n_stayed, share, rate_stayed, rate_moved):
+    return {"n_stayed": n_stayed, "share_stayed": share, "rate_stayed": rate_stayed, "rate_moved": rate_moved}
+
+
+def test_retry_row_follows_the_preregistered_table():
+    assert retry_row(_g(100, 0.6, 0.60, 0.70)) == "A"                          # mostly stayed, 10%p worse
+    assert retry_row(_g(100, 0.6, 0.68, 0.70)) == "C"                          # mostly stayed, no gap
+    assert retry_row(_g(100, 0.4, 0.40, 0.80)) == "B"                          # mostly new layouts, whatever the rates
+    assert retry_row(_g(10, 0.9, 0.10, 0.90)) == "D"                           # too few to judge, wins over everything
+    assert retry_row(_g(30, 0.5, 0.60, 0.65)) == "A"                           # the boundaries count: share exactly 50%, gap exactly 5%p, 30 shots
+    assert retry_row(_g(29, 0.5, 0.60, 0.65)) == "D"
+
+
+def test_rollout_shots_displacements_are_nan_on_first_shots_and_finite_afterwards():
+    torch.manual_seed(0)
+    m = PairGNNPolicy(hidden=16, made2_head=True).eval()
+    r = rollout_shots(m, 2, CLEAR_ENV)
+    first = r["prev"] == "first"
+    assert np.isnan(r["obj_move"][first]).all() and np.isnan(r["cue_move"][first]).all()
+    assert np.isfinite(r["cue_move"][~first]).all() and len(r["cue_move"]) == len(r["clean"])
