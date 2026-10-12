@@ -87,8 +87,10 @@ class PairGNNPolicy(nn.Module):
     def __init__(self, hidden: int = 128, wta_eps: float = 0.05, sel_weight: float = 10.0,
                  factorized: bool = False, scratch_head: bool = False, made_head: bool = False,
                  made2_head: bool = False, geom_angle: bool = False, made2_geom: bool = False,
-                 enc_layers: int = 2, speed_loss: str = "mse", speed_bins: int = 0, uncertainty_weights: bool = False):
+                 enc_layers: int = 2, speed_loss: str = "mse", speed_bins: int = 0, uncertainty_weights: bool = False, aux_dim: int = 0):
         super().__init__()
+        if aux_dim < 0:
+            raise ValueError(f"aux_dim must be ≥ 0, got {aux_dim}")
         if uncertainty_weights and (speed_bins or speed_loss != "mse"):
             raise ValueError("uncertainty_weights cannot be combined with speed_loss / speed_bins")
         if speed_loss not in ("mse", "l1"):
@@ -132,6 +134,9 @@ class PairGNNPolicy(nn.Module):
             self.head_made = nn.Linear(H, 1)      # can this pair be made (coarse-scan success rate) — look-ahead auxiliary
         if made2_head:
             self.head_made2 = _mlp(H + 4 + int(made2_geom), H, 1)   # [e_ij, a, (a − a_ij)·scale] → will action a pocket pair ij
+        self.aux_dim = aux_dim                          # auxiliary geometry targets predicted from each pair embedding (training only)
+        if aux_dim:
+            self.aux_head = nn.Sequential(nn.Linear(H, 64), nn.ReLU(), nn.Linear(64, aux_dim))
         if uncertainty_weights:
             self.log_var = nn.Parameter(torch.zeros(3))       # [angle, speed, selection]; 0 = the hand-set weights of the plain loss
         side = torch.zeros(N_POCKETS)
@@ -486,6 +491,17 @@ class PairGNNPolicy(nn.Module):
         ce = -(logp * has).sum(dim=1) / n
         return (reg + self.sel_weight * ce).mean()
 
+    def aux_loss(self, rel: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        """
+        Auxiliary geometry loss: the aux head reads each pair embedding e_ij and regresses the standardised geometric
+        targets (B, 18, aux_dim); mean squared error over the live pairs. Training only, nothing at inference.
+        """
+        if not self.aux_dim:
+            raise ValueError("aux_loss needs PairGNNPolicy(aux_dim > 0)")
+        e, valid = self._encode(rel)
+        err = ((self.aux_head(e) - target) ** 2).mean(dim=-1)
+        return (err * valid).sum() / valid.sum().clamp(min=1)
+
     def _pair_loss_kendall(self, rel: torch.Tensor, good_u: torch.Tensor, pairs: torch.Tensor, w: torch.Tensor) -> torch.Tensor:
         """
         _pair_loss with learned term weights (Kendall, Gal & Cipolla 2018): Σ_i exp(−s_i) · L_i + s_i over
@@ -586,7 +602,7 @@ class PairGNNPolicy(nn.Module):
                     "geom_angle": self.geom_angle, "made2_geom": self.made2_geom,
                     "hidden": self.hidden, "enc_layers": self.enc_layers,
                     "speed_loss": self.speed_loss, "speed_bins": self.speed_bins,
-                    "uncertainty_weights": self.uncertainty_weights}, path)
+                    "uncertainty_weights": self.uncertainty_weights, "aux_dim": self.aux_dim}, path)
 
 
 assert REL_DIM == 3 * N_BALLS + 2 * N_POCKETS

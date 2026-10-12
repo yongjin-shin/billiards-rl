@@ -38,6 +38,7 @@ from exp16_wm.teacher_data import CLEAR_ENV
 from exp16_wm.obs_transform import TRANSFORMS, OBS_DIMS
 from exp16_wm.augment import augment_flip4
 from exp16_wm.gnn_policy import PairGNNPolicy, action_diff
+from exp16_wm.geometry_aux import N_AUX, pair_geometry, standardize
 
 LOSSES = ("teacher", "nearest_good")
 
@@ -291,7 +292,8 @@ def train_bc(agent: VanillaSAC, data: dict[str, np.ndarray], train: np.ndarray, 
              select: str = "loss", select_thresh_deg: float = 0.2,
              lr_schedule: str = "const", lr_final_frac: float = 0.01, use_pairs: bool = False,
              selection: str = "global", use_extras: bool = False,
-             sims: dict[str, np.ndarray] | None = None, made2_weight: float = 1.0, sims_batch: int = 1024) -> dict:
+             sims: dict[str, np.ndarray] | None = None, made2_weight: float = 1.0, sims_batch: int = 1024,
+             aux: np.ndarray | None = None, aux_weight: float = 0.0) -> dict:
     """select: 'loss' keeps the lowest val loss; 'within' the highest val within-threshold rate
     (the val loss is dominated by a few far-off predictions and can disagree with it)."""
     if select not in ("loss", "within"):
@@ -315,6 +317,11 @@ def train_bc(agent: VanillaSAC, data: dict[str, np.ndarray], train: np.ndarray, 
         if missing:
             raise ValueError(f"factorized / outcome targets need {missing} (exp16_wm.outcomes / exp16_wm.pair_stats)")
         ex = {k: torch.as_tensor(data[k].astype(np.float32 if k in ("good_made", "good_scratch") else np.int64)) for k in FACT_KEYS}
+    aux_t = None
+    if aux is not None:                                  # standardised geometry targets (N, 18, K), one row per training row
+        if len(aux) != len(obs):
+            raise ValueError(f"aux has {len(aux)} rows, the data {len(obs)}")
+        aux_t = torch.as_tensor(aux)
     opt = torch.optim.Adam(model.params(), lr=lr)
     # constant lr plateaus ~1e-3 of the action range above the precision a pocket needs (~0.1°); anneal it
     sched = (torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=max(1, epochs), eta_min=lr * lr_final_frac)
@@ -339,6 +346,8 @@ def train_bc(agent: VanillaSAC, data: dict[str, np.ndarray], train: np.ndarray, 
                 sb = rng.choice(sims_tr, size=min(sims_batch, len(sims_tr)), replace=False)
                 made_b = torch.as_tensor(from_bitmask(s_mask[sb]))
                 l = l + made2_weight * model.module.made2_loss(obs[s_row[sb]], s_a[sb], made_b, s_scr[sb])
+            if aux_t is not None and aux_weight > 0:
+                l = l + aux_weight * model.module.aux_loss(obs[b], aux_t[b])
             opt.zero_grad()
             l.backward()
             opt.step()
@@ -500,6 +509,9 @@ def parse_args():
     p.add_argument("--uncertainty-weights", action="store_true",
                    help="learn the weight of the angle / speed / selection terms of the pair loss (Kendall et al. 2018); "
                         "needs --pair-supervision --no-wta-fallback")
+    p.add_argument("--geom-aux-weight", type=float, default=0.0,
+                   help="> 0: auxiliary look-ahead of geometry — a head on each pair embedding predicts the pocket entry deviation, "
+                        "the ball's cushion distance and the blockers on the two shot paths (training only); this is the loss weight")
     p.add_argument("--speed-bins", type=int, default=0,
                    help="> 0: speed head = categorical over this many log-spaced bins (cross-entropy on the label's bin); "
                         "needs --pair-supervision --no-wta-fallback")
@@ -580,6 +592,13 @@ def main():
         extra_paths = sorted({p for pat in args.train_only_data for p in glob.glob(pat)})
         data, train, val = append_train_only(data, train, val, load_teacher_data(extra_paths))
         extra_tag = "_plus-" + os.path.basename(os.path.dirname(os.path.dirname(extra_paths[0])))
+    aux = None
+    if args.geom_aux_weight > 0:                                  # geometry targets from the RAW observations (before the transform)
+        if args.model != "gnn" or args.augment != "none":
+            raise SystemExit("--geom-aux-weight needs --model gnn and --augment none")
+        env_dims = BilliardsEnv(**CLEAR_ENV)
+        aux, aux_mean, aux_std = standardize(*pair_geometry(data["obs"], (env_dims.table_width, env_dims.table_length)), train)
+        env_dims.close()
     data["obs"] = TRANSFORMS[args.obs_transform](data["obs"])
 
     h_tag = ("_gnn" if args.model == "gnn" else "") + \
@@ -593,7 +612,7 @@ def main():
                                                             if args.selection == "factorized" else "")) + \
             ("" if args.gnn_hidden == 128 or args.model != "gnn" else f"_H{args.gnn_hidden}") + \
             ("" if args.gnn_layers == 2 or args.model != "gnn" else f"_L{args.gnn_layers}") + \
-            ("_sl1" if args.speed_loss == "l1" else "") + (f"_sb{args.speed_bins}" if args.speed_bins else "") + ("_kw" if args.uncertainty_weights else "") + \
+            ("_sl1" if args.speed_loss == "l1" else "") + (f"_sb{args.speed_bins}" if args.speed_bins else "") + ("_kw" if args.uncertainty_weights else "") + (f"_ga{args.geom_aux_weight:g}" if args.geom_aux_weight > 0 else "") + \
             ("_geoang" if args.geom_angle else "") + extra_tag + (f"_m2w{args.made2_weight:g}" if args.made2_head else "") + ("geo" if args.made2_geom else "") + ("_wrap" if args.angle_wrap else "_nowrap")
     name = (f"exp16_bc_{teacher}_{args.loss}{h_tag}_a{args.angle_scale_deg:g}_v{args.speed_scale:g}"
             f"_s{args.seed}_{time.strftime('%Y-%m-%d@%H%M')}")
@@ -609,7 +628,7 @@ def main():
                               made_head=args.made_head, made2_head=args.made2_head,
                               geom_angle=args.geom_angle, made2_geom=args.made2_geom,
                               enc_layers=args.gnn_layers, speed_loss=args.speed_loss, speed_bins=args.speed_bins,
-                              uncertainty_weights=args.uncertainty_weights)
+                              uncertainty_weights=args.uncertainty_weights, aux_dim=N_AUX if args.geom_aux_weight > 0 else 0)
         agent.fact_terms = tuple(args.fact_terms)
         agent.wta_fallback = not args.no_wta_fallback
         if modular:
@@ -622,7 +641,8 @@ def main():
                    args.patience, args.seed, w=dim_weights(args.angle_scale_deg, args.speed_scale),
                    select=args.select, lr_schedule=args.lr_schedule, lr_final_frac=args.lr_final_frac,
                    use_pairs=args.pair_supervision or modular, selection=args.selection, use_extras=modular,
-                   sims=sims, made2_weight=args.made2_weight, sims_batch=args.sims_batch)
+                   sims=sims, made2_weight=args.made2_weight, sims_batch=args.sims_batch,
+                   aux=aux, aux_weight=args.geom_aux_weight)
     vm = val_metrics(agent, data, val)
     if isinstance(agent, PairGNNPolicy):
         vm.update(oracle_pair_metrics(agent, data, val))

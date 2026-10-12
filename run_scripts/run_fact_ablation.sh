@@ -47,6 +47,12 @@ if [ "$1" = "kendall" ]; then            # 각도·속도·선택 항의 가중�
   done
   wait; exit
 fi
+if [ "$1" = "geom" ]; then               # 기하 look-ahead 보조 목표(--geom-aux-weight 5), 깊이 4, made2 head 포함, seed 0/1/2 (experiments.md 2026-10-12)
+  for sd in 0 1 2; do
+    run geom_ga5_s$sd --out-root logs/experiments_geom --pair-supervision --no-wta-fallback --made2-head --gnn-layers 4 --geom-aux-weight 5 --seed $sd
+  done
+  wait; exit
+fi
 if [ "$1" = "capacity" ]; then           # encoder 용량: 폭 256 / 깊이 4, made2 head 포함, seed 0/1/2
   for sd in 0 1 2; do
     run cap_H256_s$sd --pair-supervision --no-wta-fallback --made2-head --gnn-hidden 256 --seed $sd
