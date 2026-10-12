@@ -532,7 +532,7 @@ policy의 shot 실패 분해(robust+pairs, val): chosen pair miss ~24%, chosen p
 - **[보류]** gradient refine ∇ₐP(made)(#15) — head가 proposal 밖 정보를 가질 때까지
 - **[미착수·아이디어]** made head를 proposal 앵커에서 풀기(입력 차이 제거 또는 proposal 무작위 섭동). 격자 oracle의 상한(99.2% vs 84.8%)은 크지만, 기하 입력을 준 made head도 verify+refine이 82.6%(2층)에 그쳐 학습된 verifier로 얼마나 따라갈지는 불확실하다
 - **[완료·기각]** 재시도 시 탐색(TODO 22): miss·scratch 직후 샷의 object ball 배치가 그대로인 비율은 22~24%뿐(대부분 새 배치). 그대로인 그룹이 더 어렵지만(−9.9%p) 전체 샷의 4%라 이득 상한 +0.4%p → 접음
-- **[미착수·상향]** speed head를 mode-aware하게(TODO 21): label speed는 1.0 m/s 76% / ≥2 m/s 24%의 두 모드인데 모델은 중간값을 낸다. oracle 교체에서 speed를 label로 맞추면 81.6 → 89.6%(+8.0%p, 상한)
+- **[진행·사전 점검 완료]** speed head를 mode-aware하게(TODO 21), speed window map 결과 판단표 A: 모델 speed 실패의 70%가 두 모드 사이 틈, 53% state는 성공 speed 구간이 둘 이상. 처방은 mode-aware head 또는 성공 speed 집합에 대한 tolerant 손실: label speed는 1.0 m/s 76% / ≥2 m/s 24%의 두 모드인데 모델은 중간값을 낸다. oracle 교체에서 speed를 label로 맞추면 81.6 → 89.6%(+8.0%p, 상한)
 
 **5. 탐색 + 학습 (expert iteration, RL 연결)**
 - **[완료]** Laplace 샘플링: 샘플 하나를 그대로 치면 손해, 시뮬레이터가 6개 중 고르면 81.8 → 92.6% (추론 때 시뮬레이터가 있을 때의 상한)
@@ -555,7 +555,7 @@ policy의 shot 실패 분해(robust+pairs, val): chosen pair miss ~24%, chosen p
 |---|---|---|---|---|
 | – | oracle 교체 진단 | **[완료]** 각도 +9.9%p / speed +8.0%p, 거의 가산적(E). 깊이 4는 각도만 개선, 2개 state는 각도. 격자 oracle 99.2% vs made head 84.8% | – | – |
 | – | 정책이 가는 state vs teacher state (#16) | **[완료]** 분포 이동 없음, 실패 직후 state만 어려움(실패의 27%), 상한 +2.0%p(B) | – | – |
-| 1 | **speed 쪽 개선(TODO 21)**: speed head를 mode-aware하게(두 모드 분류 + 회귀) 또는 speed에만 L1 | speed를 label대로 하면 +8.0%p(상한). 깊이 4가 손대지 않은 항목. 가장 큰 미개척 항목 | 코드 + 테스트 + BC 3 runs(약 45분) | 깊이 4 1500 run 종료 후 |
+| 1 | **speed 쪽 개선(TODO 21)** — 사전 점검(speed window map) **완료: 판단표 A**(실패의 70%가 틈). 다음: tolerant speed 손실(성공 speed 집합에 가장 가까운 점을 목표) 또는 mode-aware head 또는 L1 | speed를 label대로 하면 +8.0%p(상한), 틈 실패 완전 해소 시 label 각도에서 약 6.0%p. 깊이 4가 손대지 않은 항목 | 코드 + 테스트 + BC 3 runs(약 45분) | 깊이 4 1500 run 종료 후 |
 | 2 | **loss 스케일 `--angle-scale-deg 0.1`** (깊이 4, 500 epoch, seed 0/1/2) | 각도가 병목(특히 2개 state)인데 baseline 측정(깊이 2)에서 train loss의 59%가 speed. 깊이 4에서는 안 잼. 코드 변경 없음 | BC 약 45분 | 1번과 병행 가능 |
 | 3 | **search → distill 최소 버전(#19)**: A(positives-only) vs C(경계 중앙 label), label만 교체 | 격자 oracle 상한이 크다(해가 99.2%). state 분포는 teacher state로 충분(실패의 73%가 첫 샷·적중 직후, 정책 state의 이득 상한 +2.0%p). 단 teacher label이 이미 중앙이라 null일 수 있음 | 시뮬레이터 약 120k 샷(약 5분) + BC 6 runs | 1·2번 뒤 |
 | 4 | ~~residual/LayerNorm 코드 준비(#18)~~ **[보류]** | 깊이 6이 1500 epoch에서 수렴해(3.77 → 3.51) 구조적 불안정이 아니라 학습 예산 문제였다. 깊이 6이 깊이 4를 못 넘었으므로 필요성이 낮다 | – | – |
