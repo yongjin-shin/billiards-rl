@@ -486,7 +486,8 @@ policy의 shot 실패 분해(robust+pairs, val): chosen pair miss ~24%, chosen p
 | + made head(look-ahead 2단계) select | 4.11 ± 0.20 | 72.5% | action을 받는 made head를 학습(칠 때는 안 씀) → 해롭지 않음 |
 | + verify + refine(각도 31 × 절대 speed 7) | **3.90 ± 0.21** | 76.7% | made head로 pair 재선택 + action 후보 평가(시뮬레이터 없이) |
 | **+ encoder 깊이 4**(2층 → 4층, made head 포함, verify+refine) | **3.55 ± 0.10** | 84.2% | encoder MLP를 깊게(기하 입력 없이 학습만으로) — pair head 각도 오차 −24%, 창 적중 81 → 86.5% |
-| 깊이 6 / 깊이 8 (층 수만 변경) | 3.77 ± 0.16 / 3.94 ± 0.11 | 79.6% / 76.0% | 깊이 4보다 **나쁨**(8층은 control 수준). train loss가 안 내려간다(seed 2: 25.4 / 20.3 vs 깊이 4 15.7) → 최적화 문제로 읽음, 깊이 자체의 한계는 미확인 |
+| 깊이 6 / 깊이 8 (층 수만 변경, 500 epoch) | 3.77 ± 0.16 / 3.94 ± 0.11 | 79.6% / 76.0% | 깊이 4보다 **나쁨**(8층은 control 수준). train loss가 안 내려갔다 → **1500 epoch에서 깊이 6이 회복(아래 행): 학습 예산 부족이었음** |
+| 깊이 6, 1500 epoch (깊이 4도 1500 epoch) | 3.51 ± 0.05 (깊이 4: 3.59 ± 0.10) | 85.1% (83.4%) | 같은 길이 깊이 4 대비 "효과 인정" 기준 미충족(각도 −0.009°는 경계, 게임 차이는 표준편차 안). 깊이 4는 길게 돌려도 불변. 비용 약 3.5배 |
 | (진단 전용) + 기하 조준각 차이 입력 | 3.46 ± 0.12 | 86.4% | made head에 ghost-ball 조준각과의 차이를 입력 — **상한 참고, 최종 모델이 아님** |
 | teacher (robust / geom) | 2.98 / 2.24 | – | – |
 
@@ -498,7 +499,7 @@ policy의 shot 실패 분해(robust+pairs, val): chosen pair miss ~24%, chosen p
 
 **열린 결정** (사용자가 정한다):
 1. 학습만으로 정밀도를 못 올리면 ghost-ball 기하 조준각 차이를 made head(verifier)에만 입력으로 허용할지. "탐색 + 학습" 방침(bitter lesson)과 충돌한다. 단 위 정정대로 "argmax ≥ 90%"는 made head 해상도가 아니라 proposal 정확도의 기준이다.
-2. **다음 단계 (2026-10-12)**: (a) search → distill(TODO 19: 분포 head + 시뮬레이터 best-of-N → 성공 샘플로 재학습), (b) 깊이 > 4 최적화 안정화(TODO 18: residual/LayerNorm). 먼저 **학습 길이 3배(1500 epoch) 실험**(깊이 4 vs 6, 2026-10-12 07:41 시작, 약 3시간)의 결과를 본다.
+2. **다음 단계 (2026-10-12)**: (a) search → distill(TODO 19: 분포 head + 시뮬레이터 best-of-N → 성공 샘플로 재학습), (b) speed 쪽 개선(TODO 21), (c) loss 스케일. 학습 길이 실험은 끝났다(깊이 축은 일단 닫음: 깊이 4, 500 epoch이 비용 대비 최선).
 
 ### 아이디어 지도 (2026-10-12) — 주제별 2단계 정리
 
@@ -518,8 +519,8 @@ policy의 shot 실패 분해(robust+pairs, val): chosen pair miss ~24%, chosen p
 **3. Action 정밀도: 모델 구조와 학습 (현재 병목)**
 - **[완료]** GNN + pair supervision, encoder 깊이 4 → 3.90 → 3.55. 폭 256 → 작은 효과(보류). 깊이 6/8 → 3.77 / 3.94(최적화 문제)
 - **[완료]** 이웃 message 빼기(`--geom-angle`), 포켓된 공 slot 표현 → 효과 없음. angle wrap-aware loss → policy 악화(이유 미규명). lr decay 단독 → 악화
-- **[진행]** 학습 길이 3배(1500 epoch, 깊이 4 vs 6)
-- **[미착수]** residual/LayerNorm + lr 3e-4(#18), 좌표 sin/cos(#14), 폭+깊이 결합
+- **[완료]** 학습 길이 3배(1500 epoch): 깊이 6의 500 epoch 열세(3.77)는 학습 예산 부족이었고(1500 epoch에서 3.51), 같은 길이의 깊이 4(3.59)와는 차이 없음. 깊이 4는 길게 돌려도 불변
+- **[미착수]** residual/LayerNorm + lr 3e-4(#18, 필요성 크게 줄어듦: 깊이 6도 길이로 수렴함), 좌표 sin/cos(#14), 폭+깊이 결합
 - **[미착수]** loss 스케일 `--angle-scale-deg 0.1`, EMA/마지막 epoch checkpoint(#9), lr/clip 정리(#1b), Laplace NLL robust loss(#20)
 - **[미착수]** 2개 state 약점의 구조적 원인(#17), 이전 비교의 pair supervision 조건 재실행(#7)
 
@@ -548,7 +549,7 @@ policy의 shot 실패 분해(robust+pairs, val): chosen pair miss ~24%, chosen p
 
 ### 지금 실험할 만한 것 (2026-10-12, 우선순위, 진단 두 가지 결과 반영)
 
-기준: 병목(action 정밀도)에 직접 닿고, 결과가 다음 결정을 바꾸는 것. 자원: Mac mini 10코어에서 1500 epoch 6 runs가 돌고 있어(깊이 4 약 10:00, 깊이 6 약 11:00 종료 예상) 새 학습은 깊이 4 run이 끝난 뒤. 판단표는 실행 직전에 결과를 보기 전에 정한다(experiments.md 규칙).
+기준: 병목(action 정밀도)에 직접 닿고, 결과가 다음 결정을 바꾸는 것. 자원: 학습 길이 실험이 끝나 CPU가 비었다(2026-10-12 10:17). 판단표는 실행 직전에 결과를 보기 전에 정한다(experiments.md 규칙).
 
 | 순위 | 실험 | 상태·근거 | 비용 | 시점 |
 |---|---|---|---|---|
@@ -557,7 +558,7 @@ policy의 shot 실패 분해(robust+pairs, val): chosen pair miss ~24%, chosen p
 | 1 | **speed 쪽 개선(TODO 21)**: speed head를 mode-aware하게(두 모드 분류 + 회귀) 또는 speed에만 L1 | speed를 label대로 하면 +8.0%p(상한). 깊이 4가 손대지 않은 항목. 가장 큰 미개척 항목 | 코드 + 테스트 + BC 3 runs(약 45분) | 깊이 4 1500 run 종료 후 |
 | 2 | **loss 스케일 `--angle-scale-deg 0.1`** (깊이 4, 500 epoch, seed 0/1/2) | 각도가 병목(특히 2개 state)인데 baseline 측정(깊이 2)에서 train loss의 59%가 speed. 깊이 4에서는 안 잼. 코드 변경 없음 | BC 약 45분 | 1번과 병행 가능 |
 | 3 | **search → distill 최소 버전(#19)**: A(positives-only) vs C(경계 중앙 label), label만 교체 | 격자 oracle 상한이 크다(해가 99.2%). state 분포는 teacher state로 충분(실패의 73%가 첫 샷·적중 직후, 정책 state의 이득 상한 +2.0%p). 단 teacher label이 이미 중앙이라 null일 수 있음 | 시뮬레이터 약 120k 샷(약 5분) + BC 6 runs | 1·2번 뒤 |
-| 4 | **residual/LayerNorm 코드 준비(#18)**: 기본값 동작 불변을 테스트로 고정 | 학습 길이 실험이 D/C로 나오면 바로 실행. A로 나오면 불필요 | 코드 + 테스트 | 지금 준비, 실행은 1500 epoch 결과 후 |
+| 4 | ~~residual/LayerNorm 코드 준비(#18)~~ **[보류]** | 깊이 6이 1500 epoch에서 수렴해(3.77 → 3.51) 구조적 불안정이 아니라 학습 예산 문제였다. 깊이 6이 깊이 4를 못 넘었으므로 필요성이 낮다 | – | – |
 | 5 | **재시도 시 탐색 사전 측정(TODO 22)**: miss 직후 state가 직전 state와 얼마나 같은지 측정, 같으면 재시도 때 각도에 노이즈를 주는 롤아웃 | miss 직후 성공률 70.4% vs 정상 82.2%. 결정론적 정책의 반복 실패 가설(미검증). 학습 없음 | 롤아웃 기록 약 20줄 + 테스트, 수 분 | 지금 가능 |
 | 6 | 폭 256 + 깊이 4 결합 | 폭 효과가 작고 seed가 불안정해 우선순위 낮음 | 코드 없음, 3 runs | 여유 있을 때 |
 | 상시 | 새 run부터 **마지막 epoch 가중치도 저장**(#9) | 최댓값 선택의 낙관 편향 보정(best-vs-last 비교) | 코드 약 5줄 + 테스트 | 다음 학습 run 전에 |
@@ -570,7 +571,7 @@ policy의 shot 실패 분해(robust+pairs, val): chosen pair miss ~24%, chosen p
 
 | 지금 | 결과 | 다음 |
 |---|---|---|
-| encoder 용량 — 폭 256: 효과 작음(보류). 깊이 4: 효과 큼(판단표 C, 각도 −24%·적중 +5.5%p). **깊이 6/8: 깊이 4보다 나쁨, train loss가 안 내려감 → 판단표 D(최적화 문제)** | **학습 길이 3배(1500 epoch) 깊이 4 vs 6 — 진행 중**(experiments.md "학습 길이 3배"의 판단표 A~F). 느린 시작(학습량 부족)과 구조적 불안정을 가른다 | A: 깊이 6이 학습량 부족이었음 → 깊이 8도 길게. B/C/D/E/F는 해당 절 참고. D·C이면 residual/LayerNorm + lr 3e-4(TODO 18) |
+| encoder 용량 — 폭 256: 효과 작음(보류). 깊이 4: 효과 큼(판단표 C). 깊이 6/8(500 epoch): 깊이 4보다 나쁨. **학습 길이 3배: 깊이 6은 회복(3.77 → 3.51), 같은 길이 깊이 4(3.59)와 차이 없음, 깊이 4는 불변** | **깊이 축은 닫는다**: 깊이 4, 500 epoch 유지(비용 대비 최선). 깊이 8·residual/LayerNorm은 보류 | 남은 공 2개의 각도에서 깊이 6의 −20%(사후 관찰)가 중요해지면 재검토 |
 | 깊이 4 고정 상태에서 남은 실패 분해(experiments.md "깊이 4에서 남은 실패는 어디서 오는가") — **pair를 맞춰도 13.7%p 실패(선택 손실 4.2%p의 약 3배), 각도만 고치는 refine은 이득 0** | 학습 중 각도 정밀도를 더 짜내는 것 vs 시뮬레이터로 후보를 검증하는 탐색 | **사용자 결정 필요**: search → distill(TODO 19)을 먼저 할지, 깊이 재시도(TODO 18)를 먼저 할지 |
 | 깊이 재시도에서 개선 | 소폭 ↑ | sin/cos(Fourier) 좌표 표현을 같은 지표로 시험 |
 | | 변화 없음 | 학습 쪽(긴 학습, lr, EMA/마지막 epoch checkpoint = #9, loss 스케일 `--angle-scale-deg` 0.1) |
@@ -594,12 +595,12 @@ policy의 shot 실패 분해(robust+pairs, val): chosen pair miss ~24%, chosen p
 
 | # | 항목 | 이유 | 비용 | 의존 |
 |---|---|---|---|---|
-| 13 | **encoder 용량: 완료(2026-10-12).** 깊이 4가 최선(3.90 → 3.55), 폭 256은 효과 작음(3.84, 보류), **깊이 6 / 8은 3.77 / 3.94로 오히려 나쁨**(train loss가 안 내려가는 최적화 문제로 읽음, 판단표 D). 깊이 자체가 병목인지는 **학습 길이 3배(1500 epoch, 깊이 4 vs 6) 실험으로 먼저 확인 — 진행 중(2026-10-12 07:41 시작, 약 3시간)**, 이어서 TODO 18 | 정밀도 병목이 용량(특히 깊이)인지 | BC ~1시간(병렬 6 runs) | – |
+| 13 | **encoder 용량: 완료(2026-10-12).** 깊이 4가 비용 대비 최선(3.90 → 3.55), 폭 256은 효과 작음(3.84, 보류), 깊이 6 / 8은 500 epoch에서 3.77 / 3.94로 나빴으나 **1500 epoch에서 깊이 6이 3.51로 회복**(학습 예산 부족), 같은 길이 깊이 4(3.59)와는 차이 없음. 깊이 4는 길게 돌려도 불변 | 정밀도 병목이 용량(특히 깊이)인지 | – | – |
 | 14 | **좌표 sin/cos(Fourier) 표현** | 작은 각도 차이를 더 잘 구분하도록 | BC | 13 결과에 따라 |
 | 15 | **gradient refine** `∇_a P(made)` — **2026-10-12: 보류.** 4개 모델 모두 각도 gradient·격자 refine 이득 0(방향은 95~96% 맞지만 proposal로 되돌리는 방향, made head가 proposal에 앵커) | 후보 격자 없이 연속 탐색. 단 head가 proposal 밖의 정보를 가져야 의미 | 낮음(추론) | made head를 proposal 앵커에서 풀기(미착수) 또는 기하 입력 허용(열린 결정 1) |
 | 16 | **게임 vs val 격차 확인: 완료(2026-10-12).** 분포 이동 없음(남은 공 수별 성공률이 val과 1.5%p 이내), 실패 직후 state만 어려움(71.3% vs 82.2%, 실패의 27%). made head 이득이 게임에서 작았던 이유는 이 분석으로는 설명되지 않는다(미해결) | policy가 가는 state는 teacher state와 분포가 다름 | – | – |
 | 17 | **2개 state 약점의 구조적 원인** | 용량으로 안 풀리면 입력 분포·최적화 쪽(남은 공 2개 state만 각도 오차 2배) | – | 13 결과에 따라 |
-| 18 | **깊이 > 4 최적화 안정화**: encoder MLP에 residual connection 또는 LayerNorm, lr 3e-4로 6/8층 재시도 (판단표 D에서 사전에 정한 행동) | 깊이 6/8의 train loss가 안 내려가고 seed 2에서 폭주. 깊이 자체가 병목인지는 이것으로 판가름 | BC ~1시간(병렬) + 코드 변경 + 테스트 | 학습 길이 3배 실험 결과 |
+| 18 | ~~깊이 > 4 최적화 안정화~~ **[보류]**: encoder MLP에 residual connection 또는 LayerNorm, lr 3e-4로 6/8층 재시도 | 깊이 6이 1500 epoch에서 수렴해 필요성이 줄었고, 깊이 6이 깊이 4를 못 넘음 | – | – |
 | 19 | **search → distill (expert iteration)**: head가 분포(Laplace/mixture)를 내고, 샘플 N개를 시뮬레이터로 쳐서 성공한 샘플을 label로 재학습(filtered BC). 샷 단위 contextual bandit(shots/game ≈ 3 / 샷 성공률이 모든 모델에서 맞음) | 같은 label pair에서 샘플 6개 중 하나라도 성공하는 비율이 b = 0.10°에서 깊이 4 81.8% → 92.6%, 격자 oracle은 각도 31 × speed 7 중 99.2%(made head는 84.8%). critic이 필요 없고(시뮬레이터가 진짜 1-step return) 추론은 정책 단독. RL 대응은 experiments.md "head에서 샘플링해서 치면?" | 시뮬레이터 약 100k 샷/라운드(약 4분, 추정) + BC | **사용자 결정**(열린 결정 2) |
 | 21 | **speed 쪽 개선**: speed head를 mode-aware하게(label speed가 1.0 m/s 76% / ≥2 m/s 24%의 두 모드인데 모델은 중간값을 냄) 또는 speed에만 L1 loss | oracle 교체에서 speed를 label로 바꾸면 81.6 → 89.6%(+8.0%p, 상한). 깊이 4는 speed를 안 고쳤다(r_s +7.5 → +8.0%p) | 코드 + 테스트 + BC 3 runs | – |
 | 22 | **재시도 시 탐색**: 직전 샷이 miss였고 state가 거의 같으면 각도에 노이즈를 주는 롤아웃. 먼저 miss 직후 state가 직전과 얼마나 같은지 측정 | miss 직후 성공률 70.4% vs 정상 82.2%. 결정론적 정책이 같은 action을 반복해 또 실패하는 것일 수 있음(미검증). 샘플링이 이득이 되는 경우 | 학습 없음, 롤아웃 | – |
