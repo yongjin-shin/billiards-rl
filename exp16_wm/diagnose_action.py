@@ -356,10 +356,10 @@ def clean_flags(env, pm, obs: np.ndarray, acts: np.ndarray) -> np.ndarray:
     return np.array([(lambda x: x[0].any() and not x[1])(E.play(env, pm, obs[i], acts[i])) for i in range(len(obs))])
 
 
-def val_setup(raw: dict, seed: int) -> dict:
-    """Val states of the run's split with the label pair (candidate 0) and its action."""
-    data, _, va = build_split(dict(raw), 0.1, seed, 1.0, "none")
-    vi = np.where(va)[0]
+def val_setup(raw: dict, seed: int, split: str = "val") -> dict:
+    """Val (or train) states of the run's split with the label pair (candidate 0) and its action."""
+    data, tr, va = build_split(dict(raw), 0.1, seed, 1.0, "none")
+    vi = np.where(va if split == "val" else tr)[0]
     obs = data["obs"][vi]
     g = data["good_pairs"][vi]
     k0 = np.argmax(g >= 0, 1)
