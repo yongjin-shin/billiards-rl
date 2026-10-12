@@ -57,6 +57,9 @@ def _mlp(i: int, h: int, o: int, layers: int = 2) -> nn.Sequential:
     return nn.Sequential(*mods, nn.Linear(h, o))
 
 
+LOGVAR_RANGE = 3.0       # uncertainty weighting: log σ² of each loss term is limited to [-3, 3] (weights e^{∓3} ≈ 0.05 … 20)
+
+
 def speed_bin_centers(n_bins: int) -> torch.Tensor:
     """n_bins centre speeds (m/s), log-spaced from the lowest to the highest speed of the action range.
     With 21 centres the ratio is 16^(1/20) and 0.5, 1.0, 2.0, 4.0, 8.0 m/s are centres (the label speeds sit on 1.0 m/s)."""
@@ -84,8 +87,10 @@ class PairGNNPolicy(nn.Module):
     def __init__(self, hidden: int = 128, wta_eps: float = 0.05, sel_weight: float = 10.0,
                  factorized: bool = False, scratch_head: bool = False, made_head: bool = False,
                  made2_head: bool = False, geom_angle: bool = False, made2_geom: bool = False,
-                 enc_layers: int = 2, speed_loss: str = "mse", speed_bins: int = 0):
+                 enc_layers: int = 2, speed_loss: str = "mse", speed_bins: int = 0, uncertainty_weights: bool = False):
         super().__init__()
+        if uncertainty_weights and (speed_bins or speed_loss != "mse"):
+            raise ValueError("uncertainty_weights cannot be combined with speed_loss / speed_bins")
         if speed_loss not in ("mse", "l1"):
             raise ValueError(f"speed_loss must be mse or l1, got {speed_loss!r}")
         if speed_bins < 0 or speed_bins == 1:
@@ -93,6 +98,7 @@ class PairGNNPolicy(nn.Module):
         H = hidden
         self.speed_loss, self.speed_bins = speed_loss, speed_bins   # speed term of the pair loss: squared / absolute error, or a categorical head over speed bins
         self.speed_sample = False                       # inference with speed_bins: sample the bin from the softmax instead of taking the most probable one
+        self.uncertainty_weights = uncertainty_weights  # Kendall et al. 2018: learned log σ² per loss term (angle, speed, selection) in the pair loss
         self.wta_eps, self.sel_weight = wta_eps, sel_weight
         self.factorized = factorized
         self.scratch_lambda = 0.0         # inference: penalise pairs the scratch head expects to scratch
@@ -126,6 +132,8 @@ class PairGNNPolicy(nn.Module):
             self.head_made = nn.Linear(H, 1)      # can this pair be made (coarse-scan success rate) — look-ahead auxiliary
         if made2_head:
             self.head_made2 = _mlp(H + 4 + int(made2_geom), H, 1)   # [e_ij, a, (a − a_ij)·scale] → will action a pocket pair ij
+        if uncertainty_weights:
+            self.log_var = nn.Parameter(torch.zeros(3))       # [angle, speed, selection]; 0 = the hand-set weights of the plain loss
         side = torch.zeros(N_POCKETS)
         side[list(SIDE_POCKETS)] = 1.0
         self.register_buffer("side", side)
@@ -313,9 +321,9 @@ class PairGNNPolicy(nn.Module):
         selection head is trained to pick those pairs (fixed targets instead of a moving winner).
         Rows with no labelled pair fall back to winner-takes-all.
         """
-        if self.speed_bins or self.speed_loss != "mse":
+        if self.speed_bins or self.speed_loss != "mse" or self.uncertainty_weights:
             if self.mod is not None or self.factorized or pairs is None or self.wta_fallback:
-                raise ValueError("speed_loss / speed_bins are implemented for the plain pair-supervised loss only "
+                raise ValueError("speed_loss / speed_bins / uncertainty_weights are implemented for the plain pair-supervised loss only "
                                  "(--pair-supervision --no-wta-fallback, global selection, no modular loss)")
         if self.mod is not None:
             return self._mod_loss(rel, good_u, pairs, extras, w)
@@ -462,6 +470,8 @@ class PairGNNPolicy(nn.Module):
     def _pair_loss(self, rel: torch.Tensor, good_u: torch.Tensor, pairs: torch.Tensor,
                    w: torch.Tensor | None) -> torch.Tensor:
         w = torch.ones(2, device=rel.device) if w is None else w
+        if self.uncertainty_weights:
+            return self._pair_loss_kendall(rel, good_u, pairs, w)
         if self.speed_bins or self.speed_loss != "mse":
             return self._pair_loss_speed(rel, good_u, pairs, w)
         means, logits, _ = self(rel)
@@ -475,6 +485,27 @@ class PairGNNPolicy(nn.Module):
         logp = F.log_softmax(logits, dim=1).gather(1, pidx)
         ce = -(logp * has).sum(dim=1) / n
         return (reg + self.sel_weight * ce).mean()
+
+    def _pair_loss_kendall(self, rel: torch.Tensor, good_u: torch.Tensor, pairs: torch.Tensor, w: torch.Tensor) -> torch.Tensor:
+        """
+        _pair_loss with learned term weights (Kendall, Gal & Cipolla 2018): Σ_i exp(−s_i) · L_i + s_i over
+        L_angle, L_speed (squared errors in precision units) and L_sel (sel_weight · selection CE), s = log σ² clamped to
+        ±LOGVAR_RANGE. At s = 0 this is the plain pair loss. At the optimum σ_i² ≈ L_i, so a term with a large (heavy-tailed)
+        loss gets a small weight.
+        """
+        means, logits, _ = self(rel)
+        B, K = pairs.shape
+        has = pairs >= 0
+        pidx = pairs.clamp(min=0)
+        m = means.gather(1, pidx[..., None].expand(B, K, 2))
+        diff = action_diff(m, torch.nan_to_num(good_u)) * w
+        n = has.sum(dim=1).clamp(min=1)
+        l_ang = ((diff[..., 0] ** 2 * has).sum(dim=1) / n).mean()
+        l_spd = ((diff[..., 1] ** 2 * has).sum(dim=1) / n).mean()
+        ce = -(F.log_softmax(logits, dim=1).gather(1, pidx) * has).sum(dim=1) / n
+        l_sel = (self.sel_weight * ce).mean()
+        s = self.log_var.clamp(-LOGVAR_RANGE, LOGVAR_RANGE)
+        return (torch.exp(-s[0]) * l_ang + s[0]) + (torch.exp(-s[1]) * l_spd + s[1]) + (torch.exp(-s[2]) * l_sel + s[2])
 
     def _pair_loss_speed(self, rel: torch.Tensor, good_u: torch.Tensor, pairs: torch.Tensor, w: torch.Tensor) -> torch.Tensor:
         """
@@ -554,7 +585,8 @@ class PairGNNPolicy(nn.Module):
                     "has_made": self.has_made, "has_made2": self.has_made2,
                     "geom_angle": self.geom_angle, "made2_geom": self.made2_geom,
                     "hidden": self.hidden, "enc_layers": self.enc_layers,
-                    "speed_loss": self.speed_loss, "speed_bins": self.speed_bins}, path)
+                    "speed_loss": self.speed_loss, "speed_bins": self.speed_bins,
+                    "uncertainty_weights": self.uncertainty_weights}, path)
 
 
 assert REL_DIM == 3 * N_BALLS + 2 * N_POCKETS

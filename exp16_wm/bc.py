@@ -359,8 +359,10 @@ def train_bc(agent: VanillaSAC, data: dict[str, np.ndarray], train: np.ndarray, 
             best_score, best_val, best_epoch = score, va_loss, ep
             best_state = {k: v.clone() for k, v in model.module.state_dict().items()}
         if log_every and ep % log_every == 0:
+            kw = ("  logvar[ang,spd,sel] " + " ".join(f"{x:+.2f}" for x in model.module.log_var.detach().clamp(-3, 3).tolist())
+                  if getattr(model.module, "uncertainty_weights", False) else "")
             print(f"  epoch {ep:>4}  train {tr_loss:.6f}  val {va_loss:.6f}  within{select_thresh_deg:g} "
-                  f"{va_within:.4f}  best@{best_epoch}", flush=True)
+                  f"{va_within:.4f}  best@{best_epoch}{kw}", flush=True)
         if ep - best_epoch >= patience:
             break
     model.module.load_state_dict(best_state)
@@ -495,6 +497,9 @@ def parse_args():
     p.add_argument("--gnn-layers", type=int, default=2, help="hidden layers of each encoder MLP (ball message / ball / pair)")
     p.add_argument("--speed-loss", type=str, default="mse", choices=["mse", "l1"],
                    help="speed term of the pair loss: squared error (default) or absolute error (a median instead of a mean)")
+    p.add_argument("--uncertainty-weights", action="store_true",
+                   help="learn the weight of the angle / speed / selection terms of the pair loss (Kendall et al. 2018); "
+                        "needs --pair-supervision --no-wta-fallback")
     p.add_argument("--speed-bins", type=int, default=0,
                    help="> 0: speed head = categorical over this many log-spaced bins (cross-entropy on the label's bin); "
                         "needs --pair-supervision --no-wta-fallback")
@@ -588,7 +593,7 @@ def main():
                                                             if args.selection == "factorized" else "")) + \
             ("" if args.gnn_hidden == 128 or args.model != "gnn" else f"_H{args.gnn_hidden}") + \
             ("" if args.gnn_layers == 2 or args.model != "gnn" else f"_L{args.gnn_layers}") + \
-            ("_sl1" if args.speed_loss == "l1" else "") + (f"_sb{args.speed_bins}" if args.speed_bins else "") + \
+            ("_sl1" if args.speed_loss == "l1" else "") + (f"_sb{args.speed_bins}" if args.speed_bins else "") + ("_kw" if args.uncertainty_weights else "") + \
             ("_geoang" if args.geom_angle else "") + extra_tag + (f"_m2w{args.made2_weight:g}" if args.made2_head else "") + ("geo" if args.made2_geom else "") + ("_wrap" if args.angle_wrap else "_nowrap")
     name = (f"exp16_bc_{teacher}_{args.loss}{h_tag}_a{args.angle_scale_deg:g}_v{args.speed_scale:g}"
             f"_s{args.seed}_{time.strftime('%Y-%m-%d@%H%M')}")
@@ -603,7 +608,8 @@ def main():
                               factorized=args.selection == "factorized", scratch_head=args.scratch_head,
                               made_head=args.made_head, made2_head=args.made2_head,
                               geom_angle=args.geom_angle, made2_geom=args.made2_geom,
-                              enc_layers=args.gnn_layers, speed_loss=args.speed_loss, speed_bins=args.speed_bins)
+                              enc_layers=args.gnn_layers, speed_loss=args.speed_loss, speed_bins=args.speed_bins,
+                              uncertainty_weights=args.uncertainty_weights)
         agent.fact_terms = tuple(args.fact_terms)
         agent.wta_fallback = not args.no_wta_fallback
         if modular:
@@ -649,6 +655,9 @@ def main():
                "n_shots": int(len(data["shot"])), "n_train": int(train.sum()), "n_val": int(val.sum()),
                "train": {k: v for k, v in fit.items() if k != "history"}, "val": vm, "eval": ev,
                "args": vars(args)}
+    if getattr(agent, "uncertainty_weights", False):      # log σ² of (angle, speed, selection) at the saved (best) epoch
+        results["log_var"] = agent.log_var.detach().clamp(-3, 3).tolist()
+        print(f"  learned log σ² (angle, speed, selection) at the best epoch: {results['log_var']}", flush=True)
     with open(os.path.join(out_dir, "results.json"), "w") as f:
         json.dump(results, f, indent=2)
     np.save(os.path.join(out_dir, "history.npy"), np.array(fit["history"]))

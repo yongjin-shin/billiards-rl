@@ -41,6 +41,12 @@ if [ "$1" = "loss" ]; then               # 각도 loss 가중치 수동 4배(--a
   done
   wait; exit
 fi
+if [ "$1" = "kendall" ]; then            # 각도·속도·선택 항의 가중치를 학습(--uncertainty-weights), 깊이 4, made2 head 포함, seed 0/1/2 (experiments.md 2026-10-12)
+  for sd in 0 1 2; do
+    run loss_kw_s$sd --out-root logs/experiments_loss --pair-supervision --no-wta-fallback --made2-head --gnn-layers 4 --uncertainty-weights --seed $sd
+  done
+  wait; exit
+fi
 if [ "$1" = "capacity" ]; then           # encoder 용량: 폭 256 / 깊이 4, made2 head 포함, seed 0/1/2
   for sd in 0 1 2; do
     run cap_H256_s$sd --pair-supervision --no-wta-fallback --made2-head --gnn-hidden 256 --seed $sd
