@@ -293,13 +293,21 @@ def train_bc(agent: VanillaSAC, data: dict[str, np.ndarray], train: np.ndarray, 
              lr_schedule: str = "const", lr_final_frac: float = 0.01, use_pairs: bool = False,
              selection: str = "global", use_extras: bool = False,
              sims: dict[str, np.ndarray] | None = None, made2_weight: float = 1.0, sims_batch: int = 1024,
-             aux: np.ndarray | None = None, aux_weight: float = 0.0) -> dict:
+             aux: np.ndarray | None = None, aux_weight: float = 0.0, aux_only: bool = False) -> dict:
     """select: 'loss' keeps the lowest val loss; 'within' the highest val within-threshold rate
-    (the val loss is dominated by a few far-off predictions and can disagree with it)."""
+    (the val loss is dominated by a few far-off predictions and can disagree with it).
+    aux_only: train the encoder + aux head on the geometry look-ahead alone (no action / selection / made loss);
+    the 'val loss' is then the val aux MSE and the checkpoint is the lowest of it."""
     if select not in ("loss", "within"):
         raise ValueError(f"unknown select: {select}")
     if lr_schedule not in ("const", "cosine"):
         raise ValueError(f"unknown lr_schedule: {lr_schedule}")
+    if aux_only:
+        if aux is None or aux_weight <= 0:
+            raise ValueError("aux_only needs aux targets and aux_weight > 0")
+        if sims is not None:
+            raise ValueError("aux_only does not train the made head (no sims)")
+        select = "loss"
     torch.manual_seed(seed)
     rng = np.random.default_rng(seed)
     model = as_model(agent, loss)
@@ -342,15 +350,15 @@ def train_bc(agent: VanillaSAC, data: dict[str, np.ndarray], train: np.ndarray, 
         tr_loss = tr_aux = 0.0
         for i in range(0, len(perm), batch):
             b = perm[i:i + batch]
-            l = model.train_loss(obs[b], t_u[b], g_u[b], w, pairs=None if pr is None else pr[b],
-                                 extras=None if ex is None else {k: v[b] for k, v in ex.items()})
+            l = None if aux_only else model.train_loss(obs[b], t_u[b], g_u[b], w, pairs=None if pr is None else pr[b],
+                                                      extras=None if ex is None else {k: v[b] for k, v in ex.items()})
             if sims is not None:
                 sb = rng.choice(sims_tr, size=min(sims_batch, len(sims_tr)), replace=False)
                 made_b = torch.as_tensor(from_bitmask(s_mask[sb]))
                 l = l + made2_weight * model.module.made2_loss(obs[s_row[sb]], s_a[sb], made_b, s_scr[sb])
             if use_aux:
                 la = model.module.aux_loss(obs[b], aux_t[b])
-                l = l + aux_weight * la
+                l = aux_weight * la if l is None else l + aux_weight * la
                 tr_aux += la.item() * len(b)
             opt.zero_grad()
             l.backward()
@@ -360,12 +368,15 @@ def train_bc(agent: VanillaSAC, data: dict[str, np.ndarray], train: np.ndarray, 
         tr_aux /= max(1, len(perm))
         model.module.eval()
         with torch.no_grad():
-            pred_va = model.predict_unit(obs[va_idx])
-            va_loss = float(model.train_loss(obs[va_idx], t_u[va_idx], g_u[va_idx], w,
-                                             pairs=None if pr is None else pr[va_idx],
-                                             extras=None if ex is None else {k: v[va_idx] for k, v in ex.items()}))
-            va_within = within_rate(pred_va, g_u[va_idx], select_thresh_deg)
             va_aux = float(model.module.aux_loss(obs[va_idx], aux_t[va_idx])) if use_aux else float("nan")
+            if aux_only:
+                va_loss, va_within = va_aux, float("nan")
+            else:
+                pred_va = model.predict_unit(obs[va_idx])
+                va_loss = float(model.train_loss(obs[va_idx], t_u[va_idx], g_u[va_idx], w,
+                                                 pairs=None if pr is None else pr[va_idx],
+                                                 extras=None if ex is None else {k: v[va_idx] for k, v in ex.items()}))
+                va_within = within_rate(pred_va, g_u[va_idx], select_thresh_deg)
         history.append((ep, tr_loss, va_loss, va_within))
         if use_aux:
             aux_history.append((ep, tr_aux, va_aux))
@@ -522,6 +533,9 @@ def parse_args():
     p.add_argument("--geom-aux-weight", type=float, default=0.0,
                    help="> 0: auxiliary look-ahead of geometry — a head on each pair embedding predicts the pocket entry deviation, "
                         "the ball's cushion distance and the blockers on the two shot paths (training only); this is the loss weight")
+    p.add_argument("--aux-only", action="store_true",
+                   help="diagnostic with --geom-aux-weight: train the encoder on the geometry look-ahead alone (no action / selection / "
+                        "made loss), no policy evaluation; asks whether the encoder can represent the targets at all")
     p.add_argument("--speed-bins", type=int, default=0,
                    help="> 0: speed head = categorical over this many log-spaced bins (cross-entropy on the label's bin); "
                         "needs --pair-supervision --no-wta-fallback")
@@ -602,6 +616,8 @@ def main():
         extra_paths = sorted({p for pat in args.train_only_data for p in glob.glob(pat)})
         data, train, val = append_train_only(data, train, val, load_teacher_data(extra_paths))
         extra_tag = "_plus-" + os.path.basename(os.path.dirname(os.path.dirname(extra_paths[0])))
+    if args.aux_only and (args.geom_aux_weight <= 0 or args.made2_head):
+        raise SystemExit("--aux-only needs --geom-aux-weight > 0 and no --made2-head")
     aux = None
     if args.geom_aux_weight > 0:                                  # geometry targets from the RAW observations (before the transform)
         if args.model != "gnn" or args.augment != "none":
@@ -622,7 +638,7 @@ def main():
                                                             if args.selection == "factorized" else "")) + \
             ("" if args.gnn_hidden == 128 or args.model != "gnn" else f"_H{args.gnn_hidden}") + \
             ("" if args.gnn_layers == 2 or args.model != "gnn" else f"_L{args.gnn_layers}") + \
-            ("_sl1" if args.speed_loss == "l1" else "") + (f"_sb{args.speed_bins}" if args.speed_bins else "") + ("_kw" if args.uncertainty_weights else "") + (f"_ga{args.geom_aux_weight:g}" if args.geom_aux_weight > 0 else "") + \
+            ("_sl1" if args.speed_loss == "l1" else "") + (f"_sb{args.speed_bins}" if args.speed_bins else "") + ("_kw" if args.uncertainty_weights else "") + (f"_ga{args.geom_aux_weight:g}" if args.geom_aux_weight > 0 else "") + ("_auxonly" if args.aux_only else "") + \
             ("_geoang" if args.geom_angle else "") + extra_tag + (f"_m2w{args.made2_weight:g}" if args.made2_head else "") + ("geo" if args.made2_geom else "") + ("_wrap" if args.angle_wrap else "_nowrap")
     name = (f"exp16_bc_{teacher}_{args.loss}{h_tag}_a{args.angle_scale_deg:g}_v{args.speed_scale:g}"
             f"_s{args.seed}_{time.strftime('%Y-%m-%d@%H%M')}")
@@ -652,7 +668,17 @@ def main():
                    select=args.select, lr_schedule=args.lr_schedule, lr_final_frac=args.lr_final_frac,
                    use_pairs=args.pair_supervision or modular, selection=args.selection, use_extras=modular,
                    sims=sims, made2_weight=args.made2_weight, sims_batch=args.sims_batch,
-                   aux=aux, aux_weight=args.geom_aux_weight)
+                   aux=aux, aux_weight=args.geom_aux_weight, aux_only=args.aux_only)
+    if args.aux_only:                                              # no policy was trained: save the encoder + aux head and stop
+        agent.save(os.path.join(out_dir, "bc_model.pt"))
+        print(f"  aux-only: {fit['epochs_run']} epochs ({time.time()-t0:.0f}s), best val aux MSE {fit['best_val_loss']:.4f} @{fit['best_epoch']}", flush=True)
+        with open(os.path.join(out_dir, "results.json"), "w") as f:
+            json.dump({"name": name, "train": {k: v for k, v in fit.items() if k not in ("history", "aux_history")},
+                       "val": None, "eval": None, "args": vars(args)}, f, indent=2)
+        np.save(os.path.join(out_dir, "history.npy"), np.array(fit["history"]))
+        np.save(os.path.join(out_dir, "aux_history.npy"), np.array(fit["aux_history"]))
+        print(f"  saved → {out_dir}", flush=True)
+        return
     vm = val_metrics(agent, data, val)
     if isinstance(agent, PairGNNPolicy):
         vm.update(oracle_pair_metrics(agent, data, val))

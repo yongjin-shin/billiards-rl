@@ -179,3 +179,35 @@ def test_aux_history_logs_train_and_val_mse_per_epoch_without_changing_training(
     assert h[-1, 1] < h[0, 1]                                                        # the train aux MSE falls over a few epochs
     # logging adds only a (detached) value: the main loss at epoch 0 minus the weighted aux term equals the weight-0 run
     assert fits[1]["history"][0][1] - 5.0 * h[0, 1] == pytest.approx(fits[0]["history"][0][1], abs=0.05)   # the term is ~5 of ~55000
+
+
+def test_aux_only_trains_the_encoder_and_aux_head_but_not_the_action_or_selection_heads():
+    raws, rel = _rel_rows(40, seed=5)
+    n = len(rel); t, v = pair_geometry(raws, TABLE); tr = np.arange(n) < 30; aux, _, _ = standardize(t, v, tr)
+    data = {"obs": rel, "action": np.tile([[0.3, 4.0]], (n, 1)).astype(np.float32),
+            "good_actions": np.tile(np.array([[[0.3, 4.0]]], np.float32), (n, 1, 1))}
+    torch.manual_seed(0)
+    m = PairGNNPolicy(hidden=16, aux_dim=N_AUX)
+    before = {k: x.clone() for k, x in m.state_dict().items()}
+    fit = train_bc(m, data, tr, ~tr, "nearest_good", epochs=6, batch=16, lr=3e-3, patience=10, seed=0, log_every=0,
+                   select="within", w=dim_weights(0.2, 0.5), aux=aux, aux_weight=1.0, aux_only=True)   # "within" is overridden: it is NaN here
+    after = m.state_dict()
+    changed = lambda prefix: any(not torch.equal(before[k], after[k]) for k in before if k.startswith(prefix))
+    assert changed("aux_head") and changed("pair") and changed("ball")                 # the encoder and the aux head learn
+    assert not changed("head_a") and not changed("head_s")                              # the action / selection heads get no gradient
+    h = np.array(fit["aux_history"])
+    assert fit["select"] == "loss" and 0 <= fit["best_epoch"] < 6 and np.isfinite(fit["best_val_loss"])
+    assert h[-1, 1] < h[0, 1] and fit["best_val_loss"] == pytest.approx(h[:, 2].min(), rel=1e-6)   # the checkpoint is the lowest val aux MSE
+    assert all(r[2] == pytest.approx(a[2], rel=1e-6) for r, a in zip(fit["history"], fit["aux_history"]))   # history 'val loss' = val aux MSE
+
+
+def test_aux_only_refuses_to_run_without_aux_targets_or_with_sims():
+    raws, rel = _rel_rows(8, seed=6)
+    n = len(rel); tr = np.arange(n) < 6
+    data = {"obs": rel, "action": np.zeros((n, 2), np.float32), "good_actions": np.zeros((n, 1, 2), np.float32)}
+    kw = dict(epochs=1, batch=4, lr=1e-3, patience=5, seed=0, log_every=0, w=dim_weights(0.2, 0.5))
+    with pytest.raises(ValueError):
+        train_bc(PairGNNPolicy(hidden=16, aux_dim=N_AUX), data, tr, ~tr, "nearest_good", aux=None, aux_weight=1.0, aux_only=True, **kw)
+    t, v = pair_geometry(raws, TABLE); aux, _, _ = standardize(t, v, tr)
+    with pytest.raises(ValueError):
+        train_bc(PairGNNPolicy(hidden=16, aux_dim=N_AUX), data, tr, ~tr, "nearest_good", aux=aux, aux_weight=0.0, aux_only=True, **kw)

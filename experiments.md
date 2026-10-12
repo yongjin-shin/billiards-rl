@@ -5436,3 +5436,19 @@ KEN − control: 각도 오차 seed별 [0.041 0.008 0.006] (평균 +0.018°), �
 **한계**: seed 1개. 보조 head 구조와 학습 길이는 고정이라 "가중치로는 못 푼다"만 말할 수 있다. probe는 label pair 한 개씩이라 쓰는 pair 집합이 보조 loss(18개 전체)와 다르다.
 
 **다음 (행 W)**: 두 후보가 있다. (a) **보조 head 확대**(예: 128 → 256 → 256 → 4): 한 줄 변경으로 보조 head가 병목인지 본다. (b) **목표만 학습하는 같은 encoder**(BC loss 없이): encoder가 이 목표를 R² 0.8 이상으로 표현할 수 있는지를 가장 직접 묻는다. 이게 되면 BC loss와의 충돌, 안 되면 구조·입력 표현 문제다.
+
+### 목표만 학습하는 encoder (aux-only, seed 0, 2026-10-13 계획, 결과 보기 전)
+
+**왜**: 보조 가중치를 5 → 20으로 키워도 보조 MSE가 0.64 → 0.555뿐이고 `e`의 정보는 늘지 않았다(판단표 W). 이 encoder가 기하 목표를 **애초에 표현할 수 있는지**, 아니면 BC loss와 경쟁해서 못 하는지를 가른다.
+**변경점 (하나)**: `--aux-only`. 같은 PairGNNPolicy(깊이 4, 폭 128), 같은 data·split·seed 0·500 epoch·lr 1e-3 cosine, 같은 보조 목표 4개와 head(128 → 64 → 4). 달라지는 것은 **loss가 보조 항뿐**(action·selection·made 항 없음, `--made2-head` 없음, `--geom-aux-weight 1`: Adam이라 크기는 의미가 거의 없음)이라는 것과 val 기준이 보조 val MSE라는 것(체크포인트는 보조 val MSE 최저)이다. 정책 평가는 하지 않는다. 출력 `logs/experiments_auxonly`. 코드는 `train_bc(aux_only=True)`, 테스트 `test_aux_only_*` 2개(encoder·보조 head만 학습되고 `head_a`·`head_s`는 안 바뀜, aux 없이는 거부). joint 경로가 안 바뀐 것은 1 epoch 재실행으로 확인했다(epoch 0 학습 loss 26978.313106 동일).
+**비교 대상**: 같은 seed 0의 joint run(w=5: val MSE 0.647, w=20: 0.561), control encoder(보조 loss 없음)의 probe.
+**지표**: ① 보조 val MSE(최저 epoch), 곡선(t90, 250→499 낙폭) ② 보조 head R²(모든 valid pair, 학습·val; label pair, val) ③ 고정 `e` MLP probe R²(label pair, val, 4개 + 컷 각도·거리) — joint·control과 같은 방법. 원시 좌표 MLP는 같은 label pair에서 0.80~0.98을 읽었다(이전 probe).
+
+| # | 관측 | 해석 | 다음 행동 |
+|---|---|---|---|
+| F | epoch 0 보조 MSE가 0.95~1.05 밖이거나, 인자가 aux-only·made2 제외 외에 joint run과 다름 | 설정 오류 | 비교 보류 |
+| S | 보조 val MSE ≤ 0.20 (R² ≥ 0.8) | encoder는 표현할 수 있다 → 문제는 BC loss와의 경쟁(또는 joint에서의 학습 동역학). probe R² 4개가 모두 ≥ 0.8이면 정보가 `e`에 있음을 확인 | 보조 사전학습 → BC(2단계) 또는 gradient 분리를 시도 |
+| P | 0.20 < MSE < 0.45 | joint(0.56~0.65)보다는 낫지만 못 푼다 → 이 예산(500 epoch)에서 표현·최적화 한계 | 곡선이 아직 내려가면(250→499 낙폭 ≥ 25%) 더 오래·head 확대, 평평하면 N처럼 |
+| N | MSE ≥ 0.45 | BC 경쟁을 없애도 못 푼다 → 이 encoder·입력 표현·학습 설정 자체가 한계 | 같은 학습 설정으로 원시 좌표 MLP가 풀리는지 확인, 입력 표현 점검 |
+
+**한계(미리)**: seed 1개. 이 결과는 "이 설정(500 epoch, 128 → 64 → 4 head)에서"라는 조건 하의 답이다. S가 나와도 그것이 made head·정책에 유용하다는 뜻은 아니다.
