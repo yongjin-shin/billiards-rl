@@ -5717,3 +5717,20 @@ encoder lr 3e-4(V3는 1e-3), head lr 1e-3, 15 epoch(비용), state 10% hold-out�
 **한계(미리)**: E0·E1·E3는 seed 0 하나(encoder seed 1개). E1의 on-policy 후보는 control 원래 head의 verify 기준(학습된 head가 바뀌면 다시 뽑아야 함). E3의 목표는 정확한 공식값이고 이를 예측하는 것은 학습이지만, cascade에 쓰면 "기하를 학습으로 얻는" 경로가 된다(공식을 직접 넣는 것과 다름).
 
 **E3 측정 보정 (결과 일부를 본 뒤, 2026-10-13)**: 저장된 E3 가중치는 보조 val MSE 최저 epoch(177)의 것이고, 그 조준각 오차 중앙값은 0.373°(val label pair; pair head 0.086°)로 판단표 P0에 해당했다. 그러나 이 checkpoint 선택 기준이 정밀도 측정에 맞지 않는다: 학습 MSE는 epoch 490에서 0.00006으로 epoch 177보다 훨씬 낮고, val MSE는 relative frame의 ±180° 경계에서 각도가 넘어가는 소수의 큰 오차가 지배한다(목표 표준편차 38.6°). 그래서 **마지막 epoch 가중치도 저장**하도록(`--save-last`, roadmap 상시 TODO #9) 고치고 같은 인자·seed로 다시 돌려, 두 checkpoint 모두에서 같은 판단표(P1/P0/PM, val label pair 중앙값)를 적용한다. 같은 seed이므로 최저 val checkpoint는 이전과 같아야 한다(대조). 판단은 마지막 epoch checkpoint로 하고, 두 값 모두 기록한다.
+
+### E0·E1 결과 (seed 0, 2026-10-13)
+
+**E0 (진단, 시뮬레이션만)**: verify가 teacher와 다른 pair를 고른 val state 440개(26.2%)에서, teacher pair 주위 217 후보를 원래 head 순서로 쳤을 때 top-1 성공 **73.4%**(top-5 79.8%, top-20 86.8%). 같은 state에서 verify pair의 top-1은 60.2%. → 그 묶음 +13.2%p, 전체 기준 약 +3.5%p(이전 실패 예산의 pair 선택 몫 +4.2%p와 비슷). **판단표: 해당 행 없음** — 사전 기준 ≥ 85%(pair 선택이 지렛대)와 ≤ 70%(원래 어려운 state) 사이. pair 선택은 일부 도움이 되지만 teacher pair로도 정상 묶음(93%)보다 어렵다.
+
+**E1 (on-policy pair 후보로 made head 재학습)**: 학습 state 14,840개 × 24 후보를 verify pair 주위에서 새로 시뮬레이션(`logs/frozen_verifier/onpolicy_s0.npz`, verify pair가 teacher와 다른 비율 24.3%). 기존과의 차이는 학습 데이터뿐(control `e` 얼림, head·학습·평가 동일, head seed 3개).
+
+| seed 0 | 원래 head | A (teacher pair 데이터) | **E1a** (verify pair 데이터) | E1b (둘 다) |
+|---|---|---|---|---|
+| success@1 (head seed 평균, 범위) | 82.4% | 83.2% (82.7–83.6) | **83.2% (82.6–83.6)** | 진행 중 (seed 0: 82.8%) |
+| 같은 pair·가까운 제안 묶음 top-1 (66.8%) | 93.1% | 93.5% (seed 0) | 93.3% | |
+| 같은 pair·먼 제안 묶음 (7.0%) | 63.2% | 70.1% (seed 0) | 67.8% | |
+| **다른 pair 묶음 (26.2%)** | 60.2% | 61.1% (seed 0) | **61.6%** | |
+| holdout BCE | – | 0.0461 | 0.0516 | 0.0489 (seed 0) |
+| action | 동일 | 동일 | 동일 | 동일 |
+
+**판단표: N 행** (다른 pair 묶음 변화 +0.5%p, ±2%p 이내). verify pair 주위 후보로 학습해도 그 묶음의 순위가 오르지 않는다 → **학습·사용 분포 불일치는 실패 원인이 아니다.** (A의 묶음별 값은 head seed 0 하나로만 쟀다.)
