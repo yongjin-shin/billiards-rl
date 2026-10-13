@@ -8,7 +8,8 @@ import pytest
 import torch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from exp16_wm.frozen_verifier import AdaptiveVerifier, FrozenVerifier, fit_adaptive, fit_verifier, pair_features, rank_metrics
+from exp16_wm.frozen_verifier import (AdaptiveVerifier, FrozenVerifier, fit_adaptive, fit_verifier, group_top1, load_sims, pair_features,
+                                      rank_metrics, state_groups)
 from exp16_wm.gnn_policy import PairGNNPolicy
 
 POCKETS = [0, 0, 0, 0.5, 0, 1, 1, 0, 1, 0.5, 1, 1]
@@ -160,3 +161,43 @@ def test_candidate_scores_with_aim_match_the_per_pair_logits():
     k = torch.tensor([2, 5, 11, 17])
     assert torch.allclose(v.candidate_scores(rows, k, a[:, None, :])[:, 0], v.logits(rows, a)[torch.arange(4), k], atol=1e-5)
     assert FrozenVerifier(6, SCALE, hidden=16).head[0].in_features == 10 and v.head[0].in_features == 11
+
+
+def test_load_sims_concatenates_files_and_decodes_the_made_bitmask(tmp_path):
+    from exp16_wm.sim_identity import to_bitmask
+    made1 = np.zeros((2, 18), bool); made1[0, 3] = True
+    made2 = np.zeros((1, 18), bool); made2[0, 17] = True
+    for name, st, md in (("a.npz", [5, 6], made1), ("b.npz", [9], made2)):
+        np.savez(tmp_path / name, state=np.array(st), a=np.zeros((len(st), 2), np.float32), made=to_bitmask(md), scratch=np.array([False] * len(st)))
+    d = load_sims([str(tmp_path / "a.npz"), str(tmp_path / "b.npz")])
+    assert d["state"].tolist() == [5, 6, 9] and d["made"].shape == (3, 18) and d["made"][0, 3] and d["made"][2, 17] and d["made"].sum() == 2
+    assert d["scratch"].dtype == bool and d["a"].dtype == np.float32
+
+
+def test_group_top1_counts_the_best_scored_candidate_per_group():
+    ok = np.array([[1, 0], [0, 1], [0, 1]], bool)
+    scores = np.array([[2.0, 1.0], [2.0, 1.0], [0.0, 3.0]])
+    g = group_top1(scores, ok, {"x": np.array([True, True, False]), "y": np.array([False, False, True]), "empty": np.zeros(3, bool)})
+    assert g["x"] == pytest.approx(0.5) and g["y"] == pytest.approx(1.0) and np.isnan(g["empty"])
+
+
+def test_state_groups_split_by_pair_agreement_and_the_teacher_angle_distance():
+    torch.manual_seed(0)
+    m = PairGNNPolicy(hidden=16)
+    rel = _rel(4, seed=7)
+    k = np.array([0, 0, 0, 5])
+    prop = (m.forward_full(rel)["means"][torch.arange(4), torch.as_tensor(k)][:, 0] * m.act_scale[0] + m.act_bias[0]).detach().numpy()
+    label_angle = prop + np.radians([0.1, 0.5, -0.2, 0.0])                            # 0.1° and −0.2° inside ±0.31°, 0.5° outside
+    g = state_groups(m, rel, np.array([0, 0, 0, 1]), label_angle, k)
+    assert g["same_near"].tolist() == [True, False, True, False]
+    assert g["same_far"].tolist() == [False, True, False, False] and g["other_pair"].tolist() == [False, False, False, True]
+
+
+def test_simulate_full_returns_made_per_pair_and_scratch():
+    from exp16_wm import frozen_verifier as fv
+    from simulator import BilliardsEnv
+    from exp16_wm.teacher_data import CLEAR_ENV
+    fv._init_worker()
+    obs, _ = BilliardsEnv(**CLEAR_ENV).reset(seed=0)
+    made, scr = fv._simulate_full((np.asarray(obs, np.float32), np.array([[0.0, 3.0], [1.0, 1.0]], np.float32)))
+    assert made.shape == (2, 18) and made.dtype == bool and scr.shape == (2,) and scr.dtype == bool

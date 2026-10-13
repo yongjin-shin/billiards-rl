@@ -223,6 +223,35 @@ def rank_metrics(scores: np.ndarray, ok: np.ndarray, ks: tuple = KS) -> dict:
             "grid_has_success": float(ok.any(1).mean())}
 
 
+def load_sims(paths: list[str]) -> dict[str, np.ndarray]:
+    """Concatenate simulation files (gen / verifier_distill gen format): state, a (unit), made (N, 18) bool, scratch (N,) bool."""
+    from exp16_wm.sim_identity import from_bitmask
+    parts = [np.load(q) for q in paths]
+    return {"state": np.concatenate([d["state"] for d in parts]), "a": np.concatenate([d["a"] for d in parts]).astype(np.float32),
+            "made": np.concatenate([from_bitmask(d["made"]).astype(bool) for d in parts]),
+            "scratch": np.concatenate([d["scratch"] for d in parts]).astype(bool)}
+
+
+def group_top1(scores: np.ndarray, ok: np.ndarray, groups: dict[str, np.ndarray]) -> dict[str, float]:
+    """Top-1 success (best-scored candidate succeeds) within each boolean state group; nan for an empty group."""
+    hit = np.asarray(ok, bool)[np.arange(len(ok)), np.asarray(scores).argmax(1)]
+    return {g: (float(hit[m].mean()) if m.any() else float("nan")) for g, m in groups.items()}
+
+
+def state_groups(ctrl: PairGNNPolicy, rel: torch.Tensor, label_pair: np.ndarray, label_angle: np.ndarray, k: np.ndarray,
+                 grid_half_deg: float = 0.31) -> dict[str, np.ndarray]:
+    """
+    The three groups of the failure analysis: verify picked the teacher's pair and the teacher's angle is inside the candidate grid
+    around the proposal ("same_near"), same pair but the teacher's angle is outside ("same_far"), or another pair ("other_pair").
+    """
+    with torch.no_grad():
+        prop = ctrl.forward_full(rel)["means"][torch.arange(len(k)), torch.as_tensor(k)][:, 0]
+    prop_ang = (prop * ctrl.act_scale[0] + ctrl.act_bias[0]).numpy()
+    off = np.degrees(np.arctan2(np.sin(label_angle - prop_ang), np.cos(label_angle - prop_ang)))
+    same, near = np.asarray(k) == np.asarray(label_pair), np.abs(off) <= grid_half_deg
+    return {"same_near": same & near, "same_far": same & ~near, "other_pair": ~same}
+
+
 # ──────────────────────────────────────────────
 # Simulator side
 # ──────────────────────────────────────────────
@@ -249,6 +278,65 @@ def _simulate_state(task: tuple[np.ndarray, np.ndarray]) -> np.ndarray:
         made, scr = made_slots(env, obs, np.asarray(a, np.float32), pm)
         out[c] = bool(made.any() and not scr)
     return out
+
+
+def _simulate_full(task: tuple[np.ndarray, np.ndarray]) -> tuple[np.ndarray, np.ndarray]:
+    """(obs (23,), env actions (C, 2)) → (made (C, 18) bool, scratch (C,) bool)."""
+    from exp16_wm.outcomes import made_slots
+    obs, acts = task
+    env, pm = _ENV
+    made, scr = np.zeros((len(acts), 18), bool), np.zeros(len(acts), bool)
+    for c, a in enumerate(acts):
+        mm, sc = made_slots(env, obs, np.asarray(a, np.float32), pm)
+        made[c], scr[c] = mm, bool(sc)
+    return made, scr
+
+
+def gen(args) -> None:
+    """Training candidates around the pair the policy's verify step picks (on-policy pair) or the teacher's pair, same sampling as verifier_distill gen."""
+    from exp16_wm import diagnose_action as D
+    from exp16_wm import eval_by_balls as E
+    from exp16_wm.bc import load_teacher_data
+    from exp16_wm.sim_identity import to_bitmask
+    from exp16_wm.verifier_distill import sample_candidates
+    raw = load_teacher_data(sorted(glob.glob(E.DATA)))
+    found = glob.glob(args.run.format(seed=args.seed))
+    if len(found) != 1:
+        raise SystemExit(f"expected one run dir, found {found}")
+    m = E.load_run(found[0])
+    D.configure(m, "verify_refine", E.ANG31, E.ABS_SPEEDS)
+    v = D.val_setup(raw, args.seed, split="train")
+    idx = np.where(v["lab"])[0]
+    if args.max_states:
+        idx = idx[:args.max_states]
+    rng = np.random.default_rng(args.seed + 500)
+    S, A, K, tasks = [], [], [], []
+    with torch.no_grad():
+        for lo in range(0, len(idx), 300):
+            ii = idx[lo:lo + 300]
+            o = m.forward_full(v["rel"][ii])
+            if args.pair == "verify":
+                score = (F.log_softmax(o["logits"], 1) + F.logsigmoid(m.made2_logits(o, o["means"]))).masked_fill(~o["valid"], -1e30)
+                k = score.argmax(1)
+            else:
+                k = v["p0"][ii]
+            cand = m._unit_offsets(o["means"][torch.arange(len(ii)), k])
+            z = D.made_logit(m, o, k, cand).numpy()
+            for r, j in enumerate(ii):
+                cs = sample_candidates(z[r], args.n_top, args.top_pool, args.n_uniform, rng)
+                S += [j] * len(cs); A.append(cand[r, cs].numpy()); K += [int(k[r])] * len(cs)
+                tasks.append((v["obs"][j], D.to_env(m, cand[r, cs])))
+    t0, MADE, SCR = time.time(), [], []
+    with mp.get_context("spawn").Pool(args.workers, initializer=_init_worker) as pool:
+        for i, (mm, sc) in enumerate(pool.imap(_simulate_full, tasks, chunksize=16)):
+            MADE.append(mm); SCR.append(sc)
+            if (i + 1) % 2000 == 0:
+                print(f"  {i + 1}/{len(tasks)} states, {time.time() - t0:.0f}s", flush=True)
+    os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
+    np.savez(args.out, state=np.array(S), a=np.concatenate(A).astype(np.float32), made=to_bitmask(np.concatenate(MADE)),
+             scratch=np.concatenate(SCR), pair=np.array(K), seed=args.seed)
+    print(f"saved {args.out}: {len(S)} simulations over {len(idx)} states, pair = {args.pair} "
+          f"(differs from the teacher's in {np.mean(np.array(K)[::args.n_top + args.n_uniform] != v['p0'][idx].numpy()):.1%}) ({time.time() - t0:.0f}s)", flush=True)
 
 
 def table(args) -> None:
@@ -310,17 +398,19 @@ def fit(args) -> None:
             raise SystemExit(f"{name}: expected one run dir, found {found}")
         models[name] = E.load_run(found[0])
     ctrl = models["control"]
-    d, tab = np.load(args.data), np.load(args.table)
+    d, tab = load_sims(args.data), np.load(args.table)
     tr, va = D.val_setup(raw, args.seed, split="train"), D.val_setup(raw, args.seed, split="val")
     uniq, sid = np.unique(d["state"], return_inverse=True)
-    made = from_bitmask(d["made"]).astype(bool)
+    made = d["made"]
     k, cand, ok = torch.as_tensor(tab["k"]).long(), torch.as_tensor(tab["cand"]), tab["ok"]
-    out: dict = {"seed": args.seed, "n_val_states": int(len(ok)), "n_sims": int(len(sid)), "variants": {}}
+    groups = state_groups(ctrl, va["rel"][tab["state"]], va["p0"][tab["state"]].numpy(), np.asarray(va["label_act"])[tab["state"], 0], tab["k"])
+    out: dict = {"seed": args.seed, "data": args.data, "n_val_states": int(len(ok)), "n_sims": int(len(sid)), "variants": {},
+                 "group_share": {g: float(m.mean()) for g, m in groups.items()}}
     # reference: the control's own jointly trained head on the same table
     with torch.no_grad():
         o = ctrl.forward_full(va["rel"][tab["state"]])
         ref = D.made_logit(ctrl, o, k, cand).numpy()
-    out["original"] = rank_metrics(ref, ok)
+    out["original"] = {**rank_metrics(ref, ok), "group_top1": group_top1(ref, ok, groups)}
     print(f"[original] " + "  ".join(f"@{kk} {100 * x:.1f}%" for kk, x in out["original"]["success_at_k"].items()) + f"  AUC {out['original']['state_auc']:.3f}"
           f"  (a success exists in the grid for {out['original']['grid_has_success']:.1%})", flush=True)
     aim_units = (float(ctrl.act_scale[0]), float(ctrl.act_bias[0]))
@@ -346,7 +436,7 @@ def fit(args) -> None:
                                      aim_units=aim_units if sigma is not None else None)
             with torch.no_grad():
                 s = ver.candidate_scores(rows_va, k, cand).numpy()
-            met = rank_metrics(s, ok)
+            met = {**rank_metrics(s, ok), "group_top1": group_top1(s, ok, groups)}
             res.append({"head_seed": hs, "best_epoch": info["best_epoch"], "holdout_bce": min(info["holdout"]), **met})
             print(f"[{name} seed {hs}] holdout BCE {min(info['holdout']):.4f} @{info['best_epoch']}  " +
                   "  ".join(f"@{kk} {100 * x:.1f}%" for kk, x in met["success_at_k"].items()) + f"  AUC {met['state_auc']:.3f}", flush=True)
@@ -361,6 +451,10 @@ def fit(args) -> None:
     row("original", [[out["original"]["success_at_k"][kk]] for kk in (1, 2, 3, 5, 10, 20)] + [[out["original"]["state_auc"]]])
     for name, res in out["variants"].items():
         row(name, [[r["success_at_k"][kk] for r in res] for kk in (1, 2, 3, 5, 10, 20)] + [[r["state_auc"] for r in res]])
+    print("\ntop-1 by state group (share): " + "  ".join(f"{g} {100 * sh:.1f}%" for g, sh in out["group_share"].items()))
+    print(f"{'original':10s}" + "".join(f"{100 * out['original']['group_top1'][g]:12.1f}" for g in groups))
+    for name, res in out["variants"].items():
+        print(f"{name:10s}" + "".join(f"{100 * np.mean([r['group_top1'][g] for r in res]):12.1f}" for g in groups))
 
 
 def fit_adaptive_cmd(args) -> None:
@@ -378,10 +472,10 @@ def fit_adaptive_cmd(args) -> None:
         models[name] = E.load_run(found[0])
     ctrl = models["control"]
     policy_before = {k: x.clone() for k, x in ctrl.state_dict().items()}
-    d, tab = np.load(args.data), np.load(args.table)
+    d, tab = load_sims(args.data), np.load(args.table)
     tr, va = D.val_setup(raw, args.seed, split="train"), D.val_setup(raw, args.seed, split="val")
     uniq, sid = np.unique(d["state"], return_inverse=True)
-    made = from_bitmask(d["made"]).astype(bool)
+    made = d["made"]
     k, cand, ok = torch.as_tensor(tab["k"]).long(), torch.as_tensor(tab["cand"]), tab["ok"]
     rel_tr, rel_va = tr["rel"][uniq], va["rel"][tab["state"]]
     anchor_tr, anchor_va = pair_features(ctrl, [ctrl], rel_tr), pair_features(ctrl, [ctrl], rel_va)
@@ -426,16 +520,19 @@ def fit_adaptive_cmd(args) -> None:
 def main() -> None:
     p = argparse.ArgumentParser()
     sub = p.add_subparsers(dest="cmd", required=True)
-    for name in ("table", "fit", "fit-adaptive"):
+    for name in ("table", "gen", "fit", "fit-adaptive"):
         s = sub.add_parser(name)
         s.add_argument("--run", required=True, help="control run dir glob with {seed}")
         s.add_argument("--seed", type=int, default=0)
         s.add_argument("--out", default=None); s.add_argument("--threads", type=int, default=4)
-        if name == "table":
+        if name in ("table", "gen"):
             s.add_argument("--workers", type=int, default=4); s.add_argument("--max-states", type=int, default=0)
+            if name == "gen":
+                s.add_argument("--pair", choices=["verify", "label"], default="verify")
+                s.add_argument("--n-top", type=int, default=12); s.add_argument("--top-pool", type=int, default=20); s.add_argument("--n-uniform", type=int, default=12)
         else:
             s.add_argument("--aux-run", required=True, help="aux-only run dir glob with {seed}")
-            s.add_argument("--table", required=True); s.add_argument("--data", required=True)
+            s.add_argument("--table", required=True); s.add_argument("--data", required=True, nargs="+", help="one or more simulation files (concatenated)")
             s.add_argument("--head-seeds", type=int, nargs="+", default=[0, 1, 2])
             if name == "fit":
                 s.add_argument("--variants", nargs="*", default=["A", "B", "C"], choices=list(VARIANTS))
@@ -447,7 +544,7 @@ def main() -> None:
                 s.add_argument("--lr-enc", type=float, default=3e-4); s.add_argument("--lr-scratch", type=float, default=1e-3)
     args = p.parse_args()
     torch.set_num_threads(args.threads)
-    {"table": table, "fit": fit, "fit-adaptive": fit_adaptive_cmd}[args.cmd](args)
+    {"table": table, "gen": gen, "fit": fit, "fit-adaptive": fit_adaptive_cmd}[args.cmd](args)
 
 
 if __name__ == "__main__":
