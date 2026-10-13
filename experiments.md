@@ -5676,3 +5676,42 @@ encoder lr 3e-4(V3는 1e-3), head lr 1e-3, 15 epoch(비용), state 10% hold-out�
 정상 묶음(66.8%)에서 이전 예산 방식으로 교체하면: teacher 각도 +2.4%p, teacher speed +2.9%p, 둘 다 98.7%. 즉 **정상 state에서는 이전 결론(각도·speed 모두 작음)이 그대로 맞다.** top-1 실패의 74%는 후보 순위가 아니라 **pair가 teacher와 다르거나(59%) 제안이 멀리 빗나간(15%) state**에서 나온다.
 **그래서 made head 실험들이 82~84%에서 안 움직였다.** 평가 표는 pair를 원래 head의 verify 선택으로 고정하고 그 pair의 후보 순위만 바꿔 쟀다. 기하·조준각·전용 encoder는 모두 이 고정된 pair 안의 순위만 바꾼다. 정상 묶음은 이미 93%이고, 실패의 대부분은 고정된 pair·제안 쪽에 있다. 단 다른 pair를 고른 state가 원래 어려운 state일 수 있다: 이전 예산에서 teacher pair로 바꾼 이득은 +4.2%p였다.
 **철회하는 것**: "조준각 정밀도가 병목"(이전 보고), "speed 선택이 주된 미해결 몫"(노이즈 진단 보고). **유지되는 것**: 기하 특징·전용 encoder·적응은 고정 pair의 순위를 올리지 않는다(측정 사실). 다만 그 순위가 주된 실패 원인이 아니었으므로 "made head를 개선해도 소용없다"는 결론은 아니다: verify의 pair 선택(log π + log P(made))에도 made head가 쓰이는데, 이번 평가 표는 이 부분을 고정해서 재지 않았다.
+
+### 다음 실험 순서 (2026-10-13 계획, 결과 보기 전) — made head 향상 + action 유지
+
+목표: made head 순위를 올리되 action(pair head)은 유지. 남은 실패(control seed 0, top-1 82.4%)는 verify가 teacher와 **다른 pair**를 고른 state(26%, top-1 60%, 실패의 59%)와 제안이 0.3° 넘게 빗나간 state(7%, 63%, 실패의 15%)에 몰려 있다. teacher와 같은 pair + 가까운 제안 state(67%)는 이미 93%. 모든 실험 seed 0 기준(E2만 seed 3개), 평가는 기존 결과표(`table_s0.npz`)와 같은 지표(success@1, 묶음별 top-1)에 action 지표를 같이 낸다.
+
+| 순서 | 실험 | 묻는 것 | 비용 | 병렬 |
+|---|---|---|---|---|
+| E0 | 다른 pair 묶음에서 teacher pair로 바꾸면 (진단) | pair 선택이 지렛대인가, 그 state가 원래 어려운가 | 시뮬레이션 수백 회 | 즉시 |
+| E1 | **on-policy pair 후보로 made head 재학습** | 학습 데이터(teacher pair 주변만)와 사용(verify pair)의 분포 불일치가 실패 원인인가 | 시뮬레이션 약 15분 + head 학습 | 지금 |
+| E2 | 깊이 4 + `--made2-geom` (seed 3개, 진단) | 정확한 기하 조준각이 깊이 4 위에 실제 파이프라인(pair 선택 포함)에서 아직 얼마를 더하나 = 기하 encoder의 상한 | BC 3 runs 약 25분 + 평가 | 지금 |
+| E3 | 조준각 전용 encoder (aux-only, 목표 = 18 pair 전부의 정확한 조준각) | 학습한 encoder가 조준각을 pair head(중앙값 0.08°)보다 정밀하게 맞히나 = 기하 encoder의 실현 가능성 | 코드 + aux-only 약 3분 | 코드 후 |
+
+**E0 판단**: 다른 pair 묶음(n ≈ 440)에서 teacher pair 주위 격자로 바꾼 top-1(원래 head 순위) 성공률이 ≥ 85%면 **pair 선택이 지렛대**(verify의 pair 선택 개선), ≤ 70%면 **그 state가 원래 어렵다**(pair를 바꿔도 안 됨, 순위 개선이 필요).
+
+**E1 변경점**: 학습 데이터만 바꾼다. 학습 state마다 control 원래 head의 verify가 고른 pair 주위 217 후보 중 24개(원래 head 상위 20 중 12 + 균등 12, 기존 `gen`과 같은 규칙)를 시뮬레이션(made 18 pair + scratch). 변형: **E1a** verify pair 데이터만(기존과 같은 양), **E1b** 기존 teacher pair 데이터 + verify pair 데이터(2배). head·특징(control `e` 얼림)·학습·평가는 A와 같다(head seed 3개). 정책은 그대로 → action 동일.
+
+| # | 관측 (E1a 또는 E1b, head seed 평균) | 해석 | 다음 |
+|---|---|---|---|
+| Y | 다른 pair 묶음 top-1이 A보다 +5%p 이상이고 전체 success@1 +2%p 이상, 같은 pair 묶음은 −1%p 이내 | 분포 불일치가 원인이었다 | on-policy 데이터 채택, seed 1·2, 게임(verify+refine)으로 확인, 반복(DAgger식) |
+| N | 다른 pair 묶음 변화 ±2%p 이내 | 불일치는 원인이 아니다 | E0 결과에 따라 pair 선택 또는 시뮬레이터 검증 |
+| M | 그 사이 | 불명확 | 데이터 양을 늘려 확인 |
+
+**E2 변경점**: 깊이 4 control(`--pair-supervision --no-wta-fallback --made2-head --gnn-layers 4`)에 `--made2-geom` 하나(진단 전용, 정책에 넣지 않음). 비교: 깊이 4 control 3 seed(게임 3.55 ± 0.10, clean v+r 81.3%, 각도 0.097°).
+
+| # | 관측 | 해석 | 다음 |
+|---|---|---|---|
+| G1 | 게임 ≤ 3.40(−0.15 이상)이고 clean v+r +2%p 이상, seed 3개 모두 개선 | 깊이 4 위에도 기하 조준각의 몫이 크다 → 기하 encoder를 만들 가치 | E3 결과가 정밀하면 cascade 구현 |
+| G0 | 게임 차이 < 0.15 | 깊이 4가 이미 대부분 흡수 → 기하 encoder로 얻을 것이 작다 | 기하 encoder 방향 중단 |
+| 표식 | 각도 오차가 control보다 ≥ 0.009° 나쁨 | made head 입력이 encoder 학습을 통해 action에 영향 | 기록 |
+
+**E3 변경점**: aux-only(BC loss 없음)에서 보조 목표를 4개 기하 대신 **18 pair 전부의 정확한 조준각**(ghost-ball 방향, relative frame, `_geometric_aim`과 같은 양, 도 단위, train 통계로 표준화) 하나로 바꾼다(`--geom-aux-set aim`). 나머지 aux-only와 같다. 지표: val state의 조준각 오차 |예측 − 정확한 값| 중앙값·p75(label pair와 모든 pair), 비교 대상은 같은 val label pair에서 pair head의 |제안 − 정확한 조준각|.
+
+| # | 관측 (val label pair, 중앙값) | 해석 | 다음 |
+|---|---|---|---|
+| P1 | ≤ 0.04° (pair head의 절반 이하) | 촘촘하고 노이즈 없는 기하 지도가 BC보다 정밀하다 → 기하 encoder 실현 가능 | E2가 G1이면 cascade(made head 입력에 예측 조준각) |
+| P0 | ≥ 0.08° (pair head 이상) | 학습한 조준각이 pair head보다 정밀하지 않다 → cascade로 얻을 것 없음 | 기하 encoder 방향 중단 |
+| PM | 그 사이 | 부분적 | 학습 길이·용량을 늘려 재측정 |
+
+**한계(미리)**: E0·E1·E3는 seed 0 하나(encoder seed 1개). E1의 on-policy 후보는 control 원래 head의 verify 기준(학습된 head가 바뀌면 다시 뽑아야 함). E3의 목표는 정확한 공식값이고 이를 예측하는 것은 학습이지만, cascade에 쓰면 "기하를 학습으로 얻는" 경로가 된다(공식을 직접 넣는 것과 다름).
