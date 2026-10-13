@@ -129,3 +129,34 @@ def test_fit_adaptive_trains_a_private_encoder_copy_and_leaves_the_policy_alone(
     k = torch.zeros(5, dtype=torch.long)
     sc = v.candidate_scores(rel[:5], {n: x[:5] for n, x in anchor.items()}, k, torch.zeros(5, 4, 2), chunk=2)
     assert sc.shape == (5, 4)
+
+
+def test_aim_input_lets_the_head_rank_candidates_that_the_features_alone_cannot():
+    """Uninformative features, outcome = candidate angle within 0.2° of the (hidden) aim: only a head that gets the aim difference can learn it."""
+    torch.manual_seed(0)
+    rng = np.random.default_rng(0)
+    S = 150
+    units = (np.pi, 0.0)                                                              # angle unit 1 = π rad, no bias
+    aim = torch.as_tensor(rng.uniform(-0.5, 0.5, size=(S, 18))).float()
+    rows = {"e": torch.randn(S, 18, 4), "means": torch.zeros(S, 18, 2), "valid": torch.ones(S, 18, dtype=torch.bool)}
+    sid = rng.integers(0, S, size=2500)
+    a = np.zeros((2500, 2), np.float32)
+    a[:, 0] = (aim[sid, 0].numpy() + rng.uniform(-0.002, 0.002, size=2500)) / np.pi  # candidates scattered ±0.002 rad ≈ ±0.11° around pair 0's aim
+    off = np.degrees(a[:, 0] * np.pi - aim[sid, 0].numpy())
+    made = np.zeros((2500, 18), bool); made[:, 0] = np.abs(off) < 0.05               # success window ±0.05° around the aim
+    scratch = np.zeros(2500, bool)
+    with_aim = fit_verifier({**rows, "aim": aim}, sid, a, made, scratch, SCALE, seed=0, epochs=30, lr=3e-3, batch=128, aim_units=units)[1]
+    without = fit_verifier(rows, sid, a, made, scratch, SCALE, seed=0, epochs=30, lr=3e-3, batch=128)[1]
+    assert min(with_aim["holdout"]) < 0.8 * min(without["holdout"])                  # the aim difference is what makes the outcome predictable
+    with pytest.raises(ValueError):
+        fit_verifier({**rows, "aim": aim}, sid, a, made, scratch, SCALE, epochs=1)    # aim rows without units
+
+
+def test_candidate_scores_with_aim_match_the_per_pair_logits():
+    torch.manual_seed(2)
+    rows = {"e": torch.randn(4, 18, 6), "means": torch.rand(4, 18, 2) * 2 - 1, "valid": torch.ones(4, 18, dtype=torch.bool), "aim": torch.rand(4, 18) * 2 - 1}
+    v = FrozenVerifier(6, SCALE, hidden=16, aim_units=(np.pi, 0.1))
+    a = torch.rand(4, 2) * 2 - 1
+    k = torch.tensor([2, 5, 11, 17])
+    assert torch.allclose(v.candidate_scores(rows, k, a[:, None, :])[:, 0], v.logits(rows, a)[torch.arange(4), k], atol=1e-5)
+    assert FrozenVerifier(6, SCALE, hidden=16).head[0].in_features == 10 and v.head[0].in_features == 11

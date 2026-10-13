@@ -60,16 +60,27 @@ def pair_features(anchor: PairGNNPolicy, feature_models: list[PairGNNPolicy], re
 class FrozenVerifier(nn.Module):
     """MLP [features, a, (a − proposal) × scale] → logit that action a pockets pair ij cleanly (same input layout as head_made2)."""
 
-    def __init__(self, feat_dim: int, scale: torch.Tensor, hidden: int = 128):
+    def __init__(self, feat_dim: int, scale: torch.Tensor, hidden: int = 128, aim_units: tuple[float, float] | None = None):
+        """aim_units = (act_scale[0], act_bias[0]) of the policy: if given, rows also carry "aim" (B, 18) rad and the head gets one more input,
+        wrap(action angle − aim) in units of 0.2° (the made2_geom feature; a diagnostic, see the noisy-aim test)."""
         super().__init__()
-        self.head = _mlp(feat_dim + 4, hidden, 1)
+        self.use_aim = aim_units is not None
+        self.head = _mlp(feat_dim + 4 + int(self.use_aim), hidden, 1)
         self.register_buffer("scale", scale.clone().float())
+        self.register_buffer("aim_units", torch.tensor(aim_units if self.use_aim else (0.0, 0.0), dtype=torch.float32))
+
+    def _aim_feature(self, aim: torch.Tensor, a_angle_unit: torch.Tensor) -> torch.Tensor:
+        d = a_angle_unit * self.aim_units[0] + self.aim_units[1] - aim
+        return (torch.rad2deg(torch.atan2(torch.sin(d), torch.cos(d))) / 0.2)[..., None]
 
     def logits(self, rows: dict[str, torch.Tensor], a: torch.Tensor) -> torch.Tensor:
         """rows: e (B, 18, F), means (B, 18, 2), valid (B, 18); a (B, 2) one action for all pairs or (B, 18, 2) → (B, 18), invalid masked."""
         e, means = rows["e"], rows["means"].detach()                 # the proposal is an anchor, not something to train through
         a = a[:, None, :].expand_as(means) if a.dim() == 2 else a
-        z = self.head(torch.cat([e, a, action_diff(a, means) * self.scale], dim=-1)).squeeze(-1)
+        feats = [e, a, action_diff(a, means) * self.scale]
+        if self.use_aim:
+            feats.append(self._aim_feature(rows["aim"], a[..., 0]))
+        z = self.head(torch.cat(feats, dim=-1)).squeeze(-1)
         return z.masked_fill(~rows["valid"], _NEG)
 
     def candidate_scores(self, rows: dict[str, torch.Tensor], k: torch.Tensor, cand: torch.Tensor) -> torch.Tensor:
@@ -77,12 +88,15 @@ class FrozenVerifier(nn.Module):
         b = torch.arange(len(k))
         e_k, mean_k = rows["e"][b, k], rows["means"][b, k].detach()
         C = cand.shape[1]
-        feats = torch.cat([e_k[:, None].expand(-1, C, -1), cand, action_diff(cand, mean_k[:, None].expand(-1, C, -1)) * self.scale], dim=-1)
-        return self.head(feats).squeeze(-1)
+        feats = [e_k[:, None].expand(-1, C, -1), cand, action_diff(cand, mean_k[:, None].expand(-1, C, -1)) * self.scale]
+        if self.use_aim:
+            feats.append(self._aim_feature(rows["aim"][b, k][:, None].expand(-1, C), cand[..., 0]))
+        return self.head(torch.cat(feats, dim=-1)).squeeze(-1)
 
 
 def fit_verifier(rows: dict[str, torch.Tensor], sid: np.ndarray, a: np.ndarray, made: np.ndarray, scratch: np.ndarray, scale: torch.Tensor,
-                 seed: int = 0, epochs: int = 40, lr: float = 1e-3, batch: int = 512, holdout: float = 0.1, hold_seed: int = 1234) -> tuple[FrozenVerifier, dict]:
+                 seed: int = 0, epochs: int = 40, lr: float = 1e-3, batch: int = 512, holdout: float = 0.1, hold_seed: int = 1234,
+                 aim_units: tuple[float, float] | None = None) -> tuple[FrozenVerifier, dict]:
     """
     Train a FrozenVerifier from scratch on simulated candidates: sid[i] = index into rows of the state of simulation i, a[i] its action
     (unit), made[i] (18,) bool pockets, scratch[i] bool. BCE over the live pairs with target made & ~scratch. Held-out states (same mask for
@@ -91,7 +105,9 @@ def fit_verifier(rows: dict[str, torch.Tensor], sid: np.ndarray, a: np.ndarray, 
     """
     torch.manual_seed(seed)
     rng = np.random.default_rng(seed)
-    v = FrozenVerifier(rows["e"].shape[-1], scale)
+    if ("aim" in rows) != (aim_units is not None):
+        raise ValueError("rows['aim'] and aim_units go together")
+    v = FrozenVerifier(rows["e"].shape[-1], scale, aim_units=aim_units)
     hold = holdout_states(len(rows["e"]), holdout, np.random.default_rng(hold_seed))[sid]
     tr_i, ho_i = np.flatnonzero(~hold), np.flatnonzero(hold)
     sid_t, a_t = torch.as_tensor(sid), torch.as_tensor(a).float()
@@ -307,13 +323,27 @@ def fit(args) -> None:
     out["original"] = rank_metrics(ref, ok)
     print(f"[original] " + "  ".join(f"@{kk} {100 * x:.1f}%" for kk, x in out["original"]["success_at_k"].items()) + f"  AUC {out['original']['state_auc']:.3f}"
           f"  (a success exists in the grid for {out['original']['grid_has_success']:.1%})", flush=True)
-    for name in args.variants:
-        feat_models = [models[x] for x in VARIANTS[name]]
+    aim_units = (float(ctrl.act_scale[0]), float(ctrl.act_bias[0]))
+    if args.aim_noise_deg:
+        with torch.no_grad():                                               # how far the policy's own proposal is from the exact aim
+            o_va, r_ = ctrl.forward_full(va["rel"][tab["state"]]), torch.arange(len(k))
+            d_ = o_va["means"][r_, k, 0] * aim_units[0] + aim_units[1] - ctrl._geometric_aim(va["rel"][tab["state"]])[r_, k]
+            err = torch.rad2deg(torch.atan2(torch.sin(d_), torch.cos(d_))).abs().numpy()
+        out["pair_head_aim_error_deg"] = {"median": float(np.median(err)), "p25": float(np.percentile(err, 25)), "p75": float(np.percentile(err, 75)), "p90": float(np.percentile(err, 90))}
+        print(f"pair head |proposal − exact aim| on the val pairs: median {np.median(err):.3f}°  p25 {np.percentile(err, 25):.3f}  p75 {np.percentile(err, 75):.3f}  p90 {np.percentile(err, 90):.3f}", flush=True)
+    jobs = [(n, None) for n in args.variants] + [(f"AIM{sg:g}", sg) for sg in args.aim_noise_deg]
+    for name, sigma in jobs:
+        feat_models = [models["control"]] if sigma is not None else [models[x] for x in VARIANTS[name]]
         rows_tr = pair_features(ctrl, feat_models, tr["rel"][uniq])
         rows_va = pair_features(ctrl, feat_models, va["rel"][tab["state"]])
+        if sigma is not None:                                               # exact aim + noise fixed per (state, pair), independent between train and eval states
+            for rows, rel_, gseed in ((rows_tr, tr["rel"][uniq], 11), (rows_va, va["rel"][tab["state"]], 22)):
+                g = torch.Generator().manual_seed(gseed)
+                rows["aim"] = ctrl._geometric_aim(rel_) + torch.randn(rows["valid"].shape, generator=g) * float(np.radians(sigma))
         res = []
         for hs in args.head_seeds:
-            ver, info = fit_verifier(rows_tr, sid, d["a"], made, d["scratch"].astype(bool), ctrl.made2_scale, seed=hs, epochs=args.epochs, lr=args.lr)
+            ver, info = fit_verifier(rows_tr, sid, d["a"], made, d["scratch"].astype(bool), ctrl.made2_scale, seed=hs, epochs=args.epochs, lr=args.lr,
+                                     aim_units=aim_units if sigma is not None else None)
             with torch.no_grad():
                 s = ver.candidate_scores(rows_va, k, cand).numpy()
             met = rank_metrics(s, ok)
@@ -408,7 +438,8 @@ def main() -> None:
             s.add_argument("--table", required=True); s.add_argument("--data", required=True)
             s.add_argument("--head-seeds", type=int, nargs="+", default=[0, 1, 2])
             if name == "fit":
-                s.add_argument("--variants", nargs="+", default=["A", "B", "C"], choices=list(VARIANTS))
+                s.add_argument("--variants", nargs="*", default=["A", "B", "C"], choices=list(VARIANTS))
+                s.add_argument("--aim-noise-deg", type=float, nargs="*", default=[], help="diagnostic: also give the head wrap(a − (exact aim + N(0, σ²))); one variant per σ")
                 s.add_argument("--epochs", type=int, default=40); s.add_argument("--lr", type=float, default=1e-3)
             else:
                 s.add_argument("--variants", nargs="+", default=["V1", "V2", "V3"], choices=["V1", "V2", "V3"])
