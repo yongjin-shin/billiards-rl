@@ -5597,3 +5597,24 @@ encoder lr 3e-4(V3는 1e-3), head lr 1e-3, 15 epoch(비용), state 10% hold-out�
 | M | 위에 해당하지 않음(1~2%p 사이 등) | 불명확 | 다른 seed 반복 |
 
 **한계(미리)**: 후보 데이터는 control 제안 주위 24개/state(학습 state 14.9k)라 encoder를 새로 학습하기에는 적을 수 있다(V3에 가장 불리). encoder seed 1개, head seed 2개, epoch 15, lr 한 가지. 정책을 건드리지 않으므로 **정책 encoder와 verifier encoder를 따로 도는 추론 비용**은 이 시험에서 평가하지 않았다.
+
+### 적응형 verifier 결과 (seed 0, 2026-10-13)
+
+**기존 대비 변경점**: 얼린 특징 시험(A)에서 바꾼 것은 verifier가 **자기 encoder 복사본을 가지고 made BCE로 end-to-end 학습**한다는 것과 그 encoder의 초기화(V1 control 복사 / V2 aux-only 복사 / V3 무작위)다. 제안·live-pair 마스크는 control 정책의 것으로 고정, 같은 데이터(`s0.npz`)·head 구조·BCE·hold-out state·평가 표. head seed 2개씩, 15 epoch(encoder lr 3e-4, V3는 1e-3, head lr 1e-3). **정책 가중치는 학습 전후 같다(확인: `policy_unchanged = True`)** → action은 구조상 control과 동일.
+
+| seed 0 (head seed 평균, 최솟값–최댓값) | 원래 head | A (encoder 얼림) | **V1** control 복사 | **V2** aux-only 복사 | **V3** 무작위 |
+|---|---|---|---|---|---|
+| made head success@1 | 82.4% | 83.2% (82.7–83.6) | 83.7% (83.4–83.9) | 83.0% (83.0–83.1) | 82.4% (82.1–82.7) |
+| @5 | 85.4% | 86.1% | 86.4% | 86.2% | 85.8% |
+| @20 | 89.5% | 89.5% | 89.9% | 89.9% | 89.8% |
+| 같은 state 안 AUC | 0.687 | 0.694 | 0.708 | 0.701 | 0.702 |
+| holdout BCE (train BCE) | – | 0.0461 | 0.0427 (0.036–0.039) | 0.0434 (0.039–0.040) | 0.0425 (0.038–0.040) |
+| **action** | | 동일 | 동일 | 동일 | 동일 |
+
+**판단표: N 행** (V1 +0.5%p, V2 −0.2%p, V3 −0.8%p로 모두 A ±1%p 이내). U(V1이 A보다 +2%p 이상)도 G(V2가 V1보다 +2%p 이상)도 아니다. O(과적합)도 아니다(train BCE가 holdout보다 10% 안팎 낮을 뿐). **made 목표로 encoder를 끝까지 학습해도 순위가 오르지 않는다.** AUC는 0.694 → 0.70~0.71로 약간 오르지만 success@1·5·20은 같다.
+
+**읽을 수 있는 것**
+- **정책 정보 없이 처음부터 학습한 전용 encoder(V3)가 정책 encoder를 얼린 것(A)과 같다**(82.4 vs 83.2%). aux-only 초기화(V2)는 control 복사(V1)보다 낫지 않다(83.0 vs 83.7%). 입력 정보의 종류, 초기화, 적응 여부와 상관없이 success@1이 **82~84%**에 머문다: 원래 head 82.4, A 83.2, B 81.8, C 81.9, V1 83.7, V2 83.0, V3 82.4. (격자에 성공이 있는 state 98.6%, 제안만 치는 select는 control 74.4%.)
+- 지금까지 made head에 대해 바꿔 본 것: 학습 데이터(on-policy 후보로 fine-tune, 이전 절), 특징(기하 보조 목표/사전학습/얼린 aux-only 특징), 학습 방식(얼림/end-to-end/전용 encoder/무작위). 이 가운데 82~84%를 벗어난 것이 없다. 이 정도의 불변성은 입력 정보 종류나 최적화 설정이 아니라 **다른 한계**(후보 순위에 필요한 조준각 정밀도, 또는 후보 24개/state의 데이터)를 가리키는 정황이다(가설, 아직 구분하지 못함).
+
+**한계**: encoder seed 1개(control 1개, aux-only 1개), head seed 2개, 15 epoch, lr 한 가지. 후보 데이터는 control 제안 주위 24개/state(학습 state 약 1.5만). action을 처음부터 encoder에 넣는 구조(early fusion), 입력 표현(sin/cos 등), 훨씬 큰 데이터는 시험하지 않았다. 추론 비용(encoder를 하나 더 도는 것)은 평가하지 않았다.
