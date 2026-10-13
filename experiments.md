@@ -5572,3 +5572,28 @@ action은 encoder와 pair head를 건드리지 않았으므로 구조상 control
 - **남은 후보 (미검증)**: 순위가 갈리는 곳은 성공 창(±0.05° 규모)과 제안의 거리이다. 이전 진단에서 정확한 조준각 차이(ghost-ball aim)를 입력으로 주면 스캔 적중이 86% → 95%였다. 즉 필요한 것은 blocker 같은 거친 기하가 아니라 **조준각의 서브 0.1° 정밀도**이고, 이는 pair head의 각도 정밀도(0.097°)와 같은 한계이다. 학습 정보(blocker, 쿠션)를 더하는 방향은 이 한계를 못 건드린다.
 
 **한계**: encoder seed 1개(aux-only encoder와 control encoder 각 1개), head seed 3개. aux-only `e`는 입구 편차·쿠션을 R² 0.5~0.7로만 담고 컷 각도는 약하다(0.66), 즉 "완전한 기하"가 아니라 blocker 중심이다. 후보는 control 제안 주위 격자이고 pair는 control의 verify 선택으로 고정했다. made head 구조(2 hidden 128)와 학습(40 epoch)도 한 가지만 시험했다.
+
+### 적응형 verifier: 정책과 분리된 encoder를 made 목표로 학습 (seed 0, 2026-10-13 계획, 결과 보기 전)
+
+**왜 (사용자 지적)**: 얼린 특징 시험은 encoder가 made 목표에 적응할 수 없는 설계였다. 기하 정보가 있어도 **made 목표로 encoder를 학습할 수 있을 때**만 쓰일 수 있는지 모른다. 그러면서 action은 유지해야 하므로(목표), 정책의 encoder를 건드리지 않고 **verifier가 자기 encoder(복사본)를 가지고** made BCE로 끝까지 학습한다. 정책(encoder, pair head)은 그대로여서 action은 구조상 control과 같다. 추론 비용은 encoder를 하나 더 도는 것이다.
+**변경점**: 얼린 특징 시험(A/B/C)과 비교해 바뀌는 것은 두 가지 — 특징이 encoder 복사본의 출력이고 그 encoder가 학습된다는 것, 그리고 encoder 초기화(아래). 제안 `â`와 live-pair 마스크는 control 정책의 것으로 고정한다(verifier encoder의 head_a는 쓰지 않음). 같은 데이터(`logs/vdistill/s0.npz`), 같은 head 구조(MLP `[특징, a, (a − â) × 척도] → 128 → 128 → 1`), 같은 BCE(made & ~scratch, 18 pair), 같은 평가 표(`table_s0.npz`).
+
+| 이름 | verifier encoder 초기화 | 학습되는 것 |
+|---|---|---|
+| A (기준, 이미 측정) | control encoder, **얼림** | head만 |
+| V1 | control encoder 복사 | encoder + head |
+| V2 | aux-only encoder 복사 (blocker probe 0.99) | encoder + head |
+| V3 | 무작위 초기화 | encoder + head |
+
+encoder lr 3e-4(V3는 1e-3), head lr 1e-3, 15 epoch(비용), state 10% hold-out의 BCE 최저 epoch 복원(A·B·C와 같은 hold-out), **head seed 2개**씩. 같은 코드·같은 절차의 대조는 A(얼림) 대 V1(풂)이다.
+**지표**: made head success@1·5·20, 같은 state 안 AUC(217 후보), holdout BCE; **action 지표는 정책이 안 바뀌므로 동일**(확인: 학습 전후 정책 가중치 불변). 비교 기준값: 원래 head 82.4%, A 83.2%(82.7–83.6).
+
+| # | 관측 (success@1, head seed 모두에서) | 해석 | 다음 행동 |
+|---|---|---|---|
+| U | V1이 A보다 +2%p 이상 | 얼려서 막혔다 — 적응하면 오른다 | V2, V3와 비교해 기하 초기화의 몫 분리 |
+| G | V2가 V1보다 +2%p 이상 (head seed 구간이 겹치지 않음) | 기하 사전학습이 적응형 verifier를 돕는다 | seed 1·2(각 seed마다 aux-only encoder 필요)로 반복, 이 구조를 후보로 |
+| N | V1, V2, V3 모두 A ±1%p 이내 | 적응해도 안 오른다 → 순위의 한계는 입력 정보/적응이 아니라 다른 곳(조준각 정밀도) | 정밀도 쪽 또는 시뮬레이터 검증 |
+| O | V1~V3 중 하나가 A보다 낮고 학습 BCE가 holdout BCE보다 크게 낮음 | 과적합 / 데이터 부족 | 데이터 늘리기(on-policy 후보 생성), 정규화 |
+| M | 위에 해당하지 않음(1~2%p 사이 등) | 불명확 | 다른 seed 반복 |
+
+**한계(미리)**: 후보 데이터는 control 제안 주위 24개/state(학습 state 14.9k)라 encoder를 새로 학습하기에는 적을 수 있다(V3에 가장 불리). encoder seed 1개, head seed 2개, epoch 15, lr 한 가지. 정책을 건드리지 않으므로 **정책 encoder와 verifier encoder를 따로 도는 추론 비용**은 이 시험에서 평가하지 않았다.
