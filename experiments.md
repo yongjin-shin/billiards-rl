@@ -5480,3 +5480,20 @@ KEN − control: 각도 오차 seed별 [0.041 0.008 0.006] (평균 +0.018°), �
 **한계**: seed 1개. 체크포인트를 val로 골랐으므로 val MSE 0.1865는 약간 낙관적이다(마지막 epoch 0.195). probe는 label pair 한정이다. S가 나와도 그것이 정책·made head에 유용하다는 뜻은 아니다.
 
 **다음 (행 S)**: 보조 사전학습 → BC. aux-only 체크포인트로 encoder와 보조 head를 초기화한 뒤 joint(w=5, made head 포함)로 학습해, ① 보조 MSE가 0.19 근처에 남는지 ② 학습 후 고정 `e` probe R²가 유지되는지 ③ 주 과제(각도 오차, 게임, made head success@k)가 어떻게 되는지를 본다. BC가 정보를 지워 버리면(① ②가 joint 수준으로 돌아가면) 경쟁이 원인이라는 직접 증거가 된다.
+
+### 보조 사전학습 → BC (seed 0, 2026-10-13 계획, 결과 보기 전)
+
+**왜**: 목표만 학습하는 encoder는 경로상 다른 공 목표를 R² 0.97 이상으로 푼다(위, 판단표 S). joint에서 이게 0.3~0.6에 머무는 이유가 (i) BC loss가 덮어써서(경쟁/최적화)인지 (ii) 128차원 `e`가 두 가지를 다 담지 못해서(용량)인지 가른다. 사용자 질문: "엔코더 width를 더 넓히면 두 목표를 모두 커버할 수 없나".
+**변경점 (하나)**: `--init-from <aux-only 체크포인트>`. encoder와 보조 head를 aux-only run(seed 0, epoch 202의 최저 val 보조 MSE 체크포인트)에서 가져오고, action·selection·made head는 새로 초기화한다. 나머지는 joint w=5 seed 0 run(`logs/experiments_geomlog`)과 같다(깊이 4, 폭 128, 500 epoch, lr 1e-3 cosine, `--pair-supervision --no-wta-fallback --made2-head --geom-aux-weight 5`). 출력 `logs/experiments_pretrain`. 코드 `PairGNNPolicy.load_encoder`, 테스트 2개(encoder·보조 head만 복사, 폭·깊이 불일치 거부).
+**비교 대상**: 같은 seed 0의 joint w=5(보조 val 0.647, probe 0.36 / 0.60 / 0.49 / 0.29, 각도 오차 0.116°, clean v+r 79.3%, made head success@1 80.1%)와 control seed 0(각도 오차 0.101°, clean v+r 81.6%, success@1 82.4%).
+**지표**: ① 보조 MSE 곡선(epoch 0 평균, 마지막, 학습 중 증가 여부) ② 학습 후 고정 `e` MLP probe R²(label pair, val): 4개 + 컷 각도·거리 ③ 각도 오차(중앙값), clean v+r, made head success@1·5·20(`verifier_distill eval --only original`), run 안 게임(참고).
+
+| # | 관측 | 해석 | 다음 행동 |
+|---|---|---|---|
+| F | epoch 0 보조 MSE > 0.35 (불러오기 실패)이거나 인자가 `init_from` 외에 joint w=5와 다름 | 설정 오류 | 비교 보류 |
+| E | 마지막 보조 val MSE ≥ 0.50 이고 blocker probe 2개가 모두 < 0.6 | BC가 사전학습을 지운다 (또는 128차원이 둘 다 못 담는다: 이 실험만으로는 구분 불가) | 폭 256 + 같은 사전학습(용량 대 덮어쓰기), 또는 lr 낮춤·encoder 일부 고정 |
+| K | 마지막 보조 val MSE ≤ 0.30 이고 blocker probe 2개가 모두 ≥ 0.8 | BC 뒤에도 정보가 남는다 → 128차원은 둘을 담을 수 있다(용량은 이 수준에서 한계가 아님). 이후 주 과제를 본다 | 아래 K 하위 행 |
+| M | 그 사이 | 부분적으로 지워짐 | 곡선(단조 증가인지)을 보고 E 또는 K로 |
+
+**K 하위 (seed 1개라 가능성 표시일 뿐 결론 아님)**: **K-A** 각도 오차가 control + 0.009° 이내이고 success@1이 control(82.4%)보다 +2%p 이상 → made head 순위가 좋아진 가능성, seed 3개로 확인. **K-B** success@1 변화가 ±2%p 이내 → blocker 정보를 남겨도 made head 순위는 안 변한다(그 정보만으로는 병목이 아님). **K-H** 각도 오차가 control + 0.009° 초과 → 사전학습이 주 과제를 해침.
+**한계(미리)**: seed 1개. 사전학습 체크포인트는 val로 골랐다. 새로 초기화한 head의 초기 loss가 매우 커서(수만) 첫 epoch에 encoder가 크게 흔들릴 수 있다(이 설계의 한계이며 E의 한 원인일 수 있다). 폭을 키운 비교는 하지 않았다.

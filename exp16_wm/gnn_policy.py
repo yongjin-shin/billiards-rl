@@ -596,6 +596,27 @@ class PairGNNPolicy(nn.Module):
         state_dict = {k: v for k, v in state_dict.items() if k != "made2_scale"}
         return super().load_state_dict(state_dict, strict=strict, assign=assign)
 
+    def load_encoder(self, state_dict) -> list[str]:
+        """
+        Initialise the encoder (ball message / ball / pair MLPs) and the aux head from another checkpoint; the
+        action, selection and made heads (`head_*`) keep their fresh initialisation. Returns the loaded keys.
+        A key the checkpoint has but this model lacks, or one with another shape (other width / depth), is an error.
+        """
+        own = self.state_dict()
+        take = {}
+        for k, v in state_dict.items():
+            if k == "made2_scale" or k.startswith("head_"):
+                continue
+            if k not in own:
+                raise ValueError(f"checkpoint key {k} is not in this model")
+            if own[k].shape != v.shape:
+                raise ValueError(f"checkpoint key {k} has shape {tuple(v.shape)}, this model {tuple(own[k].shape)}")
+            take[k] = v
+        if not any(k.startswith(("bb.", "ball.", "pair.")) for k in take):
+            raise ValueError("checkpoint has no encoder weights")
+        super().load_state_dict(take, strict=False)
+        return sorted(take)
+
     def save(self, path: str) -> None:
         torch.save({"gnn": self.state_dict(), "factorized": self.factorized, "has_scratch": self.has_scratch,
                     "has_made": self.has_made, "has_made2": self.has_made2,

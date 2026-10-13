@@ -65,6 +65,11 @@ if [ "$1" = "auxonly" ]; then            # 목표만 학습하는 encoder(BC los
   run auxonly_s0 --out-root logs/experiments_auxonly --pair-supervision --no-wta-fallback --gnn-layers 4 --geom-aux-weight 1 --aux-only --seed 0
   wait; exit
 fi
+if [ "$1" = "pretrain" ]; then           # aux-only encoder로 초기화한 뒤 joint w=5, seed 0 (experiments.md 2026-10-13)
+  INIT=$(ls -d logs/experiments_auxonly/*_s0_* | head -1)/bc_model.pt
+  run pretrain_ga5_s0 --out-root logs/experiments_pretrain --pair-supervision --no-wta-fallback --made2-head --gnn-layers 4 --geom-aux-weight 5 --init-from "$INIT" --seed 0
+  wait; exit
+fi
 if [ "$1" = "capacity" ]; then           # encoder 용량: 폭 256 / 깊이 4, made2 head 포함, seed 0/1/2
   for sd in 0 1 2; do
     run cap_H256_s$sd --pair-supervision --no-wta-fallback --made2-head --gnn-hidden 256 --seed $sd

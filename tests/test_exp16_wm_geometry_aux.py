@@ -211,3 +211,31 @@ def test_aux_only_refuses_to_run_without_aux_targets_or_with_sims():
     t, v = pair_geometry(raws, TABLE); aux, _, _ = standardize(t, v, tr)
     with pytest.raises(ValueError):
         train_bc(PairGNNPolicy(hidden=16, aux_dim=N_AUX), data, tr, ~tr, "nearest_good", aux=aux, aux_weight=0.0, aux_only=True, **kw)
+
+
+def test_load_encoder_copies_the_encoder_and_aux_head_but_leaves_the_heads_fresh():
+    src = PairGNNPolicy(hidden=16, enc_layers=4, aux_dim=N_AUX)
+    for p_ in src.parameters():
+        torch.nn.init.normal_(p_, std=0.3)                                         # make every tensor differ from a fresh model
+    dst = PairGNNPolicy(hidden=16, enc_layers=4, made2_head=True, aux_dim=N_AUX)    # has a made head the source lacks
+    fresh = {k: x.clone() for k, x in dst.state_dict().items()}
+    loaded = dst.load_encoder(src.state_dict())
+    sd = dst.state_dict()
+    assert all(torch.equal(sd[k], src.state_dict()[k]) for k in loaded)
+    assert any(k.startswith("aux_head") for k in loaded) and any(k.startswith("pair.") for k in loaded)
+    for k in sd:
+        if k.startswith("head_"):
+            assert torch.equal(sd[k], fresh[k])                                    # action / selection / made heads untouched
+    assert not any(k.startswith("head_") for k in loaded)
+
+
+def test_load_encoder_rejects_another_width_or_an_unknown_key():
+    src = PairGNNPolicy(hidden=16, enc_layers=4, aux_dim=N_AUX)
+    with pytest.raises(ValueError):
+        PairGNNPolicy(hidden=32, enc_layers=4, aux_dim=N_AUX).load_encoder(src.state_dict())        # other width
+    with pytest.raises(ValueError):
+        PairGNNPolicy(hidden=16, enc_layers=2, aux_dim=N_AUX).load_encoder(src.state_dict())        # other depth
+    with pytest.raises(ValueError):
+        PairGNNPolicy(hidden=16, enc_layers=4).load_encoder(src.state_dict())                       # the source has an aux head, this model none
+    with pytest.raises(ValueError):
+        src.load_encoder({"head_a.weight": src.state_dict()["head_a.weight"]})                      # no encoder weights at all

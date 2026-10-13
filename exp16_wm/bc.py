@@ -533,6 +533,9 @@ def parse_args():
     p.add_argument("--geom-aux-weight", type=float, default=0.0,
                    help="> 0: auxiliary look-ahead of geometry — a head on each pair embedding predicts the pocket entry deviation, "
                         "the ball's cushion distance and the blockers on the two shot paths (training only); this is the loss weight")
+    p.add_argument("--init-from", type=str, default=None,
+                   help="--model gnn: initialise the encoder and the aux head from this checkpoint (bc_model.pt); the "
+                        "action / selection / made heads start fresh. E.g. an --aux-only run (pretrain on the geometry look-ahead)")
     p.add_argument("--aux-only", action="store_true",
                    help="diagnostic with --geom-aux-weight: train the encoder on the geometry look-ahead alone (no action / selection / "
                         "made loss), no policy evaluation; asks whether the encoder can represent the targets at all")
@@ -616,6 +619,8 @@ def main():
         extra_paths = sorted({p for pat in args.train_only_data for p in glob.glob(pat)})
         data, train, val = append_train_only(data, train, val, load_teacher_data(extra_paths))
         extra_tag = "_plus-" + os.path.basename(os.path.dirname(os.path.dirname(extra_paths[0])))
+    if args.init_from and args.model != "gnn":
+        raise SystemExit("--init-from needs --model gnn")
     if args.aux_only and (args.geom_aux_weight <= 0 or args.made2_head):
         raise SystemExit("--aux-only needs --geom-aux-weight > 0 and no --made2-head")
     aux = None
@@ -638,7 +643,7 @@ def main():
                                                             if args.selection == "factorized" else "")) + \
             ("" if args.gnn_hidden == 128 or args.model != "gnn" else f"_H{args.gnn_hidden}") + \
             ("" if args.gnn_layers == 2 or args.model != "gnn" else f"_L{args.gnn_layers}") + \
-            ("_sl1" if args.speed_loss == "l1" else "") + (f"_sb{args.speed_bins}" if args.speed_bins else "") + ("_kw" if args.uncertainty_weights else "") + (f"_ga{args.geom_aux_weight:g}" if args.geom_aux_weight > 0 else "") + ("_auxonly" if args.aux_only else "") + \
+            ("_sl1" if args.speed_loss == "l1" else "") + (f"_sb{args.speed_bins}" if args.speed_bins else "") + ("_kw" if args.uncertainty_weights else "") + (f"_ga{args.geom_aux_weight:g}" if args.geom_aux_weight > 0 else "") + ("_auxonly" if args.aux_only else "") + ("_init" if args.init_from else "") + \
             ("_geoang" if args.geom_angle else "") + extra_tag + (f"_m2w{args.made2_weight:g}" if args.made2_head else "") + ("geo" if args.made2_geom else "") + ("_wrap" if args.angle_wrap else "_nowrap")
     name = (f"exp16_bc_{teacher}_{args.loss}{h_tag}_a{args.angle_scale_deg:g}_v{args.speed_scale:g}"
             f"_s{args.seed}_{time.strftime('%Y-%m-%d@%H%M')}")
@@ -657,6 +662,10 @@ def main():
                               uncertainty_weights=args.uncertainty_weights, aux_dim=N_AUX if args.geom_aux_weight > 0 else 0)
         agent.fact_terms = tuple(args.fact_terms)
         agent.wta_fallback = not args.no_wta_fallback
+        if args.init_from:
+            loaded = agent.load_encoder(torch.load(args.init_from)["gnn"])
+            print(f"  encoder initialised from {args.init_from}: {len(loaded)} tensors "
+                  f"({sum(k.startswith('aux_head') for k in loaded)} of them the aux head)", flush=True)
         if modular:
             agent.mod = (args.sel_target, args.reg_target, args.scratch_head)
     else:
