@@ -5770,3 +5770,18 @@ E1b(데이터 2배: teacher pair + verify pair)도 같다(83.1%, 다른 pair 묶
 **E3와 합쳐 읽기**: 정확한 조준각은 깊이 4 위에서도 게임을 0.18 shots 줄인다(E2). 그러나 학습한 조준각(E3, 중앙값 0.113°)은 pair head(0.086°)보다 정밀하지 않다. 남은 질문은 **학습한 조준각이 정확한 값의 이득 중 얼마를 가져오는가**다. 노이즈 조준각 진단(고정 pair)에서는 `â`와 독립인 0.1° 노이즈 조준각이 정확한 값 이득의 80%(+2.0 / +2.5%p)를 가져왔다. E3 encoder의 오차가 pair head의 오차와 얼마나 겹치는지(상관)가 이를 좌우한다(미측정).
 
 **학습한 조준각과 pair head 오차의 상관 (E2·E3 후속 측정, 학습 없음, seed 0 val label pair 1,678개)**: 부호 있는 오차의 상관 **0.08**(둘 다 2° 미만인 98.7%에서). 오차가 거의 독립이다. 두 조준각의 평균은 중앙값 **0.073°**(pair head 0.086°, E3 encoder 0.113°), p90 0.316°. → E3 encoder는 정밀도는 낮지만 pair head와 **겹치지 않는 정보**를 준다. 노이즈 조준각 진단에서 `â`와 독립인 0.1° 조준각이 정확한 값 이득의 약 80%를 가져왔으므로, 학습한 조준각을 made head 입력으로 쓰는 cascade가 E2 이득(게임 −0.18)의 상당 부분을 가져올 가능성이 있다(가설, 다음 실험).
+
+### E4: 학습한 조준각 cascade (seed 0/1/2, 2026-10-14 계획, 결과 보기 전)
+
+**왜 (사용자 제안: 기하를 look-ahead하는 encoder + cascade)**: 정확한 조준각을 made head에 주면 깊이 4에서도 게임 3.55 → 3.37(E2, 진단). 학습한 조준각(E3 encoder)은 덜 정밀하지만(0.113° vs 0.086°) pair head와 오차 상관이 0.08로 거의 독립이다. 추론 때 기하 공식 없이, 학습한 조준각으로 E2 이득을 얼마나 얻는지 본다.
+**변경점 (made head 입력의 조준각 출처 하나)**: E2(`--made2-geom`, 정확한 ghost-ball 조준각)와 같되 조준각을 **얼린 조준각 encoder의 예측**으로 바꾼다(`--made2-aim-from`). 조준각 encoder는 seed마다 그 seed의 train split으로만 학습한 aux-only 모델(`--geom-aux-set aim --aux-only --save-last`, 마지막 epoch 가중치, `logs/experiments_aimenc2`; seed 0은 E3의 것). 조준각 encoder는 정책 학습 중 고정이고 gradient를 받지 않으며 정책 checkpoint에 함께 저장된다. 나머지는 깊이 4 control과 같다(`--pair-supervision --no-wta-fallback --made2-head --gnn-layers 4`, 500 epoch). 출력 `logs/experiments_cascade`. 평가는 E2·control과 같은 `eval_by_balls`(게임 500판).
+**비교 기준**: 깊이 4 control 3.55 ± 0.10(seed별 3.52 / 3.66 / 3.47), clean v+r 81.3%, 각도 0.097°, select 74.5% / E2(정확한 조준각) 3.37, 84.4%.
+
+| # | 관측 | 해석 | 다음 |
+|---|---|---|---|
+| C1 | 게임 ≤ 3.46(E2 이득의 절반 이상)이고 clean v+r ≥ control + 1.5%p, seed 3개 모두 게임이 control보다 좋음 | 학습한 조준각 cascade가 정확한 조준각 이득의 대부분을 가져온다 | 채택 후보: seed 5개로 확인, 추론 비용 측정 |
+| C2 | 게임 3.46~3.52 또는 seed 간 엇갈림 | 일부만 가져온다 | 조준각 encoder 정밀도 개선(표현·길이) 후 재시도 |
+| C0 | 게임 ≥ 3.52 | 학습한 조준각은 이득을 옮기지 못한다 | cascade 방향 중단, 추론 때 시뮬레이터 검증 |
+| 표식 | 각도 오차 ≥ control + 0.009° 또는 select clean ≤ control − 2%p | action을 해칠 가능성 | 기록 |
+
+**한계(미리)**: 조준각 encoder의 정밀도는 seed마다 다를 수 있다(seed 0만 측정: 0.113°). 조준각 encoder는 실제 추론에서 encoder를 하나 더 돈다(비용 미측정). seed 3개.

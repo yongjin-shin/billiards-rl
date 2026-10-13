@@ -84,6 +84,12 @@ if [ "$1" = "aimenc2" ]; then            # E3 재측정: 같은 인자 + --save-
   run aimenc2_s0 --out-root logs/experiments_aimenc2 --pair-supervision --no-wta-fallback --gnn-layers 4 --geom-aux-weight 1 --geom-aux-set aim --aux-only --save-last --seed 0
   wait; exit
 fi
+if [ "$1" = "aimenc12" ]; then           # E4 준비: seed 1·2용 조준각 encoder(각 seed의 train split만), 마지막 epoch 저장
+  for sd in 1 2; do
+    run aimenc2_s$sd --out-root logs/experiments_aimenc2 --pair-supervision --no-wta-fallback --gnn-layers 4 --geom-aux-weight 1 --geom-aux-set aim --aux-only --save-last --seed $sd
+  done
+  wait; exit
+fi
 if [ "$1" = "capacity" ]; then           # encoder 용량: 폭 256 / 깊이 4, made2 head 포함, seed 0/1/2
   for sd in 0 1 2; do
     run cap_H256_s$sd --pair-supervision --no-wta-fallback --made2-head --gnn-hidden 256 --seed $sd
