@@ -88,13 +88,18 @@ def scan_metrics(prob: np.ndarray, truth: np.ndarray) -> dict[str, float]:
 def load_run(run_dir: str) -> PairGNNPolicy:
     """Rebuild the policy from the run's results.json args and its bc_model.pt."""
     a = json.load(open(os.path.join(run_dir, "results.json")))["args"]
+    aim_enc = None
+    if a.get("made2_aim_from"):                                         # cascade: rebuild the frozen aim encoder (weights come with the checkpoint)
+        from exp16_wm.bc import load_aim_encoder
+        aim_enc = load_aim_encoder(a["made2_aim_dir"])
     m = PairGNNPolicy(a["gnn_hidden"], factorized=a.get("selection") == "factorized",
                       scratch_head=bool(a.get("scratch_head")), made_head=bool(a.get("made_head")),
                       made2_head=bool(a.get("made2_head")), geom_angle=bool(a.get("geom_angle")),
                       made2_geom=bool(a.get("made2_geom")), enc_layers=a.get("gnn_layers", 2),
                       speed_loss=a.get("speed_loss", "mse"), speed_bins=int(a.get("speed_bins", 0)),
                       uncertainty_weights=bool(a.get("uncertainty_weights", False)),
-                      aux_dim=(1 if a.get("geom_aux_set") == "aim" else 4) if float(a.get("geom_aux_weight", 0) or 0) > 0 else 0)
+                      aux_dim=(1 if a.get("geom_aux_set") == "aim" else 4) if float(a.get("geom_aux_weight", 0) or 0) > 0 else 0,
+                      aim_encoder=aim_enc)
     m.load_state_dict(torch.load(os.path.join(run_dir, "bc_model.pt"))["gnn"])
     return m.eval()
 

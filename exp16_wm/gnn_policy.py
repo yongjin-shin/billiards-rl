@@ -87,8 +87,13 @@ class PairGNNPolicy(nn.Module):
     def __init__(self, hidden: int = 128, wta_eps: float = 0.05, sel_weight: float = 10.0,
                  factorized: bool = False, scratch_head: bool = False, made_head: bool = False,
                  made2_head: bool = False, geom_angle: bool = False, made2_geom: bool = False,
-                 enc_layers: int = 2, speed_loss: str = "mse", speed_bins: int = 0, uncertainty_weights: bool = False, aux_dim: int = 0):
+                 enc_layers: int = 2, speed_loss: str = "mse", speed_bins: int = 0, uncertainty_weights: bool = False, aux_dim: int = 0,
+                 aim_encoder: "PairGNNPolicy | None" = None):
         super().__init__()
+        if aim_encoder is not None and not made2_geom:
+            raise ValueError("aim_encoder replaces the exact aim of made2_geom: it needs made2_geom=True")
+        if aim_encoder is not None and getattr(aim_encoder, "aux_dim", 0) != 1:
+            raise ValueError("aim_encoder must be an aux-only aim model (aux_dim 1)")
         if aux_dim < 0:
             raise ValueError(f"aux_dim must be ≥ 0, got {aux_dim}")
         if uncertainty_weights and (speed_bins or speed_loss != "mse"):
@@ -149,6 +154,30 @@ class PairGNNPolicy(nn.Module):
         half = (ACT_HIGH - ACT_LOW) / 2.0
         self.register_buffer("made2_scale", torch.tensor([np.degrees(half[0]) / 0.2, half[1] / 0.5], dtype=torch.float32),
                              persistent=False)
+        # cascade: the made2 head's aim comes from a frozen, separately trained aim encoder instead of the ghost-ball formula
+        self.aim_encoder = aim_encoder
+        if aim_encoder is not None:
+            for prm in aim_encoder.parameters():
+                prm.requires_grad_(False)
+            aim_encoder.eval()
+            self.register_buffer("aim_mean", torch.zeros(1))            # degrees; the aim encoder's target standardisation
+            self.register_buffer("aim_std", torch.ones(1))
+
+    def set_aim_stats(self, mean: float, std: float) -> None:
+        """The train mean / std (degrees) the aim encoder's target was standardised with."""
+        self.aim_mean.fill_(float(mean)); self.aim_std.fill_(float(std))
+
+    def _learned_aim(self, rel: torch.Tensor) -> torch.Tensor:
+        """(B, 18) aim (rad, relative frame) predicted by the frozen aim encoder — same quantity as _geometric_aim."""
+        with torch.no_grad():
+            z = self.aim_encoder.aux_head(self.aim_encoder._encode(rel)[0])[..., 0]
+        return torch.deg2rad(z * self.aim_std + self.aim_mean)
+
+    def train(self, mode: bool = True) -> "PairGNNPolicy":
+        super().train(mode)
+        if getattr(self, "aim_encoder", None) is not None:
+            self.aim_encoder.eval()                                          # frozen in every mode
+        return self
 
     # ── encoder ───────────────────────────────
 
@@ -207,7 +236,7 @@ class PairGNNPolicy(nn.Module):
         if self.speed_bins:
             out["speed_logits"] = sp_logits
         if self.made2_geom:
-            out["aim"] = self._geometric_aim(rel)
+            out["aim"] = self._geometric_aim(rel) if self.aim_encoder is None else self._learned_aim(rel)
         pocket = self.head_s(e).squeeze(-1)
         if self.has_scratch:
             out["scratch_logit"] = self.head_scratch(e).squeeze(-1)
@@ -623,7 +652,8 @@ class PairGNNPolicy(nn.Module):
                     "geom_angle": self.geom_angle, "made2_geom": self.made2_geom,
                     "hidden": self.hidden, "enc_layers": self.enc_layers,
                     "speed_loss": self.speed_loss, "speed_bins": self.speed_bins,
-                    "uncertainty_weights": self.uncertainty_weights, "aux_dim": self.aux_dim}, path)
+                    "uncertainty_weights": self.uncertainty_weights, "aux_dim": self.aux_dim,
+                    "made2_aim_learned": self.aim_encoder is not None}, path)
 
 
 assert REL_DIM == 3 * N_BALLS + 2 * N_POCKETS

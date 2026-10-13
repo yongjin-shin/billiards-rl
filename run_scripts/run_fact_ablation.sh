@@ -90,6 +90,13 @@ if [ "$1" = "aimenc12" ]; then           # E4 준비: seed 1·2용 조준각 enc
   done
   wait; exit
 fi
+if [ "$1" = "cascade" ]; then            # E4: 깊이 4 + made2-geom, 조준각은 얼린 조준각 encoder 예측(--made2-aim-from), seed는 인자로 (experiments.md 2026-10-14)
+  for sd in "${@:2}"; do
+    run cascade_s$sd --out-root logs/experiments_cascade --pair-supervision --no-wta-fallback --made2-head --made2-geom --gnn-layers 4 \
+        --made2-aim-from "logs/experiments_aimenc2/*_s{seed}_*" --seed $sd
+  done
+  wait; exit
+fi
 if [ "$1" = "capacity" ]; then           # encoder 용량: 폭 256 / 깊이 4, made2 head 포함, seed 0/1/2
   for sd in 0 1 2; do
     run cap_H256_s$sd --pair-supervision --no-wta-fallback --made2-head --gnn-hidden 256 --seed $sd

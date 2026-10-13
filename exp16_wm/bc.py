@@ -402,6 +402,17 @@ def train_bc(agent: VanillaSAC, data: dict[str, np.ndarray], train: np.ndarray, 
             "aux_history": aux_history, "last_state": last_state}
 
 
+def load_aim_encoder(run_dir: str) -> PairGNNPolicy:
+    """An aux-only aim model (--geom-aux-set aim --aux-only): its last epoch's weights if saved (--save-last), else the selected best."""
+    a = json.load(open(os.path.join(run_dir, "results.json")))["args"]
+    if not (a.get("aux_only") and a.get("geom_aux_set") == "aim"):
+        raise ValueError(f"{run_dir} is not an aux-only aim model")
+    m = PairGNNPolicy(a["gnn_hidden"], enc_layers=a.get("gnn_layers", 2), aux_dim=1)
+    path = os.path.join(run_dir, "bc_model_last.pt")
+    m.load_state_dict(torch.load(path if os.path.exists(path) else os.path.join(run_dir, "bc_model.pt"))["gnn"])
+    return m.eval()
+
+
 def _save_last(agent: PairGNNPolicy, last_state: dict, path: str) -> None:
     """Save the last epoch's weights to path; the agent keeps (is restored to) its selected best weights."""
     best = {k: v.clone() for k, v in agent.state_dict().items()}
@@ -581,6 +592,9 @@ def parse_args():
     p.add_argument("--made2-geom", action="store_true",
                    help="diagnostic: the made2 head also gets (action angle − geometric aim)/0.2° (needs --made2-head)")
     p.add_argument("--made2-weight", type=float, default=1.0)
+    p.add_argument("--made2-aim-from", type=str, default=None,
+                   help="cascade (with --made2-geom): the made2 head's aim comes from this frozen aux-only aim model (run dir glob, "
+                        "{seed} is filled in) instead of the ghost-ball formula")
     p.add_argument("--sims", type=str, nargs="+", default=["logs/teacher_data/relabel_s1000/sims/*.npz"])
     p.add_argument("--sims-batch", type=int, default=1024)
     p.add_argument("--no-wta-fallback", action="store_true",
@@ -620,6 +634,15 @@ def main():
     sims = None
     if args.made2_geom and not args.made2_head:
         raise SystemExit("--made2-geom needs --made2-head")
+    aim_enc, aim_stats = None, None
+    if args.made2_aim_from:
+        if not args.made2_geom:
+            raise SystemExit("--made2-aim-from needs --made2-geom")
+        found = glob.glob(args.made2_aim_from.format(seed=args.seed))
+        if len(found) != 1:
+            raise SystemExit(f"--made2-aim-from: expected one run dir, found {found}")
+        args.made2_aim_dir = found[0]                                 # resolved, saved in results.json for eval_by_balls.load_run
+        aim_enc = load_aim_encoder(found[0])
     if args.made2_head:
         if args.data_frac < 1.0 or args.augment != "none" or args.model != "gnn":
             raise SystemExit("--made2-head needs --model gnn, --data-frac 1, --augment none")
@@ -645,6 +668,9 @@ def main():
             env_dims = BilliardsEnv(**CLEAR_ENV)
             aux, aux_mean, aux_std = standardize(*pair_geometry(data["obs"], (env_dims.table_width, env_dims.table_length)), train)
             env_dims.close()
+    if aim_enc is not None:                                          # the aim encoder's target standardisation (same seed → same train split)
+        _, a_mean, a_std = standardize(*aim_targets(TRANSFORMS["relative"](data["obs"])), train)
+        aim_stats = (float(a_mean[0]), float(a_std[0]))
     data["obs"] = TRANSFORMS[args.obs_transform](data["obs"])
 
     h_tag = ("_gnn" if args.model == "gnn" else "") + \
@@ -659,7 +685,7 @@ def main():
             ("" if args.gnn_hidden == 128 or args.model != "gnn" else f"_H{args.gnn_hidden}") + \
             ("" if args.gnn_layers == 2 or args.model != "gnn" else f"_L{args.gnn_layers}") + \
             ("_sl1" if args.speed_loss == "l1" else "") + (f"_sb{args.speed_bins}" if args.speed_bins else "") + ("_kw" if args.uncertainty_weights else "") + (f"_ga{args.geom_aux_weight:g}" if args.geom_aux_weight > 0 else "") + ("_aim" if args.geom_aux_weight > 0 and args.geom_aux_set == "aim" else "") + ("_auxonly" if args.aux_only else "") + ("_init" if args.init_from else "") + \
-            ("_geoang" if args.geom_angle else "") + extra_tag + (f"_m2w{args.made2_weight:g}" if args.made2_head else "") + ("geo" if args.made2_geom else "") + ("_wrap" if args.angle_wrap else "_nowrap")
+            ("_geoang" if args.geom_angle else "") + extra_tag + (f"_m2w{args.made2_weight:g}" if args.made2_head else "") + ("geo" if args.made2_geom else "") + ("L" if args.made2_aim_from else "") + ("_wrap" if args.angle_wrap else "_nowrap")
     name = (f"exp16_bc_{teacher}_{args.loss}{h_tag}_a{args.angle_scale_deg:g}_v{args.speed_scale:g}"
             f"_s{args.seed}_{time.strftime('%Y-%m-%d@%H%M')}")
     out_dir = os.path.join(args.out_root, name)
@@ -674,7 +700,15 @@ def main():
                               made_head=args.made_head, made2_head=args.made2_head,
                               geom_angle=args.geom_angle, made2_geom=args.made2_geom,
                               enc_layers=args.gnn_layers, speed_loss=args.speed_loss, speed_bins=args.speed_bins,
-                              uncertainty_weights=args.uncertainty_weights, aux_dim=(1 if args.geom_aux_set == "aim" else N_AUX) if args.geom_aux_weight > 0 else 0)
+                              uncertainty_weights=args.uncertainty_weights, aux_dim=(1 if args.geom_aux_set == "aim" else N_AUX) if args.geom_aux_weight > 0 else 0,
+                              aim_encoder=aim_enc)
+        if aim_enc is not None:
+            agent.set_aim_stats(*aim_stats)
+            with torch.no_grad():                                    # how good is the learned aim on the val rows (all live pairs)
+                rv = torch.as_tensor(data["obs"][val])
+                d_ = agent._learned_aim(rv) - agent._geometric_aim(rv)
+                err = torch.rad2deg(torch.atan2(torch.sin(d_), torch.cos(d_))).abs()[torch.as_tensor(aim_targets(data["obs"][val])[1])]
+            print(f"  cascade aim from {args.made2_aim_dir}: val |learned − exact| median {err.median():.3f}°, p90 {err.quantile(0.9):.3f}°", flush=True)
         agent.fact_terms = tuple(args.fact_terms)
         agent.wta_fallback = not args.no_wta_fallback
         if args.init_from:
