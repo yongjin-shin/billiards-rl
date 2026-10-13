@@ -76,6 +76,10 @@ if [ "$1" = "geomL4" ]; then             # E2: 깊이 4 + --made2-geom(진단), 
   done
   wait; exit
 fi
+if [ "$1" = "aimenc" ]; then             # E3: 조준각 전용 encoder(aux-only, 목표 = 18 pair의 정확한 조준각), seed 0 (experiments.md 2026-10-13 다음 실험 순서)
+  run aimenc_s0 --out-root logs/experiments_aimenc --pair-supervision --no-wta-fallback --gnn-layers 4 --geom-aux-weight 1 --geom-aux-set aim --aux-only --seed 0
+  wait; exit
+fi
 if [ "$1" = "capacity" ]; then           # encoder 용량: 폭 256 / 깊이 4, made2 head 포함, seed 0/1/2
   for sd in 0 1 2; do
     run cap_H256_s$sd --pair-supervision --no-wta-fallback --made2-head --gnn-hidden 256 --seed $sd

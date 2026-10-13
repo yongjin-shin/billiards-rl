@@ -7,7 +7,7 @@ import numpy as np
 import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from exp16_wm.geometry_aux import N_AUX, N_PAIRS, pair_geometry, standardize
+from exp16_wm.geometry_aux import N_AUX, N_PAIRS, aim_targets, pair_geometry, standardize
 
 TABLE = (1.0, 2.0)                                           # width, length in metres (so normalised (x, y) → (x·1, y·2))
 POCKETS = [0, 0, 0, 0.5, 0, 1, 1, 0, 1, 0.5, 1, 1]            # (0,0) (0,.5) (0,1) (1,0) (1,.5) (1,1), normalised
@@ -239,3 +239,30 @@ def test_load_encoder_rejects_another_width_or_an_unknown_key():
         PairGNNPolicy(hidden=16, enc_layers=4).load_encoder(src.state_dict())                       # the source has an aux head, this model none
     with pytest.raises(ValueError):
         src.load_encoder({"head_a.weight": src.state_dict()["head_a.weight"]})                      # no encoder weights at all
+
+
+def test_aim_targets_are_the_ghost_ball_aim_in_degrees_and_mask_pocketed_balls():
+    raws, rel = _rel_rows(5, seed=8)
+    rel = rel.copy(); rel[1, 3:6] = [0.0, 0.0, 1.0]                                    # ball 1 of state 1 pocketed
+    t, v = aim_targets(rel)
+    assert t.shape == (5, 18, 1) and v.shape == (5, 18) and t.dtype == np.float32
+    assert not v[1, 6:12].any() and v[1, :6].all() and v[0].all()
+    ref = np.degrees(PairGNNPolicy._geometric_aim(torch.as_tensor(rel)).numpy())
+    assert np.allclose(t[..., 0], ref, atol=1e-4)
+    # a straight shot: ball on the +x axis, pocket further along it → aim 0°
+    straight = np.zeros((1, 21), np.float32); straight[0, 0:3] = [0.5, 0.0, 0]; straight[0, 3:6] = [0, 0, 1]; straight[0, 6:9] = [0, 0, 1]
+    straight[0, 9:21] = np.tile([1.5, 0.0], 6)
+    assert abs(aim_targets(straight)[0][0, 0, 0]) < 1e-3
+
+
+def test_train_bc_runs_with_a_one_dimensional_aim_target():
+    raws, rel = _rel_rows(24, seed=9)
+    n = len(rel); tr = np.arange(n) < 18
+    aux, _, _ = standardize(*aim_targets(rel), tr)
+    assert aux.shape == (n, 18, 1)
+    data = {"obs": rel, "action": np.tile([[0.3, 4.0]], (n, 1)).astype(np.float32),
+            "good_actions": np.tile(np.array([[[0.3, 4.0]]], np.float32), (n, 1, 1))}
+    m = PairGNNPolicy(hidden=16, aux_dim=1)
+    fit = train_bc(m, data, tr, ~tr, "nearest_good", epochs=3, batch=8, lr=3e-3, patience=10, seed=0, log_every=0,
+                   w=dim_weights(0.2, 0.5), aux=aux, aux_weight=1.0, aux_only=True)
+    h = np.array(fit["aux_history"]); assert h.shape == (3, 3) and np.isfinite(h).all()

@@ -66,6 +66,20 @@ def pair_geometry(obs: np.ndarray, table: tuple[float, float], blocker_cap: floa
     return out, valid
 
 
+def aim_targets(rel: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """
+    The exact ghost-ball aim of every pair as an auxiliary target: rel (N, 21) relative observations (metres, the policy's frame)
+    → (targets (N, 18, 1) float32 = aim direction in degrees in the relative frame, the same quantity as the made2_geom diagnostic;
+    valid (N, 18) = the pair's ball is on the table). Pair index = ball * 6 + pocket.
+    """
+    import torch
+    from exp16_wm.gnn_policy import PairGNNPolicy
+    rel = np.asarray(rel, dtype=np.float32)
+    aim = np.degrees(PairGNNPolicy._geometric_aim(torch.as_tensor(rel)).numpy())
+    on_table = rel[:, [2, 5, 8]] == 0
+    return aim[..., None].astype(np.float32), np.repeat(on_table, N_POCKETS, axis=1)
+
+
 def standardize(targets: np.ndarray, valid: np.ndarray, train: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
     Standardise targets (N, 18, K) with the mean / std of the valid entries of the train rows only → (standardised, mean (K,), std (K,)).

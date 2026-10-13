@@ -38,7 +38,7 @@ from exp16_wm.teacher_data import CLEAR_ENV
 from exp16_wm.obs_transform import TRANSFORMS, OBS_DIMS
 from exp16_wm.augment import augment_flip4
 from exp16_wm.gnn_policy import PairGNNPolicy, action_diff
-from exp16_wm.geometry_aux import N_AUX, pair_geometry, standardize
+from exp16_wm.geometry_aux import N_AUX, aim_targets, pair_geometry, standardize
 
 LOSSES = ("teacher", "nearest_good")
 
@@ -533,6 +533,8 @@ def parse_args():
     p.add_argument("--geom-aux-weight", type=float, default=0.0,
                    help="> 0: auxiliary look-ahead of geometry — a head on each pair embedding predicts the pocket entry deviation, "
                         "the ball's cushion distance and the blockers on the two shot paths (training only); this is the loss weight")
+    p.add_argument("--geom-aux-set", type=str, default="four", choices=["four", "aim"],
+                   help="auxiliary geometry targets: 'four' = entry deviation, cushion, two blockers; 'aim' = the exact ghost-ball aim of every pair")
     p.add_argument("--init-from", type=str, default=None,
                    help="--model gnn: initialise the encoder and the aux head from this checkpoint (bc_model.pt); the "
                         "action / selection / made heads start fresh. E.g. an --aux-only run (pretrain on the geometry look-ahead)")
@@ -627,9 +629,12 @@ def main():
     if args.geom_aux_weight > 0:                                  # geometry targets from the RAW observations (before the transform)
         if args.model != "gnn" or args.augment != "none":
             raise SystemExit("--geom-aux-weight needs --model gnn and --augment none")
-        env_dims = BilliardsEnv(**CLEAR_ENV)
-        aux, aux_mean, aux_std = standardize(*pair_geometry(data["obs"], (env_dims.table_width, env_dims.table_length)), train)
-        env_dims.close()
+        if args.geom_aux_set == "aim":                            # the exact aim, from the relative frame the policy sees
+            aux, aux_mean, aux_std = standardize(*aim_targets(TRANSFORMS["relative"](data["obs"])), train)
+        else:
+            env_dims = BilliardsEnv(**CLEAR_ENV)
+            aux, aux_mean, aux_std = standardize(*pair_geometry(data["obs"], (env_dims.table_width, env_dims.table_length)), train)
+            env_dims.close()
     data["obs"] = TRANSFORMS[args.obs_transform](data["obs"])
 
     h_tag = ("_gnn" if args.model == "gnn" else "") + \
@@ -643,7 +648,7 @@ def main():
                                                             if args.selection == "factorized" else "")) + \
             ("" if args.gnn_hidden == 128 or args.model != "gnn" else f"_H{args.gnn_hidden}") + \
             ("" if args.gnn_layers == 2 or args.model != "gnn" else f"_L{args.gnn_layers}") + \
-            ("_sl1" if args.speed_loss == "l1" else "") + (f"_sb{args.speed_bins}" if args.speed_bins else "") + ("_kw" if args.uncertainty_weights else "") + (f"_ga{args.geom_aux_weight:g}" if args.geom_aux_weight > 0 else "") + ("_auxonly" if args.aux_only else "") + ("_init" if args.init_from else "") + \
+            ("_sl1" if args.speed_loss == "l1" else "") + (f"_sb{args.speed_bins}" if args.speed_bins else "") + ("_kw" if args.uncertainty_weights else "") + (f"_ga{args.geom_aux_weight:g}" if args.geom_aux_weight > 0 else "") + ("_aim" if args.geom_aux_weight > 0 and args.geom_aux_set == "aim" else "") + ("_auxonly" if args.aux_only else "") + ("_init" if args.init_from else "") + \
             ("_geoang" if args.geom_angle else "") + extra_tag + (f"_m2w{args.made2_weight:g}" if args.made2_head else "") + ("geo" if args.made2_geom else "") + ("_wrap" if args.angle_wrap else "_nowrap")
     name = (f"exp16_bc_{teacher}_{args.loss}{h_tag}_a{args.angle_scale_deg:g}_v{args.speed_scale:g}"
             f"_s{args.seed}_{time.strftime('%Y-%m-%d@%H%M')}")
@@ -659,7 +664,7 @@ def main():
                               made_head=args.made_head, made2_head=args.made2_head,
                               geom_angle=args.geom_angle, made2_geom=args.made2_geom,
                               enc_layers=args.gnn_layers, speed_loss=args.speed_loss, speed_bins=args.speed_bins,
-                              uncertainty_weights=args.uncertainty_weights, aux_dim=N_AUX if args.geom_aux_weight > 0 else 0)
+                              uncertainty_weights=args.uncertainty_weights, aux_dim=(1 if args.geom_aux_set == "aim" else N_AUX) if args.geom_aux_weight > 0 else 0)
         agent.fact_terms = tuple(args.fact_terms)
         agent.wta_fallback = not args.no_wta_fallback
         if args.init_from:
