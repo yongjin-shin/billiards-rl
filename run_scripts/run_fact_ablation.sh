@@ -70,6 +70,12 @@ if [ "$1" = "pretrain" ]; then           # aux-only encoder로 초기화한 뒤 
   run pretrain_ga5_s0 --out-root logs/experiments_pretrain --pair-supervision --no-wta-fallback --made2-head --gnn-layers 4 --geom-aux-weight 5 --init-from "$INIT" --seed 0
   wait; exit
 fi
+if [ "$1" = "geomL4" ]; then             # E2: 깊이 4 + --made2-geom(진단), seed 0/1/2 (experiments.md 2026-10-13 다음 실험 순서)
+  for sd in 0 1 2; do
+    run geomL4_s$sd --out-root logs/experiments_made2geomL4 --pair-supervision --no-wta-fallback --made2-head --made2-geom --gnn-layers 4 --seed $sd
+  done
+  wait; exit
+fi
 if [ "$1" = "capacity" ]; then           # encoder 용량: 폭 256 / 깊이 4, made2 head 포함, seed 0/1/2
   for sd in 0 1 2; do
     run cap_H256_s$sd --pair-supervision --no-wta-fallback --made2-head --gnn-hidden 256 --seed $sd
