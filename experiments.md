@@ -5497,3 +5497,28 @@ KEN − control: 각도 오차 seed별 [0.041 0.008 0.006] (평균 +0.018°), �
 
 **K 하위 (seed 1개라 가능성 표시일 뿐 결론 아님)**: **K-A** 각도 오차가 control + 0.009° 이내이고 success@1이 control(82.4%)보다 +2%p 이상 → made head 순위가 좋아진 가능성, seed 3개로 확인. **K-B** success@1 변화가 ±2%p 이내 → blocker 정보를 남겨도 made head 순위는 안 변한다(그 정보만으로는 병목이 아님). **K-H** 각도 오차가 control + 0.009° 초과 → 사전학습이 주 과제를 해침.
 **한계(미리)**: seed 1개. 사전학습 체크포인트는 val로 골랐다. 새로 초기화한 head의 초기 loss가 매우 커서(수만) 첫 epoch에 encoder가 크게 흔들릴 수 있다(이 설계의 한계이며 E의 한 원인일 수 있다). 폭을 키운 비교는 하지 않았다.
+
+### 얼린 특징 위의 made head: 기하 정보가 있으면 순위가 올라가는가 (seed 0, 2026-10-13 계획, 결과 보기 전)
+
+**왜 (사용자 질문)**: "이 상태에서(기하 정보가 `e`에 있는 상태) made head 성능은 올라가나". joint 학습은 BC loss와 경쟁해서 기하 정보를 못 남기므로(위) 그 충돌을 피한다: encoder를 얼리고 made head만 시뮬레이터 결과로 학습해서 **입력 특징에 기하 정보가 있으면 후보 순위가 좋아지는지**를 직접 본다.
+**변경점 (head 입력 특징 하나)**: made head의 pair 특징을 바꾼다. 나머지는 모두 같다.
+
+| 이름 | pair 특징 | 차원 |
+|---|---|---|
+| A | control `e` (BC로 학습한 encoder, seed 0) | 128 |
+| B | aux-only `e` (기하 목표만 학습한 encoder, seed 0; blocker probe 0.99, 컷 각도 0.66) | 128 |
+| C | A와 B를 이은 것 | 256 |
+
+공통: head 구조는 기존과 같다(MLP `[특징, 행동 a, (a − 제안) × 척도] → 128 → 128 → 1`, 제안 `â`와 척도는 control 모델의 것), 학습 데이터는 `logs/vdistill/s0.npz`(학습 state마다 control 제안 주위 후보 24개와 시뮬레이터 결과, made 18개 pair 전체 + scratch), loss는 기존 made2 BCE(target = made & ~scratch), 처음부터 학습(lr 1e-3, 40 epoch, state 10% hold-out의 BCE 최저 epoch 복원). **head 초기화·batch 순서 seed 3개**로 head 학습의 흔들림을 잰다(encoder는 seed 0 하나뿐).
+**평가 (simulator 결과표를 한 번 만들어 모든 head에 재사용)**: seed 0 val 라벨 state마다 control의 원래 head로 고른 pair(verify)와 그 제안 주위 217 후보(각도 31 × 절대 speed 7)를 모두 시뮬레이터로 쳐서 `ok[state, 후보]`(어떤 공이든 포켓 + scratch 없음)를 기록한다. 각 head는 이 후보들의 순서만 매기고, 지표는 success@1·2·3·5·10·20, 같은 state 안 AUC(217 전체)다. 기준점은 control의 **원래 jointly-trained head**(같은 표로 측정). A는 "처음부터 같은 절차로 다시 학습한 control"이라 B·C와의 직접 비교 대상이다(같은 코드·같은 절차 control).
+**지표 외 참고**: 격자에 성공 후보가 있는 state 비율(완벽한 verifier의 상한).
+
+| # | 관측 | 해석 | 다음 행동 |
+|---|---|---|---|
+| F | A의 success@1이 원래 head와 ±2%p 넘게 다름 | 처음부터 다시 학습한 head가 원래 head와 비교 불가(학습 절차가 다름) | A를 기준으로 하되 절대 수준 해석은 보류 |
+| A | C의 success@1이 A보다 +2%p 이상이고 head seed 3개 모두 A의 최댓값보다 높음 | 기하 정보가 있는 특징이 made head 순위를 올린다 → "정보가 병목"이라는 가설이 지지됨 | seed 1·2로 반복(각 seed마다 aux-only encoder 필요), 그 정보를 joint/정책에 넣는 방법(사전학습 설계) |
+| B | C − A가 ±1%p 이내이고 B ≤ A | 기하 특징을 줘도 순위가 안 오른다 → 이 정보(blocker·쿠션)는 병목이 아니다 | 기하 보조 목표 방향 접음, 추론 때 시뮬레이터 검증 |
+| C | 그 사이(1~2%p) 또는 head seed 간 겹침 | 불명확 | 다른 seed의 encoder로 반복 |
+| D | C가 A보다 1%p 넘게 낮음 | 특징이 늘면 과적합 | 정규화·B만 비교 |
+
+**한계(미리)**: encoder seed 1개. head seed 3개는 head 학습의 흔들림만 잰다. aux-only `e`는 컷 각도 정보가 약하고(0.66) 입구 편차·쿠션도 R² 0.5~0.7이라 "완전한 기하"는 아니다. 후보는 control의 제안 주위 격자이고 pair는 control의 verify 선택으로 고정했다(pair 선택은 평가하지 않음). 이 결과가 BC loss와 함께 학습된 모델에서도 얻어진다는 보장은 없다.
