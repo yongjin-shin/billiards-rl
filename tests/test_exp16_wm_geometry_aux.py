@@ -266,3 +266,24 @@ def test_train_bc_runs_with_a_one_dimensional_aim_target():
     fit = train_bc(m, data, tr, ~tr, "nearest_good", epochs=3, batch=8, lr=3e-3, patience=10, seed=0, log_every=0,
                    w=dim_weights(0.2, 0.5), aux=aux, aux_weight=1.0, aux_only=True)
     h = np.array(fit["aux_history"]); assert h.shape == (3, 3) and np.isfinite(h).all()
+
+
+def test_train_bc_returns_the_last_epoch_weights_and_save_last_keeps_the_best(tmp_path):
+    from exp16_wm.bc import _save_last
+    raws, rel = _rel_rows(30, seed=10)
+    n = len(rel); tr = np.arange(n) < 22
+    aux, _, _ = standardize(*aim_targets(rel), tr)
+    data = {"obs": rel, "action": np.tile([[0.3, 4.0]], (n, 1)).astype(np.float32),
+            "good_actions": np.tile(np.array([[[0.3, 4.0]]], np.float32), (n, 1, 1))}
+    torch.manual_seed(0)
+    m = PairGNNPolicy(hidden=16, aux_dim=1)
+    fit = train_bc(m, data, tr, ~tr, "nearest_good", epochs=6, batch=8, lr=3e-3, patience=10, seed=0, log_every=0,
+                   w=dim_weights(0.2, 0.5), aux=aux, aux_weight=1.0, aux_only=True)
+    best = {k: v.clone() for k, v in m.state_dict().items()}
+    assert set(fit["last_state"]) == set(best)
+    if fit["best_epoch"] != 5:                                                       # best ≠ last → the two differ
+        assert any(not torch.equal(best[k], fit["last_state"][k]) for k in best)
+    _save_last(m, fit["last_state"], str(tmp_path / "last.pt"))
+    assert all(torch.equal(best[k], v) for k, v in m.state_dict().items())          # the agent keeps the best weights
+    saved = torch.load(str(tmp_path / "last.pt"))["gnn"]
+    assert all(torch.equal(saved[k], fit["last_state"][k]) for k in saved if k != "made2_scale")

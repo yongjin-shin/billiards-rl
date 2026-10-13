@@ -394,11 +394,20 @@ def train_bc(agent: VanillaSAC, data: dict[str, np.ndarray], train: np.ndarray, 
                   f"{va_within:.4f}  best@{best_epoch}{ax}{kw}", flush=True)
         if ep - best_epoch >= patience:
             break
+    last_state = {k: v.clone() for k, v in model.module.state_dict().items()}      # the weights after the last epoch run
     model.module.load_state_dict(best_state)
     model.module.eval()
     return {"best_val_loss": best_val, "best_epoch": best_epoch, "epochs_run": len(history),
             "select": select, "best_score": best_score, "final_lr": opt.param_groups[0]["lr"], "history": history,
-            "aux_history": aux_history}
+            "aux_history": aux_history, "last_state": last_state}
+
+
+def _save_last(agent: PairGNNPolicy, last_state: dict, path: str) -> None:
+    """Save the last epoch's weights to path; the agent keeps (is restored to) its selected best weights."""
+    best = {k: v.clone() for k, v in agent.state_dict().items()}
+    agent.load_state_dict(last_state)
+    agent.save(path)
+    agent.load_state_dict(best)
 
 
 def val_metrics(agent: "VanillaSAC | PairGNNPolicy", data: dict[str, np.ndarray], val: np.ndarray) -> dict:
@@ -533,6 +542,7 @@ def parse_args():
     p.add_argument("--geom-aux-weight", type=float, default=0.0,
                    help="> 0: auxiliary look-ahead of geometry — a head on each pair embedding predicts the pocket entry deviation, "
                         "the ball's cushion distance and the blockers on the two shot paths (training only); this is the loss weight")
+    p.add_argument("--save-last", action="store_true", help="also save the last epoch's weights (bc_model_last.pt) next to the selected best")
     p.add_argument("--geom-aux-set", type=str, default="four", choices=["four", "aim"],
                    help="auxiliary geometry targets: 'four' = entry deviation, cushion, two blockers; 'aim' = the exact ghost-ball aim of every pair")
     p.add_argument("--init-from", type=str, default=None,
@@ -683,11 +693,13 @@ def main():
                    use_pairs=args.pair_supervision or modular, selection=args.selection, use_extras=modular,
                    sims=sims, made2_weight=args.made2_weight, sims_batch=args.sims_batch,
                    aux=aux, aux_weight=args.geom_aux_weight, aux_only=args.aux_only)
+    if args.save_last and isinstance(agent, PairGNNPolicy):
+        _save_last(agent, fit["last_state"], os.path.join(out_dir, "bc_model_last.pt"))
     if args.aux_only:                                              # no policy was trained: save the encoder + aux head and stop
         agent.save(os.path.join(out_dir, "bc_model.pt"))
         print(f"  aux-only: {fit['epochs_run']} epochs ({time.time()-t0:.0f}s), best val aux MSE {fit['best_val_loss']:.4f} @{fit['best_epoch']}", flush=True)
         with open(os.path.join(out_dir, "results.json"), "w") as f:
-            json.dump({"name": name, "train": {k: v for k, v in fit.items() if k not in ("history", "aux_history")},
+            json.dump({"name": name, "train": {k: v for k, v in fit.items() if k not in ("history", "aux_history", "last_state")},
                        "val": None, "eval": None, "args": vars(args)}, f, indent=2)
         np.save(os.path.join(out_dir, "history.npy"), np.array(fit["history"]))
         np.save(os.path.join(out_dir, "aux_history.npy"), np.array(fit["aux_history"]))
@@ -723,7 +735,7 @@ def main():
     results = {"name": name, "teacher": teacher, "loss": args.loss, "data": paths, "eval_infer_modes": ev_modes,
                "train_only_data": extra_paths if args.train_only_data else None, "eval_scratch_penalty": ev_pen,
                "n_shots": int(len(data["shot"])), "n_train": int(train.sum()), "n_val": int(val.sum()),
-               "train": {k: v for k, v in fit.items() if k not in ("history", "aux_history")}, "val": vm, "eval": ev,
+               "train": {k: v for k, v in fit.items() if k not in ("history", "aux_history", "last_state")}, "val": vm, "eval": ev,
                "args": vars(args)}
     if getattr(agent, "uncertainty_weights", False):      # log σ² of (angle, speed, selection) at the saved (best) epoch
         results["log_var"] = agent.log_var.detach().clamp(-3, 3).tolist()

@@ -5715,3 +5715,5 @@ encoder lr 3e-4(V3는 1e-3), head lr 1e-3, 15 epoch(비용), state 10% hold-out�
 | PM | 그 사이 | 부분적 | 학습 길이·용량을 늘려 재측정 |
 
 **한계(미리)**: E0·E1·E3는 seed 0 하나(encoder seed 1개). E1의 on-policy 후보는 control 원래 head의 verify 기준(학습된 head가 바뀌면 다시 뽑아야 함). E3의 목표는 정확한 공식값이고 이를 예측하는 것은 학습이지만, cascade에 쓰면 "기하를 학습으로 얻는" 경로가 된다(공식을 직접 넣는 것과 다름).
+
+**E3 측정 보정 (결과 일부를 본 뒤, 2026-10-13)**: 저장된 E3 가중치는 보조 val MSE 최저 epoch(177)의 것이고, 그 조준각 오차 중앙값은 0.373°(val label pair; pair head 0.086°)로 판단표 P0에 해당했다. 그러나 이 checkpoint 선택 기준이 정밀도 측정에 맞지 않는다: 학습 MSE는 epoch 490에서 0.00006으로 epoch 177보다 훨씬 낮고, val MSE는 relative frame의 ±180° 경계에서 각도가 넘어가는 소수의 큰 오차가 지배한다(목표 표준편차 38.6°). 그래서 **마지막 epoch 가중치도 저장**하도록(`--save-last`, roadmap 상시 TODO #9) 고치고 같은 인자·seed로 다시 돌려, 두 checkpoint 모두에서 같은 판단표(P1/P0/PM, val label pair 중앙값)를 적용한다. 같은 seed이므로 최저 val checkpoint는 이전과 같아야 한다(대조). 판단은 마지막 epoch checkpoint로 하고, 두 값 모두 기록한다.
