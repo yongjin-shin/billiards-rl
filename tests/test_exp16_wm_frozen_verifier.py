@@ -8,7 +8,7 @@ import pytest
 import torch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from exp16_wm.frozen_verifier import FrozenVerifier, fit_verifier, pair_features, rank_metrics
+from exp16_wm.frozen_verifier import AdaptiveVerifier, FrozenVerifier, fit_adaptive, fit_verifier, pair_features, rank_metrics
 from exp16_wm.gnn_policy import PairGNNPolicy
 
 POCKETS = [0, 0, 0, 0.5, 0, 1, 1, 0, 1, 0.5, 1, 1]
@@ -106,3 +106,26 @@ def test_simulate_state_returns_one_flag_per_candidate():
     acts = np.array([[0.0, 3.0], [1.0, 1.0], [-1.0, 5.0]], np.float32)
     flags = fv._simulate_state((np.asarray(obs, np.float32), acts))
     assert flags.shape == (3,) and flags.dtype == bool
+
+
+def test_fit_adaptive_trains_a_private_encoder_copy_and_leaves_the_policy_alone():
+    import copy
+    torch.manual_seed(0)
+    policy = PairGNNPolicy(hidden=16, made2_head=True)
+    before = {k: x.clone() for k, x in policy.state_dict().items()}
+    rel = _rel(60, seed=3)
+    anchor = {k: v for k, v in policy.forward_full(rel).items() if k in ("means", "valid")}
+    rng = np.random.default_rng(0)
+    sid = rng.integers(0, 60, size=600)
+    a = (rng.random((600, 2)) * 2 - 1).astype(np.float32)
+    made = np.repeat((rel[sid][:, 3] > 0)[:, None].numpy(), 18, axis=1)             # outcome decided by an input coordinate of the state
+    enc = copy.deepcopy(policy)
+    enc_before = {k: x.clone() for k, x in enc.state_dict().items()}
+    v, info = fit_adaptive(enc, rel, anchor, sid, a, made, np.zeros(600, bool), policy.made2_scale, seed=0, epochs=6, lr_enc=3e-3, lr_head=3e-3, batch=128)
+    assert isinstance(v, AdaptiveVerifier) and len(info["holdout"]) == 6 and info["holdout"][info["best_epoch"]] == min(info["holdout"])
+    assert any(not torch.equal(enc_before[k], x) for k, x in v.enc.state_dict().items() if k.startswith(("bb.", "ball.", "pair.")))   # the copy adapted
+    assert all(torch.equal(before[k], x) for k, x in policy.state_dict().items())                                                   # the policy did not
+    assert min(info["holdout"]) < info["train"][0]                                                                                   # it learned something
+    k = torch.zeros(5, dtype=torch.long)
+    sc = v.candidate_scores(rel[:5], {n: x[:5] for n, x in anchor.items()}, k, torch.zeros(5, 4, 2), chunk=2)
+    assert sc.shape == (5, 4)

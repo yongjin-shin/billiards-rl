@@ -67,7 +67,7 @@ class FrozenVerifier(nn.Module):
 
     def logits(self, rows: dict[str, torch.Tensor], a: torch.Tensor) -> torch.Tensor:
         """rows: e (B, 18, F), means (B, 18, 2), valid (B, 18); a (B, 2) one action for all pairs or (B, 18, 2) → (B, 18), invalid masked."""
-        e, means = rows["e"], rows["means"]
+        e, means = rows["e"], rows["means"].detach()                 # the proposal is an anchor, not something to train through
         a = a[:, None, :].expand_as(means) if a.dim() == 2 else a
         z = self.head(torch.cat([e, a, action_diff(a, means) * self.scale], dim=-1)).squeeze(-1)
         return z.masked_fill(~rows["valid"], _NEG)
@@ -75,7 +75,7 @@ class FrozenVerifier(nn.Module):
     def candidate_scores(self, rows: dict[str, torch.Tensor], k: torch.Tensor, cand: torch.Tensor) -> torch.Tensor:
         """rows as above, k (B,) the chosen pair, cand (B, C, 2) candidate actions → (B, C) logits of pair k."""
         b = torch.arange(len(k))
-        e_k, mean_k = rows["e"][b, k], rows["means"][b, k]
+        e_k, mean_k = rows["e"][b, k], rows["means"][b, k].detach()
         C = cand.shape[1]
         feats = torch.cat([e_k[:, None].expand(-1, C, -1), cand, action_diff(cand, mean_k[:, None].expand(-1, C, -1)) * self.scale], dim=-1)
         return self.head(feats).squeeze(-1)
@@ -117,6 +117,76 @@ def fit_verifier(rows: dict[str, torch.Tensor], sid: np.ndarray, a: np.ndarray, 
         with torch.no_grad():
             h = float(bce(ho_i)) if len(ho_i) else float("nan")
         hist_tr.append(tot / max(len(perm), 1)); hist_ho.append(h)
+        if h < best:
+            best, best_ep, best_state = h, ep, {k: x.clone() for k, x in v.state_dict().items()}
+    if best_state is not None:
+        v.load_state_dict(best_state)
+    v.eval()
+    return v, {"train": hist_tr, "holdout": hist_ho, "best_epoch": best_ep}
+
+
+class AdaptiveVerifier(nn.Module):
+    """
+    A verifier with its own encoder: `enc` (a PairGNNPolicy, normally a deep copy so the policy itself is untouched) gives the pair
+    embeddings from the relative observation, a FrozenVerifier head reads them. The proposals and live-pair mask stay the policy's (anchor).
+    """
+
+    def __init__(self, enc: PairGNNPolicy, scale: torch.Tensor, hidden: int = 128):
+        super().__init__()
+        self.enc = enc
+        self.head = FrozenVerifier(enc.hidden, scale, hidden)
+
+    def rows(self, rel: torch.Tensor, anchor: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+        return {"e": self.enc.forward_full(rel)["e"], "means": anchor["means"], "valid": anchor["valid"]}
+
+    def candidate_scores(self, rel: torch.Tensor, anchor: dict[str, torch.Tensor], k: torch.Tensor, cand: torch.Tensor, chunk: int = 300) -> torch.Tensor:
+        parts = []
+        for lo in range(0, len(rel), chunk):
+            sl = slice(lo, lo + chunk)
+            parts.append(self.head.candidate_scores(self.rows(rel[sl], {n: x[sl] for n, x in anchor.items()}), k[sl], cand[sl]))
+        return torch.cat(parts)
+
+
+def fit_adaptive(enc: PairGNNPolicy, rel: torch.Tensor, anchor: dict[str, torch.Tensor], sid: np.ndarray, a: np.ndarray, made: np.ndarray,
+                 scratch: np.ndarray, scale: torch.Tensor, seed: int = 0, epochs: int = 15, lr_enc: float = 3e-4, lr_head: float = 1e-3,
+                 batch: int = 512, holdout: float = 0.1, hold_seed: int = 1234, log=None) -> tuple[AdaptiveVerifier, dict]:
+    """
+    fit_verifier with the encoder trained too: rel (S, 21) the relative observations of the states, anchor the policy's means / valid for them,
+    sid / a / made / scratch the simulations as in fit_verifier. `enc` is trained IN PLACE (pass a copy). Same held-out states as fit_verifier
+    (same hold_seed and number of states); the epoch with the lowest held-out BCE is restored.
+    """
+    torch.manual_seed(seed)
+    rng = np.random.default_rng(seed)
+    v = AdaptiveVerifier(enc, scale)
+    hold = holdout_states(len(rel), holdout, np.random.default_rng(hold_seed))[sid]
+    tr_i, ho_i = np.flatnonzero(~hold), np.flatnonzero(hold)
+    sid_t, a_t = torch.as_tensor(sid), torch.as_tensor(a).float()
+    made_t, scr_t = torch.as_tensor(made), torch.as_tensor(scratch)
+    opt = torch.optim.Adam([{"params": enc.parameters(), "lr": lr_enc}, {"params": v.head.parameters(), "lr": lr_head}])
+
+    def bce(idx: np.ndarray) -> torch.Tensor:
+        st = sid_t[idx]
+        r = v.rows(rel[st], {k: x[st] for k, x in anchor.items()})
+        target = (made_t[idx] & ~scr_t[idx][:, None]).float()
+        return F.binary_cross_entropy_with_logits(v.head.logits(r, a_t[idx])[r["valid"]], target[r["valid"]])
+
+    hist_tr, hist_ho, best, best_ep, best_state = [], [], float("inf"), -1, None
+    for ep in range(epochs):
+        t0 = time.time()
+        perm = rng.permutation(tr_i)
+        tot = 0.0
+        v.train()
+        for lo in range(0, len(perm), batch):
+            b = perm[lo:lo + batch]
+            loss = bce(b)
+            opt.zero_grad(); loss.backward(); opt.step()
+            tot += float(loss.detach()) * len(b)
+        v.eval()
+        with torch.no_grad():
+            h = float(sum(bce(ho_i[lo:lo + 2048]) * len(ho_i[lo:lo + 2048]) for lo in range(0, len(ho_i), 2048)) / max(len(ho_i), 1)) if len(ho_i) else float("nan")
+        hist_tr.append(tot / max(len(perm), 1)); hist_ho.append(h)
+        if log:
+            log(f"    epoch {ep:>2}  train {hist_tr[-1]:.4f}  holdout {h:.4f}  ({time.time() - t0:.0f}s)")
         if h < best:
             best, best_ep, best_state = h, ep, {k: x.clone() for k, x in v.state_dict().items()}
     if best_state is not None:
@@ -263,25 +333,90 @@ def fit(args) -> None:
         row(name, [[r["success_at_k"][kk] for r in res] for kk in (1, 2, 3, 5, 10, 20)] + [[r["state_auc"] for r in res]])
 
 
+def fit_adaptive_cmd(args) -> None:
+    import copy
+    from exp16_wm import diagnose_action as D
+    from exp16_wm import eval_by_balls as E
+    from exp16_wm.bc import load_teacher_data
+    from exp16_wm.sim_identity import from_bitmask
+    raw = load_teacher_data(sorted(glob.glob(E.DATA)))
+    models = {}
+    for name, pat in (("control", args.run), ("aux", args.aux_run)):
+        found = glob.glob(pat.format(seed=args.seed))
+        if len(found) != 1:
+            raise SystemExit(f"{name}: expected one run dir, found {found}")
+        models[name] = E.load_run(found[0])
+    ctrl = models["control"]
+    policy_before = {k: x.clone() for k, x in ctrl.state_dict().items()}
+    d, tab = np.load(args.data), np.load(args.table)
+    tr, va = D.val_setup(raw, args.seed, split="train"), D.val_setup(raw, args.seed, split="val")
+    uniq, sid = np.unique(d["state"], return_inverse=True)
+    made = from_bitmask(d["made"]).astype(bool)
+    k, cand, ok = torch.as_tensor(tab["k"]).long(), torch.as_tensor(tab["cand"]), tab["ok"]
+    rel_tr, rel_va = tr["rel"][uniq], va["rel"][tab["state"]]
+    anchor_tr, anchor_va = pair_features(ctrl, [ctrl], rel_tr), pair_features(ctrl, [ctrl], rel_va)
+    anchor_tr, anchor_va = {n: anchor_tr[n] for n in ("means", "valid")}, {n: anchor_va[n] for n in ("means", "valid")}
+    out: dict = {"seed": args.seed, "variants": {}}
+    for name in args.variants:
+        res = []
+        for hs in args.head_seeds:
+            enc = copy.deepcopy(models["aux"] if name == "V2" else ctrl)
+            lr_enc = args.lr_enc
+            if name == "V3":                                                 # random initialisation of the same architecture
+                torch.manual_seed(100 + hs)
+                for mod in enc.modules():
+                    if hasattr(mod, "reset_parameters"):
+                        mod.reset_parameters()
+                lr_enc = args.lr_scratch
+            print(f"[{name} seed {hs}]", flush=True)
+            ver, info = fit_adaptive(enc, rel_tr, anchor_tr, sid, d["a"], made, d["scratch"].astype(bool), ctrl.made2_scale, seed=hs,
+                                     epochs=args.epochs, lr_enc=lr_enc, log=lambda m: print(m, flush=True))
+            with torch.no_grad():
+                sc = ver.candidate_scores(rel_va, anchor_va, k, cand).numpy()
+            met = rank_metrics(sc, ok)
+            res.append({"head_seed": hs, "best_epoch": info["best_epoch"], "holdout_bce": min(info["holdout"]), "train_bce": info["train"][info["best_epoch"]], **met})
+            print(f"[{name} seed {hs}] holdout BCE {min(info['holdout']):.4f} (train {info['train'][info['best_epoch']]:.4f}) @{info['best_epoch']}  " +
+                  "  ".join(f"@{kk} {100 * x:.1f}%" for kk, x in met["success_at_k"].items()) + f"  AUC {met['state_auc']:.3f}", flush=True)
+        out["variants"][name] = res
+    same = all(torch.equal(policy_before[n], x) for n, x in ctrl.state_dict().items())
+    out["policy_unchanged"] = bool(same)
+    print(f"\npolicy weights unchanged: {same}")
+    if args.out:
+        os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
+        json.dump(out, open(args.out, "w"), indent=1)
+    cols = (1, 2, 3, 5, 10, 20)
+    print("\nsuccess@k (mean of head seeds; min–max)")
+    print(f"{'':6s}" + "".join(f"{'@' + str(c):>16s}" for c in cols) + f"{'AUC':>8s}{'holdout BCE':>13s}")
+    for name, res in out["variants"].items():
+        cell = lambda c: f"{100 * np.mean(c):5.1f} ({100 * min(c):.1f}-{100 * max(c):.1f})".rjust(16)
+        print(f"{name:6s}" + "".join(cell([r["success_at_k"][c] for r in res]) for c in cols)
+              + f"{np.mean([r['state_auc'] for r in res]):8.3f}{np.mean([r['holdout_bce'] for r in res]):13.4f}")
+
+
 def main() -> None:
     p = argparse.ArgumentParser()
     sub = p.add_subparsers(dest="cmd", required=True)
-    for name in ("table", "fit"):
+    for name in ("table", "fit", "fit-adaptive"):
         s = sub.add_parser(name)
         s.add_argument("--run", required=True, help="control run dir glob with {seed}")
         s.add_argument("--seed", type=int, default=0)
-        s.add_argument("--out", default=None)
+        s.add_argument("--out", default=None); s.add_argument("--threads", type=int, default=4)
         if name == "table":
             s.add_argument("--workers", type=int, default=4); s.add_argument("--max-states", type=int, default=0)
         else:
             s.add_argument("--aux-run", required=True, help="aux-only run dir glob with {seed}")
             s.add_argument("--table", required=True); s.add_argument("--data", required=True)
-            s.add_argument("--variants", nargs="+", default=["A", "B", "C"], choices=list(VARIANTS))
             s.add_argument("--head-seeds", type=int, nargs="+", default=[0, 1, 2])
-            s.add_argument("--epochs", type=int, default=40); s.add_argument("--lr", type=float, default=1e-3)
+            if name == "fit":
+                s.add_argument("--variants", nargs="+", default=["A", "B", "C"], choices=list(VARIANTS))
+                s.add_argument("--epochs", type=int, default=40); s.add_argument("--lr", type=float, default=1e-3)
+            else:
+                s.add_argument("--variants", nargs="+", default=["V1", "V2", "V3"], choices=["V1", "V2", "V3"])
+                s.add_argument("--epochs", type=int, default=15)
+                s.add_argument("--lr-enc", type=float, default=3e-4); s.add_argument("--lr-scratch", type=float, default=1e-3)
     args = p.parse_args()
-    torch.set_num_threads(4)
-    {"table": table, "fit": fit}[args.cmd](args)
+    torch.set_num_threads(args.threads)
+    {"table": table, "fit": fit, "fit-adaptive": fit_adaptive_cmd}[args.cmd](args)
 
 
 if __name__ == "__main__":
