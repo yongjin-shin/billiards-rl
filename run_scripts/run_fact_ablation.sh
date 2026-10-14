@@ -135,6 +135,12 @@ if [ "$1" = "aim8" ]; then               # E8: 조준각 encoder 길이 5000 / �
   run aim8C_s0 --out-root logs/experiments_aim_3000_fin1e-6 "${AIMC[@]}" --epochs 3000 --lr-final-frac 0.001
   wait; exit
 fi
+if [ "$1" = "cascade_ens4" ]; then       # E9: 조준각 encoder 4개(2000 / 3000 / 5000 / 3000 끝 lr 1e-6) 원형 평균 cascade, seed 0 (experiments.md 2026-10-15)
+  run cascade_ens4_s0 --out-root logs/experiments_cascade_ens4 --pair-supervision --no-wta-fallback --made2-head --made2-geom --gnn-layers 4 \
+      --made2-aim-from "logs/experiments_aim_2000/*_s{seed}_*" "logs/experiments_aim_3000/*_s{seed}_*" "logs/experiments_aim_5000/*_s{seed}_*" \
+                       "logs/experiments_aim_3000_fin1e-6/*_s{seed}_*" --threads 4 --seed 0
+  wait; exit
+fi
 if [ "$1" = "capacity" ]; then           # encoder 용량: 폭 256 / 깊이 4, made2 head 포함, seed 0/1/2
   for sd in 0 1 2; do
     run cap_H256_s$sd --pair-supervision --no-wta-fallback --made2-head --gnn-hidden 256 --seed $sd

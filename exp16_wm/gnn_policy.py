@@ -89,13 +89,14 @@ class PairGNNPolicy(nn.Module):
                  factorized: bool = False, scratch_head: bool = False, made_head: bool = False,
                  made2_head: bool = False, geom_angle: bool = False, made2_geom: bool = False,
                  enc_layers: int = 2, speed_loss: str = "mse", speed_bins: int = 0, uncertainty_weights: bool = False, aux_dim: int = 0,
-                 aim_encoder: "PairGNNPolicy | None" = None, fourier: int = 0):
+                 aim_encoder: "PairGNNPolicy | list[PairGNNPolicy] | None" = None, fourier: int = 0):
         super().__init__()
         if fourier < 0:
             raise ValueError(f"fourier must be ≥ 0, got {fourier}")
-        if aim_encoder is not None and not made2_geom:
+        aim_list = list(aim_encoder) if isinstance(aim_encoder, (list, tuple)) else ([aim_encoder] if aim_encoder is not None else [])
+        if aim_list and not made2_geom:
             raise ValueError("aim_encoder replaces the exact aim of made2_geom: it needs made2_geom=True")
-        if aim_encoder is not None and getattr(aim_encoder, "aux_dim", 0) != 1:
+        if any(getattr(a, "aux_dim", 0) != 1 for a in aim_list):
             raise ValueError("aim_encoder must be an aux-only aim model (aux_dim 1)")
         if aux_dim < 0:
             raise ValueError(f"aux_dim must be ≥ 0, got {aux_dim}")
@@ -162,29 +163,41 @@ class PairGNNPolicy(nn.Module):
         half = (ACT_HIGH - ACT_LOW) / 2.0
         self.register_buffer("made2_scale", torch.tensor([np.degrees(half[0]) / 0.2, half[1] / 0.5], dtype=torch.float32),
                              persistent=False)
-        # cascade: the made2 head's aim comes from a frozen, separately trained aim encoder instead of the ghost-ball formula
-        self.aim_encoder = aim_encoder
-        if aim_encoder is not None:
-            for prm in aim_encoder.parameters():
+        # cascade: the made2 head's aim comes from frozen, separately trained aim encoder(s) instead of the ghost-ball formula;
+        # one encoder keeps the original state_dict keys (aim_encoder.*), several are averaged on the circle (aim_ensemble.i.*)
+        self.aim_encoder = aim_list[0] if len(aim_list) == 1 else None
+        self.aim_ensemble = nn.ModuleList(aim_list) if len(aim_list) > 1 else None
+        for enc in aim_list:
+            for prm in enc.parameters():
                 prm.requires_grad_(False)
-            aim_encoder.eval()
-            self.register_buffer("aim_mean", torch.zeros(1))            # degrees; the aim encoder's target standardisation
+            enc.eval()
+        if aim_list:
+            self.register_buffer("aim_mean", torch.zeros(1))            # degrees; the aim encoders' target standardisation (same train split)
             self.register_buffer("aim_std", torch.ones(1))
 
     def set_aim_stats(self, mean: float, std: float) -> None:
         """The train mean / std (degrees) the aim encoder's target was standardised with."""
         self.aim_mean.fill_(float(mean)); self.aim_std.fill_(float(std))
 
+    def _aim_encoders(self) -> list["PairGNNPolicy"]:
+        if getattr(self, "aim_ensemble", None) is not None:
+            return list(self.aim_ensemble)
+        return [self.aim_encoder] if getattr(self, "aim_encoder", None) is not None else []
+
     def _learned_aim(self, rel: torch.Tensor) -> torch.Tensor:
-        """(B, 18) aim (rad, relative frame) predicted by the frozen aim encoder — same quantity as _geometric_aim."""
+        """(B, 18) aim (rad, relative frame) predicted by the frozen aim encoder(s) — same quantity as _geometric_aim.
+        Several encoders are averaged on the circle (atan2 of the mean sin and cos), so ±180° does not break the mean."""
         with torch.no_grad():
-            z = self.aim_encoder.aux_head(self.aim_encoder._encode(rel)[0])[..., 0]
-        return torch.deg2rad(z * self.aim_std + self.aim_mean)
+            angles = torch.stack([torch.deg2rad(enc.aux_head(enc._encode(rel)[0])[..., 0] * self.aim_std + self.aim_mean)
+                                  for enc in self._aim_encoders()])
+        if len(angles) == 1:
+            return angles[0]
+        return torch.atan2(torch.sin(angles).mean(0), torch.cos(angles).mean(0))
 
     def train(self, mode: bool = True) -> "PairGNNPolicy":
         super().train(mode)
-        if getattr(self, "aim_encoder", None) is not None:
-            self.aim_encoder.eval()                                          # frozen in every mode
+        for enc in self._aim_encoders():
+            enc.eval()                                                       # frozen in every mode
         return self
 
     # ── encoder ───────────────────────────────
@@ -252,7 +265,7 @@ class PairGNNPolicy(nn.Module):
         if self.speed_bins:
             out["speed_logits"] = sp_logits
         if self.made2_geom:
-            out["aim"] = self._geometric_aim(rel) if self.aim_encoder is None else self._learned_aim(rel)
+            out["aim"] = self._learned_aim(rel) if self._aim_encoders() else self._geometric_aim(rel)
         pocket = self.head_s(e).squeeze(-1)
         if self.has_scratch:
             out["scratch_logit"] = self.head_scratch(e).squeeze(-1)
@@ -669,7 +682,7 @@ class PairGNNPolicy(nn.Module):
                     "hidden": self.hidden, "enc_layers": self.enc_layers,
                     "speed_loss": self.speed_loss, "speed_bins": self.speed_bins,
                     "uncertainty_weights": self.uncertainty_weights, "aux_dim": self.aux_dim,
-                    "made2_aim_learned": self.aim_encoder is not None, "fourier": self.fourier}, path)
+                    "made2_aim_learned": bool(self._aim_encoders()), "made2_aim_n": len(self._aim_encoders()), "fourier": self.fourier}, path)
 
 
 assert REL_DIM == 3 * N_BALLS + 2 * N_POCKETS

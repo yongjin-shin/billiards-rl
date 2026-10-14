@@ -98,3 +98,67 @@ def test_load_aim_encoder_prefers_the_last_epoch_and_rejects_other_runs(tmp_path
     json.dump({"args": {"aux_only": False, "geom_aux_set": "four", "gnn_hidden": 16}}, open(other / "results.json", "w"))
     with pytest.raises(ValueError):
         load_aim_encoder(str(other))
+
+
+# ── several aim encoders (ensemble) ──
+
+def _const_aim_model(deg: float, seed: int = 0) -> PairGNNPolicy:
+    """An aim model whose prediction is the constant `deg` (aux head last layer zeroed, bias = deg) with mean 0 / std 1 stats."""
+    m = _aim_model(seed)
+    with torch.no_grad():
+        m.aux_head[2].weight.zero_(); m.aux_head[2].bias.fill_(deg)
+    return m
+
+
+def test_ensemble_aim_is_the_circular_mean_and_handles_the_180_degree_seam():
+    rel = _rel(3, seed=4)
+    m = PairGNNPolicy(hidden=16, made2_head=True, made2_geom=True, aim_encoder=[_const_aim_model(179.0, 0), _const_aim_model(-179.0, 1)])
+    m.set_aim_stats(0.0, 1.0)
+    with torch.no_grad():
+        aim = torch.rad2deg(m.forward_full(rel)["aim"])
+    assert torch.allclose(torch.abs(aim), torch.full_like(aim, 180.0), atol=1e-3)      # an arithmetic mean would give 0°
+    m2 = PairGNNPolicy(hidden=16, made2_head=True, made2_geom=True, aim_encoder=[_const_aim_model(10.0, 0), _const_aim_model(20.0, 1), _const_aim_model(30.0, 2)])
+    m2.set_aim_stats(0.0, 1.0)
+    with torch.no_grad():
+        assert torch.allclose(torch.rad2deg(m2.forward_full(rel)["aim"]), torch.full((3, 18), 20.0), atol=1e-3)
+    assert m.aim_encoder is None and len(m.aim_ensemble) == 2
+
+
+def test_ensemble_members_are_frozen_and_round_trip(tmp_path):
+    rel = _rel(8, seed=5)
+    encs = [_aim_model(0), _aim_model(1)]
+    before = [{k: v.clone() for k, v in e.state_dict().items()} for e in encs]
+    m = PairGNNPolicy(hidden=16, made2_head=True, made2_geom=True, aim_encoder=encs)
+    m.set_aim_stats(1.0, 30.0)
+    m.train()
+    assert all(not e.training for e in m.aim_ensemble)
+    opt = torch.optim.Adam(m.params(), lr=1e-2)
+    loss = m.made2_loss(rel, torch.rand(8, 2) * 2 - 1, torch.rand(8, 18) > 0.5, torch.zeros(8, dtype=torch.bool))
+    opt.zero_grad(); loss.backward(); opt.step()
+    assert all(torch.equal(before[i][k], v) for i, e in enumerate(m.aim_ensemble) for k, v in e.state_dict().items())
+    m.save(str(tmp_path / "p.pt")); ck = torch.load(str(tmp_path / "p.pt"))
+    assert ck["made2_aim_n"] == 2 and any(k.startswith("aim_ensemble.1.") for k in ck["gnn"])
+    m2 = PairGNNPolicy(hidden=16, made2_head=True, made2_geom=True, aim_encoder=[_aim_model(7), _aim_model(8)])
+    m2.load_state_dict(ck["gnn"])
+    with torch.no_grad():
+        assert torch.allclose(m2.forward_full(rel)["aim"], m.forward_full(rel)["aim"], atol=1e-6)
+
+
+def test_eval_load_run_rebuilds_a_cascade_with_several_aim_encoders(tmp_path):
+    from exp16_wm import eval_by_balls as E
+    dirs = []
+    for i in range(2):
+        d = tmp_path / f"aim{i}"; d.mkdir(); dirs.append(str(d))
+        json.dump({"args": {"aux_only": True, "geom_aux_set": "aim", "gnn_hidden": 16, "gnn_layers": 2}}, open(d / "results.json", "w"))
+        _aim_model(i).save(str(d / "bc_model_last.pt"))
+    pol = PairGNNPolicy(hidden=16, made2_head=True, made2_geom=True, aim_encoder=[load_aim_encoder(x) for x in dirs])
+    pol.set_aim_stats(-0.5, 38.0)
+    run = tmp_path / "policy"; run.mkdir()
+    pol.save(str(run / "bc_model.pt"))
+    json.dump({"args": {"gnn_hidden": 16, "selection": "global", "made2_head": True, "made2_geom": True, "gnn_layers": 2,
+                        "made2_aim_from": ["x", "y"], "made2_aim_dirs": dirs}}, open(run / "results.json", "w"))
+    got = E.load_run(str(run))
+    rel = _rel(4, seed=6)
+    with torch.no_grad():
+        assert torch.allclose(got.forward_full(rel)["aim"], pol.forward_full(rel)["aim"], atol=1e-6)
+    assert len(got.aim_ensemble) == 2 and float(got.aim_std) == 38.0

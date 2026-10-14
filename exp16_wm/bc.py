@@ -612,9 +612,9 @@ def parse_args():
     p.add_argument("--made2-geom", action="store_true",
                    help="diagnostic: the made2 head also gets (action angle − geometric aim)/0.2° (needs --made2-head)")
     p.add_argument("--made2-weight", type=float, default=1.0)
-    p.add_argument("--made2-aim-from", type=str, default=None,
-                   help="cascade (with --made2-geom): the made2 head's aim comes from this frozen aux-only aim model (run dir glob, "
-                        "{seed} is filled in) instead of the ghost-ball formula")
+    p.add_argument("--made2-aim-from", type=str, nargs="+", default=None,
+                   help="cascade (with --made2-geom): the made2 head's aim comes from these frozen aux-only aim models (run dir globs, "
+                        "{seed} is filled in; several are averaged on the circle) instead of the ghost-ball formula")
     p.add_argument("--sims", type=str, nargs="+", default=["logs/teacher_data/relabel_s1000/sims/*.npz"])
     p.add_argument("--sims-batch", type=int, default=1024)
     p.add_argument("--no-wta-fallback", action="store_true",
@@ -658,11 +658,15 @@ def main():
     if args.made2_aim_from:
         if not args.made2_geom:
             raise SystemExit("--made2-aim-from needs --made2-geom")
-        found = glob.glob(args.made2_aim_from.format(seed=args.seed))
-        if len(found) != 1:
-            raise SystemExit(f"--made2-aim-from: expected one run dir, found {found}")
-        args.made2_aim_dir = found[0]                                 # resolved, saved in results.json for eval_by_balls.load_run
-        aim_enc = load_aim_encoder(found[0])
+        dirs = []
+        for pat in args.made2_aim_from:
+            found = glob.glob(pat.format(seed=args.seed))
+            if len(found) != 1:
+                raise SystemExit(f"--made2-aim-from {pat}: expected one run dir, found {found}")
+            dirs.append(found[0])
+        args.made2_aim_dirs = dirs                                    # resolved, saved in results.json for eval_by_balls.load_run
+        args.made2_aim_dir = dirs[0] if len(dirs) == 1 else None
+        aim_enc = load_aim_encoder(dirs[0]) if len(dirs) == 1 else [load_aim_encoder(d) for d in dirs]
     if args.made2_head:
         if args.data_frac < 1.0 or args.augment != "none" or args.model != "gnn":
             raise SystemExit("--made2-head needs --model gnn, --data-frac 1, --augment none")
@@ -728,7 +732,8 @@ def main():
                 rv = torch.as_tensor(data["obs"][val])
                 d_ = agent._learned_aim(rv) - agent._geometric_aim(rv)
                 err = torch.rad2deg(torch.atan2(torch.sin(d_), torch.cos(d_))).abs()[torch.as_tensor(aim_targets(data["obs"][val])[1])]
-            print(f"  cascade aim from {args.made2_aim_dir}: val |learned − exact| median {err.median():.3f}°, p90 {err.quantile(0.9):.3f}°", flush=True)
+            print(f"  cascade aim from {len(args.made2_aim_dirs)} encoder(s) {args.made2_aim_dirs}: val |learned − exact| median {err.median():.3f}°, "
+                  f"p90 {err.quantile(0.9):.3f}°", flush=True)
         agent.fact_terms = tuple(args.fact_terms)
         agent.wta_fallback = not args.no_wta_fallback
         if args.init_from:
