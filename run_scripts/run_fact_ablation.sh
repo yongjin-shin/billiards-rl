@@ -109,6 +109,11 @@ if [ "$1" = "aim5L2" ]; then             # E5-L′: 조기 종료가 잡음에 �
       --epochs 1000 --threads 4 --seed 0
   wait; exit
 fi
+if [ "$1" = "aim5L3" ]; then             # E5-L″: val patience(500)에 걸려 770에서 멈춤 → patience를 꺼서 1000 epoch 끝까지, seed 0
+  run aim5L3_s0 --out-root logs/experiments_aim_long1000b --pair-supervision --no-wta-fallback --gnn-layers 4 --geom-aux-weight 1 --geom-aux-set aim --aux-only --save-last \
+      --epochs 1000 --patience 2000 --threads 4 --seed 0
+  wait; exit
+fi
 if [ "$1" = "capacity" ]; then           # encoder 용량: 폭 256 / 깊이 4, made2 head 포함, seed 0/1/2
   for sd in 0 1 2; do
     run cap_H256_s$sd --pair-supervision --no-wta-fallback --made2-head --gnn-hidden 256 --seed $sd
