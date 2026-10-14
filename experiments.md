@@ -6022,3 +6022,15 @@ E1b(데이터 2배: teacher pair + verify pair)도 같다(83.1%, 다른 pair 묶
 E9 − E7 = −0.160 ± 0.044, E9 − E2 = −0.058 ± 0.041(차이 불분명), 평가 seed별 E9 − control(각 500판): −0.240 / −0.226 / −0.204 / −0.124 — 네 묶음 모두 개선.
 **판단표**: S1은 "Δshots ≤ −0.09 **그리고** clean v+r ≥ 0.838"인데 **게임은 기준을 크게 넘었고(−0.199, 약 6 SE) clean v+r은 0.834로 기준 미달**이다. SM의 정의(Δshots가 −0.09~−0.04, 또는 clean만 충족)에도 들어맞지 않는다 — 사전 표에 없는 경우이므로 **사용자 결정**으로 둔다. **action 표식이 걸렸다**: select clean 0.719(기준 ≤ 0.724; control 0.744, −2.5%p). 각도 오차 0.106°는 표식 미만.
 **읽을 수 있는 것**: 학습한 조준각(encoder 4개 평균)으로 seed 0의 게임이 정확한 조준각(E2)만큼 또는 그 이상 좋아졌다(같은 배치 2000판). 다만 pair head 단독(select)의 성공률이 2.5%p 내려갔다 — 실제 경기에서 쓰는 verify+refine에서는 made head가 이를 보완하지만, 사용자 목표(action 유지)에 걸리는 신호다. seed 하나라 이 하락이 seed 편차인지 모른다(E2 −1.5%p, E7 +0.9%p).
+
+### E10: E9를 seed 1·2로 재현 (2026-10-15 계획, 결과 보기 전)
+
+**변경점**: E9와 같은 방식을 seed 1·2에 적용한다. seed마다 그 seed의 train split으로만 조준각 encoder 4개(2000 / 3000 / 5000 epoch, 3000 epoch 끝 lr 1e-6; `--patience 100000 --save-last`)를 학습하고, 원형 평균으로 cascade(`logs/experiments_cascade_ens4`). 평가: seed별 짝지은 2000판(평가 seed 1~4 × 500판; control·E2·E9를 같은 배치로), `eval_by_balls`(clean v+r, 각도 오차, select clean).
+**seed 1·2 control 기준값(이전 측정, `eval_by_balls`)**: 각도 0.093 / 0.095°쯤(seed별 값은 결과 표에 함께 적는다), select·clean은 같은 도구로 다시 잰다.
+
+| # | 관측 (seed 0·1·2, 짝지은 2000판) | 해석 | 다음 |
+|---|---|---|---|
+| C1 | control 대비 Δshots 평균 ≤ −0.09이고 seed 3개 모두 Δ < 0 | 학습한 조준각 cascade가 게임을 개선한다(재현) | action 표식이 없으면 채택 후보 |
+| C2 | 평균 −0.09 < Δ ≤ −0.04, 또는 seed 하나가 Δ ≥ 0 | 일부만 재현 | 원인 분석 |
+| C0 | 평균 Δ > −0.04 | seed 0 결과가 재현되지 않는다 | 중단 |
+| **action** | select clean이 control보다 평균 2%p 넘게 낮거나 각도 오차가 평균 0.009° 넘게 나쁨 | made head 학습이 공유 encoder를 통해 pair head를 해친다 | 다음 실험: made head가 encoder로 gradient를 보내지 않게(stop-gradient) 해서 action을 지키는지 |

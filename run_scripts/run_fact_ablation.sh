@@ -141,6 +141,24 @@ if [ "$1" = "cascade_ens4" ]; then       # E9: 조준각 encoder 4개(2000 / 300
                        "logs/experiments_aim_3000_fin1e-6/*_s{seed}_*" --threads 4 --seed 0
   wait; exit
 fi
+if [ "$1" = "aim_ens4" ]; then           # E10 준비: seed별 조준각 encoder 4개(2000 / 3000 / 5000 / 3000 끝 lr 1e-6), seed는 인자로, 1 thread씩
+  for sd in "${@:2}"; do
+    AIMC=(--pair-supervision --no-wta-fallback --gnn-layers 4 --geom-aux-weight 1 --geom-aux-set aim --aux-only --save-last --patience 100000 --threads 1 --seed $sd)
+    run aimE_2000_s$sd --out-root logs/experiments_aim_2000 "${AIMC[@]}" --epochs 2000
+    run aimE_3000_s$sd --out-root logs/experiments_aim_3000 "${AIMC[@]}" --epochs 3000
+    run aimE_5000_s$sd --out-root logs/experiments_aim_5000 "${AIMC[@]}" --epochs 5000
+    run aimE_fin_s$sd --out-root logs/experiments_aim_3000_fin1e-6 "${AIMC[@]}" --epochs 3000 --lr-final-frac 0.001
+  done
+  wait; exit
+fi
+if [ "$1" = "cascade_ens4s" ]; then      # E10: 4개 평균 cascade, seed는 인자로
+  for sd in "${@:2}"; do
+    run cascade_ens4_s$sd --out-root logs/experiments_cascade_ens4 --pair-supervision --no-wta-fallback --made2-head --made2-geom --gnn-layers 4 \
+        --made2-aim-from "logs/experiments_aim_2000/*_s{seed}_*" "logs/experiments_aim_3000/*_s{seed}_*" "logs/experiments_aim_5000/*_s{seed}_*" \
+                         "logs/experiments_aim_3000_fin1e-6/*_s{seed}_*" --threads 4 --seed $sd
+  done
+  wait; exit
+fi
 if [ "$1" = "capacity" ]; then           # encoder 용량: 폭 256 / 깊이 4, made2 head 포함, seed 0/1/2
   for sd in 0 1 2; do
     run cap_H256_s$sd --pair-supervision --no-wta-fallback --made2-head --gnn-hidden 256 --seed $sd
