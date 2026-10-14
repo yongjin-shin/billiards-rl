@@ -128,6 +128,13 @@ if [ "$1" = "cascade3000" ]; then        # E7: 3000 epoch 조준각 encoder로 c
   done
   wait; exit
 fi
+if [ "$1" = "aim8" ]; then               # E8: 조준각 encoder 길이 5000 / 시작 lr 3e-3 / 끝 lr 1e-6, seed 0 (experiments.md 2026-10-14)
+  AIMC=(--pair-supervision --no-wta-fallback --gnn-layers 4 --geom-aux-weight 1 --geom-aux-set aim --aux-only --save-last --patience 100000 --threads 3 --seed 0)
+  run aim8A_s0 --out-root logs/experiments_aim_5000 "${AIMC[@]}" --epochs 5000
+  run aim8B_s0 --out-root logs/experiments_aim_3000_lr3e-3 "${AIMC[@]}" --epochs 3000 --lr 3e-3
+  run aim8C_s0 --out-root logs/experiments_aim_3000_fin1e-6 "${AIMC[@]}" --epochs 3000 --lr-final-frac 0.001
+  wait; exit
+fi
 if [ "$1" = "capacity" ]; then           # encoder 용량: 폭 256 / 깊이 4, made2 head 포함, seed 0/1/2
   for sd in 0 1 2; do
     run cap_H256_s$sd --pair-supervision --no-wta-fallback --made2-head --gnn-hidden 256 --seed $sd
