@@ -293,11 +293,14 @@ def train_bc(agent: VanillaSAC, data: dict[str, np.ndarray], train: np.ndarray, 
              lr_schedule: str = "const", lr_final_frac: float = 0.01, use_pairs: bool = False,
              selection: str = "global", use_extras: bool = False,
              sims: dict[str, np.ndarray] | None = None, made2_weight: float = 1.0, sims_batch: int = 1024,
-             aux: np.ndarray | None = None, aux_weight: float = 0.0, aux_only: bool = False) -> dict:
+             aux: np.ndarray | None = None, aux_weight: float = 0.0, aux_only: bool = False,
+             train_plateau: int = 0, train_plateau_tol: float = 0.01) -> dict:
     """select: 'loss' keeps the lowest val loss; 'within' the highest val within-threshold rate
     (the val loss is dominated by a few far-off predictions and can disagree with it).
     aux_only: train the encoder + aux head on the geometry look-ahead alone (no action / selection / made loss);
-    the 'val loss' is then the val aux MSE and the checkpoint is the lowest of it."""
+    the 'val loss' is then the val aux MSE and the checkpoint is the lowest of it.
+    train_plateau = W > 0: also stop when the training loss has converged — the lowest training loss of the last W epochs is not
+    more than train_plateau_tol (relative) below the lowest before them."""
     if select not in ("loss", "within"):
         raise ValueError(f"unknown select: {select}")
     if lr_schedule not in ("const", "cosine"):
@@ -342,6 +345,7 @@ def train_bc(agent: VanillaSAC, data: dict[str, np.ndarray], train: np.ndarray, 
         s_mask = sims["made"]; s_scr = torch.as_tensor(sims["scratch"])   # made bitmask decoded per batch
 
     best_score, best_val, best_state, best_epoch, history = -float("inf"), float("inf"), None, -1, []
+    stop_reason = None
     use_aux = aux_t is not None and aux_weight > 0
     aux_history: list[tuple[int, float, float]] = []             # (epoch, train aux MSE, val aux MSE), standardised targets
     for ep in range(epochs):
@@ -394,12 +398,23 @@ def train_bc(agent: VanillaSAC, data: dict[str, np.ndarray], train: np.ndarray, 
                   f"{va_within:.4f}  best@{best_epoch}{ax}{kw}", flush=True)
         if ep - best_epoch >= patience:
             break
+        if train_plateau and train_plateau_converged([h[1] for h in history], train_plateau, train_plateau_tol):
+            stop_reason = f"training loss converged at epoch {ep}"
+            break
     last_state = {k: v.clone() for k, v in model.module.state_dict().items()}      # the weights after the last epoch run
     model.module.load_state_dict(best_state)
     model.module.eval()
     return {"best_val_loss": best_val, "best_epoch": best_epoch, "epochs_run": len(history),
             "select": select, "best_score": best_score, "final_lr": opt.param_groups[0]["lr"], "history": history,
-            "aux_history": aux_history, "last_state": last_state}
+            "aux_history": aux_history, "last_state": last_state, "stop_reason": stop_reason}
+
+
+def train_plateau_converged(train_losses: list[float], window: int, tol: float) -> bool:
+    """True when the lowest loss of the last `window` epochs is not more than `tol` (relative) below the lowest before them."""
+    if window <= 0 or len(train_losses) < 2 * window:
+        return False
+    before, recent = min(train_losses[:-window]), min(train_losses[-window:])
+    return recent > (1.0 - tol) * before
 
 
 def load_aim_encoder(run_dir: str) -> PairGNNPolicy:
@@ -407,7 +422,7 @@ def load_aim_encoder(run_dir: str) -> PairGNNPolicy:
     a = json.load(open(os.path.join(run_dir, "results.json")))["args"]
     if not (a.get("aux_only") and a.get("geom_aux_set") == "aim"):
         raise ValueError(f"{run_dir} is not an aux-only aim model")
-    m = PairGNNPolicy(a["gnn_hidden"], enc_layers=a.get("gnn_layers", 2), aux_dim=1)
+    m = PairGNNPolicy(a["gnn_hidden"], enc_layers=a.get("gnn_layers", 2), aux_dim=1, fourier=int(a.get("input_fourier", 0) or 0))
     path = os.path.join(run_dir, "bc_model_last.pt")
     m.load_state_dict(torch.load(path if os.path.exists(path) else os.path.join(run_dir, "bc_model.pt"))["gnn"])
     return m.eval()
@@ -553,6 +568,11 @@ def parse_args():
     p.add_argument("--geom-aux-weight", type=float, default=0.0,
                    help="> 0: auxiliary look-ahead of geometry — a head on each pair embedding predicts the pocket entry deviation, "
                         "the ball's cushion distance and the blockers on the two shot paths (training only); this is the loss weight")
+    p.add_argument("--input-fourier", type=int, default=0,
+                   help="GNN input representation: add sin/cos Fourier features at this many octaves to every 2-D coordinate")
+    p.add_argument("--train-plateau", type=int, default=0,
+                   help="> 0: also stop when the training loss has converged over this many epochs (see --train-plateau-tol)")
+    p.add_argument("--train-plateau-tol", type=float, default=0.01)
     p.add_argument("--save-last", action="store_true", help="also save the last epoch's weights (bc_model_last.pt) next to the selected best")
     p.add_argument("--geom-aux-set", type=str, default="four", choices=["four", "aim"],
                    help="auxiliary geometry targets: 'four' = entry deviation, cushion, two blockers; 'aim' = the exact ghost-ball aim of every pair")
@@ -684,7 +704,7 @@ def main():
                                                             if args.selection == "factorized" else "")) + \
             ("" if args.gnn_hidden == 128 or args.model != "gnn" else f"_H{args.gnn_hidden}") + \
             ("" if args.gnn_layers == 2 or args.model != "gnn" else f"_L{args.gnn_layers}") + \
-            ("_sl1" if args.speed_loss == "l1" else "") + (f"_sb{args.speed_bins}" if args.speed_bins else "") + ("_kw" if args.uncertainty_weights else "") + (f"_ga{args.geom_aux_weight:g}" if args.geom_aux_weight > 0 else "") + ("_aim" if args.geom_aux_weight > 0 and args.geom_aux_set == "aim" else "") + ("_auxonly" if args.aux_only else "") + ("_init" if args.init_from else "") + \
+            ("_sl1" if args.speed_loss == "l1" else "") + (f"_sb{args.speed_bins}" if args.speed_bins else "") + ("_kw" if args.uncertainty_weights else "") + (f"_ga{args.geom_aux_weight:g}" if args.geom_aux_weight > 0 else "") + ("_aim" if args.geom_aux_weight > 0 and args.geom_aux_set == "aim" else "") + ("_auxonly" if args.aux_only else "") + ("_init" if args.init_from else "") + (f"_ff{args.input_fourier}" if args.input_fourier else "") + \
             ("_geoang" if args.geom_angle else "") + extra_tag + (f"_m2w{args.made2_weight:g}" if args.made2_head else "") + ("geo" if args.made2_geom else "") + ("L" if args.made2_aim_from else "") + ("_wrap" if args.angle_wrap else "_nowrap")
     name = (f"exp16_bc_{teacher}_{args.loss}{h_tag}_a{args.angle_scale_deg:g}_v{args.speed_scale:g}"
             f"_s{args.seed}_{time.strftime('%Y-%m-%d@%H%M')}")
@@ -701,7 +721,7 @@ def main():
                               geom_angle=args.geom_angle, made2_geom=args.made2_geom,
                               enc_layers=args.gnn_layers, speed_loss=args.speed_loss, speed_bins=args.speed_bins,
                               uncertainty_weights=args.uncertainty_weights, aux_dim=(1 if args.geom_aux_set == "aim" else N_AUX) if args.geom_aux_weight > 0 else 0,
-                              aim_encoder=aim_enc)
+                              aim_encoder=aim_enc, fourier=args.input_fourier)
         if aim_enc is not None:
             agent.set_aim_stats(*aim_stats)
             with torch.no_grad():                                    # how good is the learned aim on the val rows (all live pairs)
@@ -726,7 +746,10 @@ def main():
                    select=args.select, lr_schedule=args.lr_schedule, lr_final_frac=args.lr_final_frac,
                    use_pairs=args.pair_supervision or modular, selection=args.selection, use_extras=modular,
                    sims=sims, made2_weight=args.made2_weight, sims_batch=args.sims_batch,
-                   aux=aux, aux_weight=args.geom_aux_weight, aux_only=args.aux_only)
+                   aux=aux, aux_weight=args.geom_aux_weight, aux_only=args.aux_only,
+                   train_plateau=args.train_plateau, train_plateau_tol=args.train_plateau_tol)
+    if fit["stop_reason"]:
+        print(f"  stopped: {fit['stop_reason']}", flush=True)
     if args.save_last and isinstance(agent, PairGNNPolicy):
         _save_last(agent, fit["last_state"], os.path.join(out_dir, "bc_model_last.pt"))
     if args.aux_only:                                              # no policy was trained: save the encoder + aux head and stop

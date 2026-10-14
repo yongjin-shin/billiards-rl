@@ -30,6 +30,7 @@ from exp16_wm.train import ACT_LOW, ACT_HIGH
 from exp16_wm.obs_transform import N_BALLS, N_POCKETS, REL_DIM
 
 N_PAIRS = N_BALLS * N_POCKETS
+FOURIER_SCALE = 4.0             # m; the lowest Fourier frequency has period 2·FOURIER_SCALE, longer than any distance on the table
 BALL_RADIUS = 0.028575          # m (pooltool default; test_exp16_wm_gnn_policy checks it against the env)
 SIDE_POCKETS = (1, 4)            # obs pocket order: (0,0) (0,½) (0,1) (1,0) (1,½) (1,1)
 _NEG = -1e9
@@ -88,8 +89,10 @@ class PairGNNPolicy(nn.Module):
                  factorized: bool = False, scratch_head: bool = False, made_head: bool = False,
                  made2_head: bool = False, geom_angle: bool = False, made2_geom: bool = False,
                  enc_layers: int = 2, speed_loss: str = "mse", speed_bins: int = 0, uncertainty_weights: bool = False, aux_dim: int = 0,
-                 aim_encoder: "PairGNNPolicy | None" = None):
+                 aim_encoder: "PairGNNPolicy | None" = None, fourier: int = 0):
         super().__init__()
+        if fourier < 0:
+            raise ValueError(f"fourier must be ≥ 0, got {fourier}")
         if aim_encoder is not None and not made2_geom:
             raise ValueError("aim_encoder replaces the exact aim of made2_geom: it needs made2_geom=True")
         if aim_encoder is not None and getattr(aim_encoder, "aux_dim", 0) != 1:
@@ -121,9 +124,14 @@ class PairGNNPolicy(nn.Module):
         self.refine_speed = (0.8, 1.0, 1.25)             # × the proposal's speed
         self.refine_speed_abs: tuple[float, ...] | None = None   # m/s, instead of refine_speed (independent of the proposal)
         self.hidden, self.enc_layers = H, enc_layers
-        self.bb   = _mlp(5 + 2 + 1 + 1, H, H, enc_layers)
-        self.ball = _mlp(5 + H, H, H, enc_layers)
-        self.pair = _mlp(H + 2 + 2 + 1 + 1, H, H, enc_layers)
+        # input representation: each 2-D coordinate (ball position, ball-ball difference, pocket position, ball→pocket vector)
+        # can be extended with Fourier features sin/cos(2^k π x / FOURIER_SCALE), k = 0 … fourier − 1 (Tancik et al. 2020)
+        self.fourier = fourier
+        d2 = 2 + 4 * fourier                              # width of one encoded 2-D coordinate
+        ball_dim = d2 + 3
+        self.bb   = _mlp(ball_dim + d2 + 1 + 1, H, H, enc_layers)
+        self.ball = _mlp(ball_dim + H, H, H, enc_layers)
+        self.pair = _mlp(H + d2 + d2 + 1 + 1, H, H, enc_layers)
         self.geom_angle = geom_angle                     # angle comes from a pair embedding without the neighbour message
         self.head_a = nn.Linear(H, 2)
         if geom_angle:
@@ -181,6 +189,14 @@ class PairGNNPolicy(nn.Module):
 
     # ── encoder ───────────────────────────────
 
+    def _ff(self, x: torch.Tensor) -> torch.Tensor:
+        """(…, 2) coordinates in metres → (…, 2 + 4·fourier): the coordinates, then sin and cos at each frequency."""
+        if not self.fourier:
+            return x
+        freq = (2.0 ** torch.arange(self.fourier, dtype=x.dtype, device=x.device)) * (np.pi / FOURIER_SCALE)
+        xs = (x[..., None] * freq).flatten(-2)                                  # (…, 2·fourier)
+        return torch.cat([x, torch.sin(xs), torch.cos(xs)], dim=-1)
+
     def _encode(self, rel: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         _, e, valid, _ = self._encode_full(rel)
         return e, valid
@@ -194,10 +210,10 @@ class PairGNNPolicy(nn.Module):
         dist = pos.norm(dim=-1)
         ref = torch.where(live, dist, torch.full_like(dist, float("inf"))).argmin(dim=1)
         is_ref = F.one_hot(ref, N_BALLS).float() * live.any(dim=1, keepdim=True).float()
-        ball_f = torch.cat([pos, dist[..., None], pocketed[..., None], is_ref[..., None]], dim=-1)
+        ball_f = torch.cat([self._ff(pos), dist[..., None], pocketed[..., None], is_ref[..., None]], dim=-1)
 
         diff = pos[:, None, :, :] - pos[:, :, None, :]                    # (B, i, k, 2): k relative to i
-        bb_in = torch.cat([ball_f[:, :, None, :].expand(B, N_BALLS, N_BALLS, 5), diff,
+        bb_in = torch.cat([ball_f[:, :, None, :].expand(B, N_BALLS, N_BALLS, ball_f.shape[-1]), self._ff(diff),
                            diff.norm(dim=-1, keepdim=True),
                            pocketed[:, None, :, None].expand(B, N_BALLS, N_BALLS, 1)], dim=-1)
         not_self = ~torch.eye(N_BALLS, dtype=torch.bool, device=rel.device)
@@ -209,7 +225,7 @@ class PairGNNPolicy(nn.Module):
         H = h.shape[-1]
         def pair_embed(hb: torch.Tensor) -> torch.Tensor:
             pair_in = torch.cat([hb[:, :, None, :].expand(B, N_BALLS, N_POCKETS, H),
-                                 pockets[:, None].expand(B, N_BALLS, N_POCKETS, 2), pr,
+                                 self._ff(pockets)[:, None].expand(B, N_BALLS, N_POCKETS, 2 + 4 * self.fourier), self._ff(pr),
                                  pr.norm(dim=-1, keepdim=True),
                                  self.side.view(1, 1, N_POCKETS, 1).expand(B, N_BALLS, N_POCKETS, 1)], dim=-1)
             return self.pair(pair_in).reshape(B, N_PAIRS, H)
@@ -653,7 +669,7 @@ class PairGNNPolicy(nn.Module):
                     "hidden": self.hidden, "enc_layers": self.enc_layers,
                     "speed_loss": self.speed_loss, "speed_bins": self.speed_bins,
                     "uncertainty_weights": self.uncertainty_weights, "aux_dim": self.aux_dim,
-                    "made2_aim_learned": self.aim_encoder is not None}, path)
+                    "made2_aim_learned": self.aim_encoder is not None, "fourier": self.fourier}, path)
 
 
 assert REL_DIM == 3 * N_BALLS + 2 * N_POCKETS

@@ -97,6 +97,13 @@ if [ "$1" = "cascade" ]; then            # E4: 깊이 4 + made2-geom, 조준각�
   done
   wait; exit
 fi
+if [ "$1" = "aim5" ]; then               # E5: 조준각 encoder 꼬리 줄이기, seed 0 — L: 최대 1000 epoch + train loss 수렴 시 종료, F: Fourier 좌표 입력 (experiments.md 2026-10-14)
+  run aim5L_s0 --out-root logs/experiments_aim_long --pair-supervision --no-wta-fallback --gnn-layers 4 --geom-aux-weight 1 --geom-aux-set aim --aux-only --save-last \
+      --epochs 1000 --train-plateau 50 --train-plateau-tol 0.01 --threads 3 --seed 0
+  run aim5F_s0 --out-root logs/experiments_aim_ff --pair-supervision --no-wta-fallback --gnn-layers 4 --geom-aux-weight 1 --geom-aux-set aim --aux-only --save-last \
+      --input-fourier 8 --threads 3 --seed 0
+  wait; exit
+fi
 if [ "$1" = "capacity" ]; then           # encoder 용량: 폭 256 / 깊이 4, made2 head 포함, seed 0/1/2
   for sd in 0 1 2; do
     run cap_H256_s$sd --pair-supervision --no-wta-fallback --made2-head --gnn-hidden 256 --seed $sd
