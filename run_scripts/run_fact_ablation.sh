@@ -104,6 +104,11 @@ if [ "$1" = "aim5" ]; then               # E5: 조준각 encoder 꼬리 줄이�
       --input-fourier 8 --threads 3 --seed 0
   wait; exit
 fi
+if [ "$1" = "aim5L2" ]; then             # E5-L′: 조기 종료가 잡음에 걸려 무효 → 1000 epoch 끝까지(조기 종료 없음), seed 0
+  run aim5L2_s0 --out-root logs/experiments_aim_long1000 --pair-supervision --no-wta-fallback --gnn-layers 4 --geom-aux-weight 1 --geom-aux-set aim --aux-only --save-last \
+      --epochs 1000 --threads 4 --seed 0
+  wait; exit
+fi
 if [ "$1" = "capacity" ]; then           # encoder 용량: 폭 256 / 깊이 4, made2 head 포함, seed 0/1/2
   for sd in 0 1 2; do
     run cap_H256_s$sd --pair-supervision --no-wta-fallback --made2-head --gnn-hidden 256 --seed $sd
