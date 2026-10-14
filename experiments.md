@@ -5989,3 +5989,18 @@ E1b(데이터 2배: teacher pair + verify pair)도 같다(83.1%, 다른 pair 묶
 | 참고: pair head | 0.080° | 0.309° | 41.5% |
 
 → 4개 평균은 E8 기준(≤ 15%)과 E5 통과 기준(≤ 20% 그리고 p90 ≤ 0.2°)을 모두 넘는다. 사후 분석이므로 판단이 아니라 다음 실험의 근거로만 쓴다. 평균한 encoder는 모두 seed 0 train split으로만 학습해 seed 0 val에 누출이 없다.
+
+### E9: 조준각 encoder 4개 평균으로 cascade — seed 0 (2026-10-15 계획, 결과 보기 전)
+
+**왜**: 단일 조준각 encoder는 0.1° 이상 17.7~20.1%에서 포화(E8). seed 0 encoder 4개(2000 / 3000 / 5000 epoch, 3000 epoch 끝 lr 1e-6)의 오차가 거의 독립이라(상관 0.02~0.17) 평균하면 10.0%, p90 0.100°로 줄어든다(사후 분석). E7(단일 3000 epoch, 20.1%)은 clean v+r +1.7%p, 짝지은 2000판 shots −0.039 ± 0.044로 E2(정확한 조준각) 이득의 약 절반이었다.
+**변경점 (조준각 출처 하나)**: E7과 같고 made head 입력의 조준각을 encoder 4개 예측의 **원형 평균**(sin·cos 평균의 atan2)으로 바꾼다. `--made2-aim-from`이 여러 run을 받는다. encoder는 모두 seed 0 train split으로만 학습, 고정, 정책 checkpoint에 함께 저장. 출력 `logs/experiments_cascade_ens4`.
+**평가 (seed 0)**: ① 짝지은 2000판(`/tmp/paired_games.py`, 평가 seed 1~4 × 500판, control·E2·E7과 같은 배치)의 shots와 control 대비 차이(짝지은 SE) ② `eval_by_balls` clean v+r, 각도 오차, select clean. 기준값: control 3.592 / 0.816 / 0.101° / 0.744, E2 3.451(−0.141 ± 0.042) / 0.848, E7 3.553(−0.039 ± 0.044) / 0.833.
+
+| # | 관측 (seed 0) | 다음 |
+|---|---|---|
+| S1 | 짝지은 Δshots ≤ −0.09 (E2 이득의 약 2/3, 약 2 SE) 그리고 clean v+r ≥ 0.838 | seed 1·2(각 seed마다 encoder 4개)로 확인 |
+| SM | −0.09 < Δshots ≤ −0.04, 또는 clean v+r만 기준 충족 | 사용자 결정 |
+| S0 | Δshots > −0.04 (E7보다 나아지지 않음) | 조준각 정밀도 이득이 게임으로 옮겨지지 않는다 → 이 방향 중단 |
+| 표식 | 각도 오차 ≥ 0.110° 또는 select clean ≤ 0.724 | action 해침 가능성 기록 |
+
+**한계(미리)**: seed 1개. 평균한 encoder 4개는 같은 초기화 seed·학습 길이만 다르다. 추론 때 encoder 4개를 더 돈다.
