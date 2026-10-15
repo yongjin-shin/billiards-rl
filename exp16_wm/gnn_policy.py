@@ -124,6 +124,8 @@ class PairGNNPolicy(nn.Module):
         self.refine_deg = (-0.3, -0.2, -0.1, -0.05, 0.0, 0.05, 0.1, 0.2, 0.3)
         self.refine_speed = (0.8, 1.0, 1.25)             # × the proposal's speed
         self.refine_speed_abs: tuple[float, ...] | None = None   # m/s, instead of refine_speed (independent of the proposal)
+        self.refine_center = "proposal"                 # refine grid centred on: proposal | aim (made2_geom's aim) | both (union)
+        self.select_angle = "proposal"                  # select / verify action angle: proposal | aim (diagnostic)
         self.hidden, self.enc_layers = H, enc_layers
         # input representation: each 2-D coordinate (ball position, ball-ball difference, pocket position, ball→pocket vector)
         # can be extended with Fourier features sin/cos(2^k π x / FOURIER_SCALE), k = 0 … fourier − 1 (Tancik et al. 2020)
@@ -329,6 +331,26 @@ class PairGNNPolicy(nn.Module):
         v = o["valid"]
         return F.binary_cross_entropy_with_logits(z[v], target[v])
 
+    def _aim_unit(self, o: dict[str, torch.Tensor], rows: torch.Tensor, k: torch.Tensor) -> torch.Tensor:
+        """(B,) the aim of pair k (made2_geom's exact or learned aim) as a unit action angle."""
+        if self.select_angle not in ("proposal", "aim") or self.refine_center not in ("proposal", "aim", "both"):
+            raise ValueError(f"unknown select_angle {self.select_angle!r} / refine_center {self.refine_center!r}")
+        if "aim" not in o:
+            raise ValueError("an aim-centred action needs made2_geom (an exact or learned aim)")
+        d = o["aim"][rows, k] - self.act_bias[0]
+        return (torch.atan2(torch.sin(d), torch.cos(d)) / self.act_scale[0]).clamp(-1.0, 1.0)
+
+    def _refine_candidates(self, a: torch.Tensor, aim_u: torch.Tensor | None) -> torch.Tensor:
+        """(B, C, 2) refine candidates: the grid around the proposal a, around (aim, a's speed), or both (concatenated)."""
+        if self.refine_center == "proposal":
+            return self._unit_offsets(a)
+        at_aim = self._unit_offsets(torch.stack([aim_u, a[:, 1]], dim=-1))
+        if self.refine_center == "aim":
+            return at_aim
+        if self.refine_center == "both":
+            return torch.cat([self._unit_offsets(a), at_aim], dim=1)
+        raise ValueError(f"unknown refine_center {self.refine_center!r}")
+
     def _unit_offsets(self, a: torch.Tensor) -> torch.Tensor:
         """(B, 2) actions → (B, C, 2) refinement candidates: angle ± refine_deg × speed × refine_speed."""
         deg = torch.tensor(self.refine_deg, dtype=a.dtype, device=a.device)
@@ -363,9 +385,10 @@ class PairGNNPolicy(nn.Module):
         rows = torch.arange(len(score))
         k = score.argmax(dim=1)
         a = o["means"][rows, k]
+        aim_u = self._aim_unit(o, rows, k) if (self.refine_center != "proposal" or self.select_angle != "proposal") else None
         if self.infer not in ("refine", "verify_refine"):
-            return a
-        cand = self._unit_offsets(a)                                                  # (B, C, 2)
+            return a if self.select_angle == "proposal" else torch.stack([aim_u, a[:, 1]], dim=-1)
+        cand = self._refine_candidates(a, aim_u)                                      # (B, C, 2)
         C = cand.shape[1]
         e_k = o["e"][rows, k][:, None].expand(-1, C, -1)
         feats = [e_k, cand, action_diff(cand, a[:, None].expand(-1, C, -1)) * self.made2_scale]

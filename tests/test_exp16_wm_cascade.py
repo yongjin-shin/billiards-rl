@@ -162,3 +162,57 @@ def test_eval_load_run_rebuilds_a_cascade_with_several_aim_encoders(tmp_path):
     with torch.no_grad():
         assert torch.allclose(got.forward_full(rel)["aim"], pol.forward_full(rel)["aim"], atol=1e-6)
     assert len(got.aim_ensemble) == 2 and float(got.aim_std) == 38.0
+
+
+# ── aim-centred refine / select (inference options) ──
+
+def _geo_policy() -> PairGNNPolicy:
+    torch.manual_seed(3)
+    m = PairGNNPolicy(hidden=16, made2_head=True, made2_geom=True)          # exact aim (no aim encoder) is enough for these tests
+    m.refine_deg = (-0.1, 0.0, 0.1); m.refine_speed_abs = (1.0, 2.0)
+    return m
+
+
+def test_refine_candidates_are_centred_on_the_proposal_the_aim_or_both():
+    m = _geo_policy()
+    a = torch.tensor([[0.1, -0.2], [-0.3, 0.4]]); aim_u = torch.tensor([0.12, -0.31])
+    m.refine_center = "proposal"
+    assert torch.equal(m._refine_candidates(a, None), m._unit_offsets(a))
+    m.refine_center = "aim"
+    c = m._refine_candidates(a, aim_u)
+    assert c.shape == (2, 6, 2) and torch.allclose(c[:, :, 0].mean(1), aim_u, atol=1e-6)     # symmetric grid around the aim
+    assert torch.allclose(c[..., 1], m._unit_offsets(a)[..., 1])                              # same absolute speeds
+    m.refine_center = "both"
+    cb = m._refine_candidates(a, aim_u)
+    assert cb.shape == (2, 12, 2) and torch.equal(cb[:, :6], m._unit_offsets(a)) and torch.allclose(cb[:, 6:], c)
+    m.refine_center = "nonsense"
+    with pytest.raises(ValueError):
+        m._refine_candidates(a, aim_u)
+
+
+def test_select_angle_aim_returns_the_aim_with_the_proposal_speed_and_default_is_unchanged():
+    m = _geo_policy(); rel = _rel(5, seed=8)
+    m.infer = "select"
+    with torch.no_grad():
+        base = m.predict_unit(rel)
+        o = m.forward_full(rel); k = o["logits"].argmax(1); r = torch.arange(5)
+        m.select_angle = "aim"
+        got = m.predict_unit(rel)
+    want_angle = PairGNNPolicy._geometric_aim(rel)[r, k] / np.pi
+    assert torch.allclose(got[:, 0], want_angle.clamp(-1, 1), atol=1e-6) and torch.allclose(got[:, 1], base[:, 1])
+    assert torch.allclose(base, o["means"][r, k])                                             # default: the proposal
+
+
+def test_verify_refine_with_an_aim_centred_grid_picks_a_candidate_of_that_grid():
+    m = _geo_policy(); rel = _rel(4, seed=9)
+    m.infer, m.refine_center = "verify_refine", "aim"
+    with torch.no_grad():
+        act = m.predict_unit(rel)
+        o = m.forward_full(rel)
+        sc = (torch.log_softmax(o["logits"], 1) + torch.nn.functional.logsigmoid(m.made2_logits(o, o["means"])))
+        k = sc.argmax(1); r = torch.arange(4)
+        cand = m._refine_candidates(o["means"][r, k], m._aim_unit(o, r, k))
+    assert all(any(torch.allclose(act[i], cand[i, j], atol=1e-6) for j in range(cand.shape[1])) for i in range(4))
+    m2 = PairGNNPolicy(hidden=16, made2_head=True); m2.infer, m2.refine_center = "verify_refine", "aim"   # no aim available
+    with pytest.raises(ValueError):
+        m2.predict_unit(rel)
