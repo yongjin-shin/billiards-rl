@@ -665,6 +665,7 @@ policy의 shot 실패 분해(robust+pairs, val): chosen pair miss ~24%, chosen p
 - lr decay 단독: 전체 데이터에서 도움 없음(robust 6.18 → 12.25).
 - **angle wrap-aware loss** (2026-10-09): val loss 이상(±180° seam spike)의 원인이었고 함수는 수학적으로 검증됐지만(주기, 범위, sin/cos 일치), 3 seeds 모두에서 policy가 나빠짐(4.51→5.59 shots; lr 3e-4에서도 4.94). 검증으로 기각된 가설: Adam 브레이크(step당 update 크기 0.0499 vs 0.0525로 동일), tanh seam trap(갇힌 출력 0개, non-seam label의 회귀 오차 동일). 원인 미규명 → 기본값은 raw loss 유지, `--angle-wrap` opt-in. 규명하려면 epoch별 학습 곡선이 갈라지는 시점 추적(미실행).
 - margin v2 no-pairs(WTA) baseline: queue script 오류로 미실행, pair supervision이 대체해서 필요하면 나중에.
+- **타점(회전) 행동** (2026-10-15 확인, 보류): 시뮬레이터는 (각도, 속도)만 정하고 타점은 pooltool 기본값으로 **모든 샷이 좌우 중앙(`a=0`)·중심보다 위(`b=0.25`, 밀어치기)·큐 수평(`theta=0`)으로 고정**이다(`simulator.py` `strike(phi, V0)`). pooltool은 좌우 회전 `a`, 밀어치기·끌어치기 `b`, 큐 각도 `theta`를 지원하므로 행동을 (각도, 속도, a, b)로 넓힐 수 있다 — 다음 샷을 위한 수구 위치 조절·scratch 회피용. 지금은 고정 타점으로 한 샷을 제대로 넣는 것이 먼저라 보류. 다시 볼 때 첫 단계: 기하 planner(2.24 shots)에 회전 탐색을 더한 상한부터.
 
 ---
 
