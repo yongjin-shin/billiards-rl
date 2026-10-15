@@ -6172,3 +6172,15 @@ made head 입력(`a − â`, `a − 조준각`)의 정의는 바꾸지 않는다
 
 **판단표**: 게임은 **G=** (AIM −0.004, BOTH +0.015, 둘 다 |Δ| < 0.05) — 격자 중심을 옮겨도 이득이 없어 추론 변경은 하지 않는다. made head가 제안 주변 ±0.3° 안에서 이미 잘 고르고 있다. **action은 A+** (sel-AIM이 select보다 +4.8%p, seed 5개 모두 +2.8~+6.8%p): pair head의 각도를 학습한 조준각으로 바꾸면 made head 없이도 한 샷 성공률이 크게 오른다.
 **다음 후보 (A+의 후속)**: 학습한 조준각으로 pair head 제안 자체를 보정 — 예: verify가 각 pair를 평가하는 점(지금은 제안 `â`)을 (조준각, 제안 속도)로 바꾸기, 또는 pair head가 조준각을 입력으로 받아 잔차만 예측하게 학습. 이번 E12는 refine 격자만 바꾸고 verify의 평가점은 바꾸지 않았다.
+
+### E13: verify의 pair 평가점을 학습한 조준각으로 (추론만, E11 모델 seed 0~4, 2026-10-16 계획, 결과 보기 전)
+
+**왜**: E12에서 pair head 각도를 학습한 조준각으로 바꾸면 select val clean이 +4.8%p(5/5) 올랐다. 지금 verify는 pair마다 `log softmax(selection) + log P(made | 제안 â_ij)`로 pair를 고르는데, 이 평가점이 pair head 제안이라 제안이 빗나간 pair는 과소평가될 수 있다. 실패의 59%가 verify가 teacher와 다른 pair를 고른 state에서 나왔다(이전 분석).
+**변경점 (추론 옵션 하나, `verify_point`)**: verify의 평가점을 pair마다 (학습한 조준각_ij, 제안 속도_ij)로 바꾼다. refine(격자 중심 = 선택된 pair의 제안)과 made head 입력 정의는 그대로. 비교는 E11 base(verify_point = proposal).
+**평가**: ① val clean(seed 0~4), verify가 teacher와 같은 pair를 고른 비율 ② 짝지은 2000판(seed 0~4).
+
+| # | 관측 (짝지은 2000판, seed 5개) | 다음 |
+|---|---|---|
+| G+ | base 대비 평균 Δshots ≤ −0.05이고 5개 중 4개 이상 개선 | 표준 추론으로 채택 |
+| G= | 평균 |Δ| < 0.05 | 추론 변경 불필요 |
+| G− | 평균 Δ ≥ +0.05 | 기각 |

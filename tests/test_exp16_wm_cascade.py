@@ -216,3 +216,23 @@ def test_verify_refine_with_an_aim_centred_grid_picks_a_candidate_of_that_grid()
     m2 = PairGNNPolicy(hidden=16, made2_head=True); m2.infer, m2.refine_center = "verify_refine", "aim"   # no aim available
     with pytest.raises(ValueError):
         m2.predict_unit(rel)
+
+
+def test_verify_point_aim_scores_each_pair_at_its_aim_with_its_proposal_speed():
+    m = _geo_policy(); rel = _rel(6, seed=10)
+    m.infer = "verify"
+    with torch.no_grad():
+        base = m.predict_unit(rel)
+        o = m.forward_full(rel)
+        assert torch.equal(m._verify_points(o), o["means"])                                  # default unchanged
+        m.verify_point = "aim"
+        pts = m._verify_points(o)
+        assert torch.allclose(pts[..., 0], (PairGNNPolicy._geometric_aim(rel) / np.pi).clamp(-1, 1), atol=1e-6)
+        assert torch.equal(pts[..., 1], o["means"][..., 1])
+        got = m.predict_unit(rel)
+        sc = torch.log_softmax(o["logits"], 1) + torch.nn.functional.logsigmoid(m.made2_logits(o, pts))
+        k = sc.argmax(1)
+    assert torch.allclose(got, o["means"][torch.arange(6), k])                                # verify picks with the aim points, plays the proposal
+    m.verify_point = "x"
+    with pytest.raises(ValueError):
+        m.predict_unit(rel)

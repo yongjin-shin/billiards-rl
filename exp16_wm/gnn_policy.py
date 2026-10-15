@@ -126,6 +126,7 @@ class PairGNNPolicy(nn.Module):
         self.refine_speed_abs: tuple[float, ...] | None = None   # m/s, instead of refine_speed (independent of the proposal)
         self.refine_center = "proposal"                 # refine grid centred on: proposal | aim (made2_geom's aim) | both (union)
         self.select_angle = "proposal"                  # select / verify action angle: proposal | aim (diagnostic)
+        self.verify_point = "proposal"                  # verify scores each pair's P(made) at: proposal | aim (aim angle, proposal speed)
         self.hidden, self.enc_layers = H, enc_layers
         # input representation: each 2-D coordinate (ball position, ball-ball difference, pocket position, ball→pocket vector)
         # can be extended with Fourier features sin/cos(2^k π x / FOURIER_SCALE), k = 0 … fourier − 1 (Tancik et al. 2020)
@@ -331,6 +332,18 @@ class PairGNNPolicy(nn.Module):
         v = o["valid"]
         return F.binary_cross_entropy_with_logits(z[v], target[v])
 
+    def _verify_points(self, o: dict[str, torch.Tensor]) -> torch.Tensor:
+        """(B, 18, 2) the action at which verify scores each pair: its proposal, or (its aim, its proposal's speed)."""
+        if self.verify_point == "proposal":
+            return o["means"]
+        if self.verify_point != "aim":
+            raise ValueError(f"unknown verify_point {self.verify_point!r}")
+        if "aim" not in o:
+            raise ValueError("verify_point 'aim' needs made2_geom (an exact or learned aim)")
+        d = o["aim"] - self.act_bias[0]
+        aim_u = (torch.atan2(torch.sin(d), torch.cos(d)) / self.act_scale[0]).clamp(-1.0, 1.0)
+        return torch.stack([aim_u, o["means"][..., 1]], dim=-1)
+
     def _aim_unit(self, o: dict[str, torch.Tensor], rows: torch.Tensor, k: torch.Tensor) -> torch.Tensor:
         """(B,) the aim of pair k (made2_geom's exact or learned aim) as a unit action angle."""
         if self.select_angle not in ("proposal", "aim") or self.refine_center not in ("proposal", "aim", "both"):
@@ -381,7 +394,7 @@ class PairGNNPolicy(nn.Module):
         if self.infer != "select" and not self.has_made2:
             raise ValueError(f"infer={self.infer} needs made2_head")
         if self.infer in ("verify", "verify_refine"):
-            score = F.log_softmax(score, dim=1) + F.logsigmoid(self.made2_logits(o, o["means"]))
+            score = F.log_softmax(score, dim=1) + F.logsigmoid(self.made2_logits(o, self._verify_points(o)))
         rows = torch.arange(len(score))
         k = score.argmax(dim=1)
         a = o["means"][rows, k]
