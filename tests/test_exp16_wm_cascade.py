@@ -236,3 +236,53 @@ def test_verify_point_aim_scores_each_pair_at_its_aim_with_its_proposal_speed():
     m.verify_point = "x"
     with pytest.raises(ValueError):
         m.predict_unit(rel)
+
+
+def test_all_pairs_picks_the_best_made_logit_over_every_live_pair_grid():
+    m = _geo_policy(); rel = _rel(5, seed=11)
+    rel = rel.clone(); rel[0, 3:6] = torch.tensor([0.0, 0.0, 1.0])                          # state 0: ball 1 pocketed → its 6 pairs are invalid
+    with torch.no_grad():
+        o = m.forward_full(rel)
+        d = o["aim"] - m.act_bias[0]; aim_u = (torch.atan2(torch.sin(d), torch.cos(d)) / m.act_scale[0]).clamp(-1, 1)
+        for mode in ("all_pairs", "all_pairs_prior"):
+            m.infer = mode
+            got = m.predict_unit(rel)
+            for b in range(5):                                                             # brute force over (pair, candidate)
+                best, best_a = -float("inf"), None
+                for j in range(18):
+                    if not o["valid"][b, j]:
+                        continue
+                    cand = m._unit_offsets(torch.stack([aim_u[b, j], o["means"][b, j, 1]])[None])
+                    z = D_made_logit(m, o, b, j, cand)
+                    sc = z if mode == "all_pairs" else torch.log_softmax(o["logits"][b], 0)[j] + torch.nn.functional.logsigmoid(z)
+                    if sc.max() > best:
+                        best, best_a = sc.max(), cand[0, sc.argmax()]
+                assert torch.allclose(got[b], best_a, atol=1e-6), (mode, b)
+    m.infer = "all_pairs"
+    with pytest.raises(ValueError):
+        PairGNNPolicy(hidden=16, made2_head=True).__class__.predict_unit(_noaim(), rel)
+
+
+def D_made_logit(m, o, b, j, cand):
+    """Made logits of pair j for candidates cand (1, C, 2), built independently from the policy's feature layout (incl. the aim term)."""
+    from exp16_wm.gnn_policy import action_diff
+    C = cand.shape[1]
+    feats = [o["e"][b, j][None, None].expand(1, C, -1), cand,
+             action_diff(cand, o["means"][b, j][None, None].expand(1, C, -1)) * m.made2_scale,
+             m._geom_feature(o["aim"][b, j][None, None].expand(1, C), cand[..., 0])]
+    return m.head_made2(torch.cat(feats, dim=-1)).squeeze(-1)[0]
+
+
+def _noaim():
+    m = PairGNNPolicy(hidden=16, made2_head=True); m.infer = "all_pairs"; return m
+
+
+def test_diagnose_made_logit_includes_the_aim_term_and_matches_the_refine_path():
+    from exp16_wm.diagnose_action import made_logit
+    m = _geo_policy(); rel = _rel(3, seed=12)
+    with torch.no_grad():
+        o = m.forward_full(rel); k = torch.tensor([0, 7, 12]); r = torch.arange(3)
+        cand = m._unit_offsets(o["means"][r, k])
+        z = made_logit(m, o, k, cand)
+        want = torch.stack([D_made_logit(m, o, b, int(k[b]), cand[b:b + 1]) for b in range(3)])
+    assert torch.allclose(z, want, atol=1e-6)

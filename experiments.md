@@ -6196,3 +6196,23 @@ made head 입력(`a − â`, `a − 조준각`)의 정의는 바꾸지 않는다
 
 **판단표: G=** (평균 +0.043로 |Δ| < 0.05; G−의 기준 +0.05 바로 아래). 다만 **5개 seed 모두 같은 방향으로 약간 나쁘다** — 채택하지 않는다. teacher와 같은 pair를 고르는 비율은 +1.0%p 올랐지만 성공률은 오르지 않았다.
 **해석(가설, 미검증)**: made head는 제안 주변의 행동을 평가하도록 학습됐고(입력 `a − â`), 조준각은 공식 조준각이라 teacher 각도의 물리 보정(중앙값 0.02°, 큰 경우 0.15°)이 없다. 그래서 조준각 점에서 잰 P(made)가 pair를 고르는 데 더 나은 신호가 아니다. E12(격자 중심 이동)와 합치면, **학습한 조준각은 made head 입력으로 쓸 때 효과가 있고 추론 시 행동 자리를 바꾸는 데는 효과가 없다.**
+
+### E14: pair head·selection 없이 made head만으로 고르기 (추론만, E11 모델 seed 0~4, 2026-10-16 계획, 결과 보기 전)
+
+**왜 (사용자 질문: pair head는 왜 필요한가, teacher는 왜 필요한가)**: 실제 경기(verify + refine)에서 pair head의 역할은 격자 중심(학습한 조준각으로 바꿔도 같음, E12), verify 평가점(조준각으로 바꾸면 약간 나쁨, E13), made head 입력 `a − â`뿐이다. pair 선택의 사전 확률(selection head)은 teacher의 pair 선택을 배운 것이다. 이 둘 없이 made head만으로 pair와 행동을 함께 고르면 어떻게 되는지 본다.
+**변경점 (추론 모드 하나)**: 모든 live pair에 대해 (학습한 조준각_ij ± 0.3°, 0.02° 간격) × 절대 속도 7개 = pair당 217 후보를 만들고, 각 후보를 그 pair의 made head로 평가한다.
+
+| 변형 | 고르는 기준 |
+|---|---|
+| base | E11 그대로 (verify로 pair 하나 → 그 pair의 제안 주변 217 후보) |
+| **ALL** | 모든 pair × 217 후보 중 made head logit 최대 (selection 사전 확률 없음) |
+| **ALL+prior** | 모든 pair × 217 후보 중 `log softmax(selection)_ij + log P(made)` 최대 |
+
+made head는 그대로이므로 입력 `a − â`에는 pair head 제안이 남는다(완전히 없애려면 재학습 필요).
+**평가**: val clean·teacher와 같은 pair 비율(seed 0~4), 짝지은 2000판(seed 0~4, ALL과 ALL+prior).
+
+| # | 관측 (짝지은 2000판, seed 5개, base 대비) | 해석 |
+|---|---|---|
+| G+ | 평균 Δshots ≤ −0.05, 5개 중 4개 이상 개선 | made head만으로 고르는 쪽이 낫다 → 표준 추론 후보 |
+| N | −0.05 < 평균 Δ < +0.05 | 실제 경기에서 selection 사전 확률과 격자 중심용 pair head는 필요 없다(같은 성능) |
+| G− | 평균 Δ ≥ +0.05 | selection 사전 확률(teacher의 pair 선택)이 필요하다 |

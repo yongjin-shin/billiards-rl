@@ -332,6 +332,35 @@ class PairGNNPolicy(nn.Module):
         v = o["valid"]
         return F.binary_cross_entropy_with_logits(z[v], target[v])
 
+    def _all_pairs_action(self, o: dict[str, torch.Tensor]) -> torch.Tensor:
+        """
+        infer = all_pairs(_prior): for every live pair, the refine grid around (its aim, its proposal's speed); the action is the
+        candidate with the highest made logit over all pairs (all_pairs) or the highest log softmax(selection) + log P(made) (_prior).
+        Pairs are scored one at a time to keep memory at B × C.
+        """
+        if not self.has_made2 or "aim" not in o:
+            raise ValueError("infer=all_pairs needs made2_head and made2_geom (an aim)")
+        B = o["e"].shape[0]
+        d = o["aim"] - self.act_bias[0]
+        aim_u = (torch.atan2(torch.sin(d), torch.cos(d)) / self.act_scale[0]).clamp(-1.0, 1.0)              # (B, 18)
+        prior = F.log_softmax(o["logits"], dim=1) if self.infer == "all_pairs_prior" else None
+        best, best_a = torch.full((B,), -float("inf")), torch.zeros(B, 2)
+        for j in range(o["e"].shape[1]):
+            cand = self._unit_offsets(torch.stack([aim_u[:, j], o["means"][:, j, 1]], dim=-1))              # (B, C, 2)
+            C = cand.shape[1]
+            feats = [o["e"][:, j][:, None].expand(-1, C, -1), cand,
+                     action_diff(cand, o["means"][:, j][:, None].expand(-1, C, -1)) * self.made2_scale]
+            if self.made2_geom:
+                feats.append(self._geom_feature(o["aim"][:, j][:, None].expand(-1, C), cand[..., 0]))
+            z = self.head_made2(torch.cat(feats, dim=-1)).squeeze(-1)                                       # (B, C)
+            sc = z if prior is None else prior[:, j][:, None] + F.logsigmoid(z)
+            sc = sc.masked_fill(~o["valid"][:, j][:, None], -float("inf"))
+            top, arg = sc.max(dim=1)
+            better = top > best
+            best = torch.where(better, top, best)
+            best_a = torch.where(better[:, None], cand[torch.arange(B), arg], best_a)
+        return best_a
+
     def _verify_points(self, o: dict[str, torch.Tensor]) -> torch.Tensor:
         """(B, 18, 2) the action at which verify scores each pair: its proposal, or (its aim, its proposal's speed)."""
         if self.verify_point == "proposal":
@@ -388,6 +417,8 @@ class PairGNNPolicy(nn.Module):
           verify_refine : both
         """
         o = self.forward_full(rel)
+        if self.infer in ("all_pairs", "all_pairs_prior"):
+            return self._all_pairs_action(o)
         score = o["logits"]
         if self.has_scratch and self.scratch_lambda > 0:
             score = score - self.scratch_lambda * torch.sigmoid(o["scratch_logit"])
