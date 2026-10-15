@@ -409,6 +409,11 @@ def train_bc(agent: VanillaSAC, data: dict[str, np.ndarray], train: np.ndarray, 
             "aux_history": aux_history, "last_state": last_state, "stop_reason": stop_reason}
 
 
+def train_seed(seed: int, init_seed: int | None) -> int:
+    """Seed of the weight initialisation and the batch order: --init-seed if given, else --seed (the train/val split always follows --seed)."""
+    return seed if init_seed is None else init_seed
+
+
 def train_plateau_converged(train_losses: list[float], window: int, tol: float) -> bool:
     """True when the lowest loss of the last `window` epochs is not more than `tol` (relative) below the lowest before them."""
     if window <= 0 or len(train_losses) < 2 * window:
@@ -568,6 +573,9 @@ def parse_args():
     p.add_argument("--geom-aux-weight", type=float, default=0.0,
                    help="> 0: auxiliary look-ahead of geometry — a head on each pair embedding predicts the pocket entry deviation, "
                         "the ball's cushion distance and the blockers on the two shot paths (training only); this is the loss weight")
+    p.add_argument("--init-seed", type=int, default=None,
+                   help="seed of the weight initialisation and the batch order (default: --seed); the train/val split always follows --seed. "
+                        "For ensembles of models on the same split")
     p.add_argument("--input-fourier", type=int, default=0,
                    help="GNN input representation: add sin/cos Fourier features at this many octaves to every 2-D coordinate")
     p.add_argument("--train-plateau", type=int, default=0,
@@ -708,7 +716,7 @@ def main():
                                                             if args.selection == "factorized" else "")) + \
             ("" if args.gnn_hidden == 128 or args.model != "gnn" else f"_H{args.gnn_hidden}") + \
             ("" if args.gnn_layers == 2 or args.model != "gnn" else f"_L{args.gnn_layers}") + \
-            ("_sl1" if args.speed_loss == "l1" else "") + (f"_sb{args.speed_bins}" if args.speed_bins else "") + ("_kw" if args.uncertainty_weights else "") + (f"_ga{args.geom_aux_weight:g}" if args.geom_aux_weight > 0 else "") + ("_aim" if args.geom_aux_weight > 0 and args.geom_aux_set == "aim" else "") + ("_auxonly" if args.aux_only else "") + ("_init" if args.init_from else "") + (f"_ff{args.input_fourier}" if args.input_fourier else "") + \
+            ("_sl1" if args.speed_loss == "l1" else "") + (f"_sb{args.speed_bins}" if args.speed_bins else "") + ("_kw" if args.uncertainty_weights else "") + (f"_ga{args.geom_aux_weight:g}" if args.geom_aux_weight > 0 else "") + ("_aim" if args.geom_aux_weight > 0 and args.geom_aux_set == "aim" else "") + ("_auxonly" if args.aux_only else "") + (f"_i{args.init_seed}" if args.init_seed is not None else "") + ("_init" if args.init_from else "") + (f"_ff{args.input_fourier}" if args.input_fourier else "") + \
             ("_geoang" if args.geom_angle else "") + extra_tag + (f"_m2w{args.made2_weight:g}" if args.made2_head else "") + ("geo" if args.made2_geom else "") + ("L" if args.made2_aim_from else "") + ("_wrap" if args.angle_wrap else "_nowrap")
     name = (f"exp16_bc_{teacher}_{args.loss}{h_tag}_a{args.angle_scale_deg:g}_v{args.speed_scale:g}"
             f"_s{args.seed}_{time.strftime('%Y-%m-%d@%H%M')}")
@@ -718,6 +726,8 @@ def main():
           f"(train {train.sum()}, val {val.sum()}), teacher shot success {np.mean(data['pocketed'] > 0)*100:.1f}%",
           flush=True)
 
+    if args.init_seed is not None:                                   # another initialisation on the same split
+        torch.manual_seed(train_seed(args.seed, args.init_seed))
     if args.model == "gnn":
         agent = PairGNNPolicy(args.gnn_hidden, args.wta_eps, args.sel_weight,
                               factorized=args.selection == "factorized", scratch_head=args.scratch_head,
@@ -747,7 +757,7 @@ def main():
 
     t0 = time.time()
     fit = train_bc(agent, data, train, val, args.loss, args.epochs, args.batch, args.lr,
-                   args.patience, args.seed, w=dim_weights(args.angle_scale_deg, args.speed_scale),
+                   args.patience, train_seed(args.seed, args.init_seed), w=dim_weights(args.angle_scale_deg, args.speed_scale),
                    select=args.select, lr_schedule=args.lr_schedule, lr_final_frac=args.lr_final_frac,
                    use_pairs=args.pair_supervision or modular, selection=args.selection, use_extras=modular,
                    sims=sims, made2_weight=args.made2_weight, sims_batch=args.sims_batch,

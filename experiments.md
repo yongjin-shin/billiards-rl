@@ -6075,3 +6075,23 @@ seed 1·2 조준각 encoder 8개는 모두 지정 epoch 완주. 짝지은 2000�
 **판단표: C1 행** (control 대비 평균 Δshots −0.170 ≤ −0.09, seed 3개 모두 개선: −0.199 / −0.224 / −0.087). **action 표식 없음**: select −0.4%p(기준 2%p), 각도 오차 −0.002°. seed 0의 select −2.5%p는 seed 편차였다(seed 1 +1.1%p, seed 2 +0.1%p).
 **결론**: **학습만으로 얻은 조준각(조준각 encoder 4개의 원형 평균)을 made head에 주는 cascade가, 정확한 공식 조준각(E2, 진단)의 게임 이득 −0.183 shots 중 −0.170(약 93%)을 가져온다.** 추론 때 기하 공식은 쓰지 않는다. action(pair head)은 유지된다. 사용자 목표(made head 향상 + action 유지)를 충족하는 첫 구성이다 → **채택 후보**.
 **한계**: seed 3개(seed 2는 −0.087 ± 0.050로 효과가 작음). 조준각 encoder 4개는 학습 길이·스케줄만 다르다(같은 split, 같은 초기화 seed). 추론 비용(encoder 4개를 더 도는 것)은 아직 재지 않았다. teacher(2.98)·완벽한 verifier(3.02)와의 격차는 0.4 shots 남는다.
+
+### 추론 비용 (2026-10-15, seed 0 모델, CPU)
+
+샷 하나 결정(verify+refine, 217 후보) 시간: control 0.35 ms, E2(정확한 조준각) 0.39 ms, E7(조준각 encoder 1개) 0.55 ms, **E9(4개) 1.11 ms**(thread 1·4 같음). 참고: 시뮬레이터 확인 한 번 3.72 ms, 완벽한 verifier는 샷당 약 11회 ≈ 41 ms. E9는 control의 약 3배지만 시뮬레이터 검증의 약 1/40이다.
+
+### E11: 같은 길이 앙상블(초기화 seed만 다름) × seed 5개 (2026-10-15 계획, 결과 보기 전)
+
+**왜 (사용자 제안: 2번과 3번을 동시에)**: 앙상블의 조건은 정밀한 구성원 + 독립 오차이고 학습 길이를 섞을 필요는 없다(사후 분석). 더 단순·저렴한 구성(같은 split에서 초기화만 바꾼 2000 epoch encoder 4개, 합계 8,000 epoch; 기존 13,000 epoch)을 seed 0~4 전부에 적용해 (a) seed 0~2에서 기존 구성(E9)과 직접 비교하고 (b) seed 5개로 효과를 확인한다.
+**변경점**: 조준각 encoder를 seed마다 `--init-seed 1/2/3/4`, 2000 epoch(`--patience 100000 --save-last`, 1 thread)로 학습(`logs/experiments_aim_ens2000`). cascade는 E9와 같고 조준각 encoder만 이 4개(`logs/experiments_cascade_ensI`). seed 3·4는 깊이 4 control이 없어 같은 코드로 새로 학습한다(`--pair-supervision --no-wta-fallback --made2-head --gnn-layers 4`, `logs/experiments_ctrlL4`). `--init-seed`는 이번에 추가(기본값이면 이전과 동일함을 epoch 0 값으로 확인).
+**평가**: seed별 짝지은 2000판(같은 배치; seed 0~2는 기존 control·E9 기록 재사용), `eval_by_balls`(clean v+r, 각도, select). 참고로 seed 0에서 새 앙상블의 조준각 정밀도(control verify pair)를 기존 4개 평균(0.1° 이상 10.0%)과 비교한다.
+
+| # | 관측 | 해석 | 다음 |
+|---|---|---|---|
+| R= | seed 0~2에서 E11 − E9 평균의 절댓값 ≤ 0.05 shots | 새 구성이 기존과 같다 | 더 싼 새 구성을 표준으로 |
+| R− | E11이 E9보다 평균 0.05 넘게 나쁨 | 학습 길이를 섞은 구성이 낫다 | 기존 구성 유지 |
+| F5 | E11 − control: seed 5개 평균 ≤ −0.09이고 5개 중 4개 이상 개선 | 효과가 seed 5개에서 확인된다 | action 표식이 없으면 채택 |
+| F5− | 위에 못 미침 | 효과가 seed에 따라 불안정 | 원인 분석 |
+| action | select 평균 −2%p 넘게 또는 각도 오차 +0.009° 넘게 | 공유 encoder를 통한 action 손상 | stop-gradient 시험 |
+
+**한계(미리)**: seed 3·4의 control은 새로 학습한 것이다(seed 0~2 control은 같은 코드로 재현성이 확인된 이전 run). 4개 구성원의 초기화 seed(1~4)는 seed마다 같다(split이 달라 사실상 다른 모델).
