@@ -6230,3 +6230,18 @@ made head는 그대로이므로 입력 `a − â`에는 pair head 제안이 남�
 
 **판단표**: ALL은 **G−**(+0.059 ≥ +0.05, 0/5): **selection 사전 확률(teacher의 pair 선택을 배운 것)은 필요하다** — 없애면 teacher와 다른 pair를 더 자주 고르고(68.5%) 특히 seed 2·4에서 나빠진다. made head 점수만으로는 "어느 pair가 쉬운가"를 충분히 가리지 못한다. ALL+prior는 **N**(−0.017, |Δ| < 0.05): **pair head의 제안(격자 중심·verify 평가점)은 실제 경기에서 필요 없다** — selection 사전 확률 + 모든 pair의 학습한 조준각 격자 + made head로 같은 성능이 난다.
 **사용자 질문에 대한 답**: pair head의 행동 제안은 추론에서 빼도 된다(단 made head 입력 `a − â`에는 아직 남음 — 완전히 빼려면 재학습). teacher는 지금 **pair 선택**과 made head 학습 데이터를 위해 필요하다. teacher 없이 가려면 pair 선택의 정답도 시뮬레이터 결과에서 얻어야 한다(탐색 → 학습).
+
+### T1·T2: teacher 없이 — 모든 pair 후보 시뮬레이션 + made head만으로 학습·선택 (seed 0 먼저, 2026-10-16 계획, 결과 보기 전)
+
+**왜**: roadmap "teacher 없는 탐색 + 학습"의 첫 단계. E14에서 teacher가 아직 주는 것은 pair 선택 정답, made head 학습 데이터, state였다. 이번에는 **pair 선택 정답과 학습 데이터를 시뮬레이터로 대체**한다(state는 teacher 게임의 state를 그대로 쓴다 — T5에서 대체).
+**T1 (데이터)**: 모든 state(teacher label 파일의 state, train·val 모두)마다 **모든 live pair**에 대해, seed 0의 학습한 조준각(E11 조준각 encoder 4개 원형 평균) 주변 격자(각도 ±0.3°·0.02° 간격 31개 × 절대 속도 7개 = 217)에서 후보 8개를 균등하게 뽑아 시뮬레이션한다(made 18 pair + scratch). teacher 시뮬레이션과 같은 파일 형식(`logs/teacher_data/relabel_s1000/aimsims_s0/`). teacher의 행동·pair·시뮬레이션은 쓰지 않는다.
+**T2 (학습·선택)**: 새 정책(깊이 4)을 **made head loss만으로** 학습한다(`--made-only`: BC의 각도·속도·pair 선택 loss 없음, selection·pair head는 학습되지 않음). made head 입력에서 pair head 제안과의 차이 `a − â`를 뺀다(`--made2-no-proposal`: 입력 = [e_ij, a, wrap(a − 조준각)/0.2°]). 조준각은 E11과 같은 얼린 조준각 encoder 4개. 체크포인트는 val 시뮬레이션의 made BCE 최저. 추론은 E14의 `all_pairs`(모든 live pair × 217 후보 중 made logit 최대, selection 사전 확률 없음).
+**평가**: seed 0 짝지은 2000판(E11·control과 같은 배치), val clean, teacher와 같은 pair를 고른 비율(참고).
+
+| # | 관측 (seed 0, 짝지은 2000판) | 해석 | 다음 |
+|---|---|---|---|
+| T= | E11(3.377) 대비 |Δ| ≤ 0.05 | teacher 없이 teacher 기반과 같다 | seed 5개, 이어서 T4(공식 제거)·T5(state) |
+| T− | E11보다 0.05 넘게 나쁘지만 control(3.592)보다 0.05 넘게 좋다 | teacher 없이도 되지만 부족 | T3(성공 창 넓이 점수 / made head 앙상블) |
+| T0 | control 대비 개선이 0.05 미만 | made head만으로는 pair·행동 선택이 안 된다 | pair 간 보정(calibration) 분석 |
+
+**한계(미리)**: seed 1개(사용자 방식: seed 하나 먼저). state는 teacher 게임의 것. 후보는 학습한 조준각 주변 ±0.3°로 한정(그 밖의 샷은 고려하지 않음). 조준각 encoder 자체는 공식 정답으로 학습된 것(T4에서 대체).
