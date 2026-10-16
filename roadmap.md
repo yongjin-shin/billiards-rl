@@ -491,7 +491,26 @@ rssm_v5 재학습 시 이 `--batch-size` 옵션을 쓸 것. 단, 이 모델 크�
 | 사용자 (한 번) | AWS 가입·결제, Spot vCPU 한도("All Standard ... Spot Instance Requests") 64 이상 상향 요청, 예산 알림, **권한이 좁은 IAM 사용자**(EC2 켜기·조회·끄기 + S3 버킷 하나) 생성, 이 Mac에서 `aws configure`(키는 채팅에 붙이지 않음) |
 | Claude | `brew install awscli`, `requirements-cloud.txt`(지금 환경과 같은 버전: Python 3.13, torch 2.10 CPU, pooltool-billiards 0.5.0, numba 0.64 등 — 저장소에 의존성 파일이 아직 없음), `setup_cloud.sh`(uv로 Python 3.13, 환경 구성, 테스트 일부로 확인), 단계별 실행 스크립트(worker 수 인자), 정책 state 수집 병렬화, 서버 켜기·진행 확인·결과 회수·끄기 |
 **안전장치 (Claude 세션이 끊겨도 동작)**: ① 작업 끝에 결과를 S3에 올리고 서버 스스로 종료(종료 시 삭제 옵션) ② 켤 때 최대 사용 시간 예약 종료(예: 4시간) ③ AWS 예산 알림. 서버를 **켜는 것은 매번 사용자 확인**(또는 미리 정한 허용 범위 안에서), **끄는 것은 작업이 끝나면 바로**.
-**코드 전달**: GitHub push(사용자 결정) — 서버에서 clone. 데이터·모델은 수십 MB라 S3 또는 rsync.
+**코드 전달 (2026-10-16 변경)**: 처음 계획은 GitHub push 후 서버에서 clone이었다. 그런데 remote가 SSH 주소(`git@github.com:...`)라 서버가 clone하려면 deploy key나 token을 서버에 둬야 한다. 결과를 담을 S3 bucket을 어차피 만들기 때문에, **`git archive HEAD`로 만든 tar.gz(+ 추가로 넣을 데이터·모델)를 S3에 올리고 서버가 instance role로 내려받는** 방식으로 바꿨다. 서버에 비밀이 하나도 없고, 올린 것이 정확히 commit된 HEAD라 "같은 코드" 대조(같은 코드·같은 seed control)도 보장된다. 그래서 commit 안 된 tracked 변경이 있으면 launcher가 멈춘다.
+
+**현재 권한 상태 (2026-10-16 확인)**: `agent_machine`은 group `Agent`에 속하고 거기엔 `ReadOnlyAccess`와 `SignInLocalDevelopmentAccess`만 붙어 있다. 즉 계획에 적은 "EC2 켜기·끄기 + S3 bucket 하나" 권한은 아직 없고, Spot vCPU 한도 상향 요청도 거절됐다(`servicequotas:RequestServiceQuotaIncrease` 없음). 새 IAM 사용자를 따로 만드는 대신, 아래 stack이 `Agent` group에 **이 job에 필요한 최소 권한만** 붙인다(c7a.16xlarge 시작, project 태그가 붙은 instance 종료·SSM 명령, 이 bucket 쓰기, instance role PassRole). 키를 새로 만들거나 채팅에 붙일 일이 없다.
+
+**준비된 것 (이 branch, 아직 AWS에 아무것도 만들지 않음)**
+| 파일 | 역할 |
+|---|---|
+| `cloud/stack.yaml` | CloudFormation: results bucket(비공개·암호화·TLS만·60일 후 삭제), instance role(SSM + 이 bucket만), inbound 없는 security group, launch template(Spot c7a.16xlarge, IMDSv2, 암호화 EBS, 종료 동작 terminate), `Agent` group 최소 권한 policy, 월 예산 알림, Spot service-linked role(이 계정엔 아직 없음) |
+| `cloud/launch.py` | 코드 bundle → S3 → instance 시작. 기본은 **dry run**(EC2에 "이 launch가 허용되나"만 물어봄), `--go`를 줘야 실제로 시작. 최대 12시간 상한, 서버 안에서 `shutdown -h +N` 예약(command가 멈춰도 종료), 끝나면(실패해도) log·결과를 S3에 올리고 스스로 종료 |
+| `cloud/setup_cloud.sh` | 서버에서 uv → Python 3.13 → torch CPU wheel → `requirements-cloud.txt` → smoke test |
+| `requirements-cloud.txt` | 지금 `.venv`와 같은 버전(torch 2.10.0, pooltool-billiards 0.5.0, numba 0.64.0 …), 모두 `==` 고정 |
+| `tests/test_cloud_*.py` | stack 안전 속성(inbound 없음, IMDSv2, terminate, 권한에 `*` 없음 등)과 launcher(user-data 생성, 입력 검증, bundle) 31개 |
+
+**사용자가 할 일 (순서대로)**
+1. **Spot vCPU 한도 상향 요청**: Service Quotas 콘솔 → 리전 us-east-1 → Amazon EC2 → "All Standard (A, C, D, H, I, M, R, T, Z) Spot Instance Requests" → 64 이상. 승인까지 시간이 걸리므로 가장 먼저.
+2. **stack 배포 (한 번)**: `agent_machine`으로는 못 하므로 IAM·S3·Budgets 권한이 있는 본인 계정으로(콘솔 CloudFormation → Create stack → `cloud/stack.yaml` 업로드도 됨). 이메일은 예산 알림 수신 주소.
+   `aws cloudformation create-stack --region us-east-1 --stack-name billiards-rl-cloud --template-body file://cloud/stack.yaml --capabilities CAPABILITY_IAM --parameters ParameterKey=VpcId,ParameterValue=vpc-03f8ab9036f38afd9 ParameterKey=AlertEmail,ParameterValue=<이메일>` (vpc는 us-east-1 기본 VPC)
+3. 배포가 끝나면 Claude가 `launch.py` dry run으로 권한을 확인하고(비용 없음), 짧은 smoke job(약 10분, 약 $0.2)으로 `setup_cloud.sh`가 Linux에서 실제로 되는지 먼저 본다. **실제 launch는 그때 사용자에게 확인받고 시작한다.**
+
+**아직 못 한 검증**: `validate-template`(문법)만 통과. cfn-lint·cfn-guard는 설치돼 있지 않아 설치 승인 후 돌린다. `setup_cloud.sh`(특히 Linux x86_64에서 pooltool·numba·torch CPU wheel 설치)와 launch 권한은 위 3번의 smoke job 전에는 확인되지 않은 상태다.
 
 **branch 정리 (제안)**: 지금 `feature/exp16-imitation-teacher`가 원격보다 111 commit 앞서 있고, 최근 작업(teacher 없는 학습·루프)은 이름과 맞지 않는다. ① 지금 branch를 push하고 `dev`로 PR(CLAUDE.md: main 직접 merge 금지) ② 다음 단계(클라우드 실행 스크립트, 루프 반복, EE1~EE4)는 지금 HEAD에서 새 branch `feature/exp16-teacher-free`로.
 
