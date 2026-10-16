@@ -470,6 +470,20 @@ rssm_v5 재학습 시 이 `--batch-size` 옵션을 쓸 것. 단, 이 모델 크�
 
 판단 순서: EE1이 T5/L1과 같으면(±0.05) 얼림이 필요 없다 → 2단계를 1단계로 합친다. EE1이 나쁘면 EE2로 원인을 가르고, EE3로 앙상블을 시험한다. EE4는 EE1~3 중 하나가 된 뒤에.
 
+### 클라우드 실행 계획 (2026-10-16 정리, 미착수)
+
+**왜**: 루프 한 바퀴(약 2.5시간)의 대부분이 pooltool 시뮬레이션(CPU 전용)이고, EE1~EE3·seed 확인은 학습 run을 여러 개 동시에 돌려야 한다. GPU보다 **코어가 많은 CPU**가 맞다(시뮬레이션은 코어 수에 비례, 학습은 run을 병렬로). Mac GPU(MPS)는 학습 step 64 ms(CPU 8 thread 약 85 ms)로 이득이 작다.
+**선택**: AWS EC2 **Spot c7a.16xlarge**(64 vCPU, AMD, 코어당 성능 높음; 검색 기준 spot 약 $1.16/시간, on-demand $3.28). 대안: Oracle Ampere A1(ARM, 약 $0.83/시간 — 설치 호환성·느린 코어), Vultr VX1 64 vCPU(약 $1.44/시간, 회수 없음). 예상 비용: 루프 한 바퀴 약 1.2시간 ≈ $1.5, EE1~EE3(8 run 동시) 약 2시간 ≈ $2.5.
+**역할 분담**
+| 누가 | 할 일 |
+|---|---|
+| 사용자 (한 번) | AWS 가입·결제, Spot vCPU 한도("All Standard ... Spot Instance Requests") 64 이상 상향 요청, 예산 알림, **권한이 좁은 IAM 사용자**(EC2 켜기·조회·끄기 + S3 버킷 하나) 생성, 이 Mac에서 `aws configure`(키는 채팅에 붙이지 않음) |
+| Claude | `brew install awscli`, `requirements-cloud.txt`(지금 환경과 같은 버전: Python 3.13, torch 2.10 CPU, pooltool-billiards 0.5.0, numba 0.64 등 — 저장소에 의존성 파일이 아직 없음), `setup_cloud.sh`(uv로 Python 3.13, 환경 구성, 테스트 일부로 확인), 단계별 실행 스크립트(worker 수 인자), 정책 state 수집 병렬화, 서버 켜기·진행 확인·결과 회수·끄기 |
+**안전장치 (Claude 세션이 끊겨도 동작)**: ① 작업 끝에 결과를 S3에 올리고 서버 스스로 종료(종료 시 삭제 옵션) ② 켤 때 최대 사용 시간 예약 종료(예: 4시간) ③ AWS 예산 알림. 서버를 **켜는 것은 매번 사용자 확인**(또는 미리 정한 허용 범위 안에서), **끄는 것은 작업이 끝나면 바로**.
+**코드 전달**: GitHub push(사용자 결정) — 서버에서 clone. 데이터·모델은 수십 MB라 S3 또는 rsync.
+
+**branch 정리 (제안)**: 지금 `feature/exp16-imitation-teacher`가 원격보다 111 commit 앞서 있고, 최근 작업(teacher 없는 학습·루프)은 이름과 맞지 않는다. ① 지금 branch를 push하고 `dev`로 PR(CLAUDE.md: main 직접 merge 금지) ② 다음 단계(클라우드 실행 스크립트, 루프 반복, EE1~EE4)는 지금 HEAD에서 새 branch `feature/exp16-teacher-free`로.
+
 ### 그다음: 여러 단계(다음 샷)를 보는 RL
 - 지금 made head는 이번 샷만 본다. 과제의 목표(적은 샷으로 모두 넣기)에는 넣은 뒤 수구 위치(다음 샷이 쉬운가)도 중요하다.
 - 평가를 `Q(s, a) = P(made | s, a) × (1 + V(s'))` 꼴로 확장한다. `s'`는 시뮬레이터 또는 world model로 얻는다.
