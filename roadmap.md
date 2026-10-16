@@ -470,10 +470,21 @@ rssm_v5 재학습 시 이 `--batch-size` 옵션을 쓸 것. 단, 이 모델 크�
 
 판단 순서: EE1이 T5/L1과 같으면(±0.05) 얼림이 필요 없다 → 2단계를 1단계로 합친다. EE1이 나쁘면 EE2로 원인을 가르고, EE3로 앙상블을 시험한다. EE4는 EE1~3 중 하나가 된 뒤에.
 
-### 클라우드 실행 계획 (2026-10-16 정리, 미착수)
+### 클라우드 실행 계획 (2026-10-16 정리, AWS Spot c7a.16xlarge 사용 확정, 준비 중)
 
 **왜**: 루프 한 바퀴(약 2.5시간)의 대부분이 pooltool 시뮬레이션(CPU 전용)이고, EE1~EE3·seed 확인은 학습 run을 여러 개 동시에 돌려야 한다. GPU보다 **코어가 많은 CPU**가 맞다(시뮬레이션은 코어 수에 비례, 학습은 run을 병렬로). Mac GPU(MPS)는 학습 step 64 ms(CPU 8 thread 약 85 ms)로 이득이 작다.
 **선택**: AWS EC2 **Spot c7a.16xlarge**(64 vCPU, AMD, 코어당 성능 높음; 검색 기준 spot 약 $1.16/시간, on-demand $3.28). 대안: Oracle Ampere A1(ARM, 약 $0.83/시간 — 설치 호환성·느린 코어), Vultr VX1 64 vCPU(약 $1.44/시간, 회수 없음). 예상 비용: 루프 한 바퀴 약 1.2시간 ≈ $1.5, EE1~EE3(8 run 동시) 약 2시간 ≈ $2.5.
+**확인 결과 (2026-10-16, 읽기 전용 조회)**: 이 Mac의 AWS profile(`agent-toolkit`, IAM user `agent_machine`)은 기본 리전이 서울(`ap-northeast-2`)인데, **서울에는 c7a.16xlarge가 없다**(offering 조회 결과 없음). 같은 조회로 리전을 비교했다(최근 3시간 Spot 가격, Linux).
+| 리전 | c7a.16xlarge 제공 AZ 수 | Spot $/시간 (AZ별 범위) |
+|---|---|---|
+| **us-east-1** | 5 | 0.93~1.19 |
+| us-east-2 | 3 | 0.98~1.17 |
+| us-west-2 | 4 | 1.13~1.30 |
+| ap-southeast-1 | 3 | 0.92~1.50 |
+| eu-west-1 / eu-central-1 / ap-northeast-1 | 3 | 1.44~2.02 |
+→ **us-east-1 제안**: AZ가 가장 많아 Spot 풀이 많고(회수 위험 분산) 가격도 최저 구간. 이 학습은 배치라 한국과의 거리(지연)는 무관하다. 서울 기본 리전은 쓰지 않고 명령마다 `--region us-east-1`을 명시한다.
+**Spot vCPU 한도**: 모든 리전에서 "All Standard Spot Instance Requests" = **5** (64 vCPU 필요) → 선택한 리전에서 **64 이상으로 상향 요청**이 먼저다(승인까지 시간이 걸릴 수 있음).
+
 **역할 분담**
 | 누가 | 할 일 |
 |---|---|
