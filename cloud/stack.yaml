@@ -1,0 +1,321 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  Batch-training sandbox for billiards-rl - a results bucket, a Spot c7a.16xlarge launch template with a self-terminating
+  instance role, and a narrow write policy for the Agent IAM group, so a Claude session can start and stop only this job.
+Metadata:
+  AWSToolsMetrics:
+    AWSAgentToolkit: aws-cloudformation@3
+  com.aws.cloudformation.Context:
+    arch: "Mac(agent) -> S3(code+data) -> Spot EC2(no inbound, SSM only) -> S3(results) -> instance self-terminates"
+    must:
+      - "instance never takes inbound traffic; shell access only via SSM"
+      - "agent group may only start c7a.16xlarge from this launch template and stop instances tagged project=<ProjectTag>"
+      - "every launch ends in terminate (shutdown behavior + Spot interruption behavior)"
+    ref:
+      - { at: roadmap.md, has: "cloud execution plan, region choice, cost estimate, safety nets", scope: project }
+
+Parameters:
+  ProjectTag:
+    Type: String
+    Default: billiards-rl
+    AllowedPattern: "[a-z0-9-]{3,30}"
+    Description: Value of the project tag. Agent permissions to stop instances and run SSM commands are scoped to it.
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: VPC for the instance security group (the default VPC of the target Region is fine).
+  LatestAmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
+    Description: Amazon Linux 2023 x86_64 (SSM agent preinstalled).
+  VolumeSizeGb:
+    Type: Number
+    Default: 100
+    MinValue: 50
+    MaxValue: 500
+    Description: Root EBS size in GB (deleted on termination).
+  AgentGroupName:
+    Type: String
+    Default: Agent
+    Description: Existing IAM group the narrow write policy is attached to.
+  CreateSpotServiceLinkedRole:
+    Type: String
+    Default: "true"
+    AllowedValues: ["true", "false"]
+    Description: Create AWSServiceRoleForEC2Spot. Set false if the account already has it (creation fails when it exists).
+  AlertEmail:
+    Type: String
+    AllowedPattern: "[^@\\s]+@[^@\\s]+\\.[^@\\s]+"
+    Description: Address for the budget alerts.
+  MonthlyBudgetUsd:
+    Type: Number
+    Default: 30
+    MinValue: 1
+    Description: Monthly account cost budget in USD. Alerts at 80% actual and 100% forecast.
+
+Conditions:
+  CreateSpotSlr: !Equals [!Ref CreateSpotServiceLinkedRole, "true"]
+
+Resources:
+  SpotServiceLinkedRole:
+    Type: AWS::IAM::ServiceLinkedRole
+    Condition: CreateSpotSlr
+    Properties:
+      AWSServiceName: spot.amazonaws.com
+      Description: Lets EC2 launch and manage Spot Instances.
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: "first Spot launch in an account needs this role; absent on 2026-10-16"
+        must: ["account-wide singleton; if it exists already, deploy with CreateSpotServiceLinkedRole=false"]
+
+  ResultsBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      VersioningConfiguration:
+        Status: Enabled
+      LifecycleConfiguration:
+        Rules:
+          - Id: expire-old-runs
+            Status: Enabled
+            ExpirationInDays: 60
+            NoncurrentVersionExpiration:
+              NoncurrentDays: 7
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 2
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: "code bundle in, results out; replaces GitHub clone so no token lives on the instance. Retain: results outlive the stack"
+        must: ["private + encrypted", "name auto-generated (no hardcoded name)"]
+        mutable: review-required
+
+  ResultsBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref ResultsBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: "*"
+            Action: "s3:*"
+            Resource:
+              - !GetAtt ResultsBucket.Arn
+              - !Sub "${ResultsBucket.Arn}/*"
+            Condition:
+              Bool:
+                "aws:SecureTransport": "false"
+
+  InstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub "arn:${AWS::Partition}:iam::aws:policy/AmazonSSMManagedInstanceCore"
+      Policies:
+        - PolicyName: results-bucket-only
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: ["s3:GetObject", "s3:PutObject"]
+                Resource: !Sub "${ResultsBucket.Arn}/*"
+              - Effect: Allow
+                Action: "s3:ListBucket"
+                Resource: !GetAtt ResultsBucket.Arn
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: "instance reads the code bundle and writes results; SSM core = shell without SSH/keys"
+        must: ["S3 access limited to ResultsBucket", "no secrets on instance"]
+
+  InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref InstanceRole
+
+  InstanceSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: No inbound. Outbound open for package downloads and S3.
+      VpcId: !Ref VpcId
+      SecurityGroupIngress: []
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: "shell via SSM, so no port 22"
+        must: ["never add ingress; use SSM Session Manager or send-command"]
+
+  TrainingLaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateName: !Sub "${AWS::StackName}-c7a-16xlarge-spot"
+      LaunchTemplateData:
+        ImageId: !Ref LatestAmiId
+        InstanceType: c7a.16xlarge
+        IamInstanceProfile:
+          Arn: !GetAtt InstanceProfile.Arn
+        SecurityGroupIds:
+          - !GetAtt InstanceSecurityGroup.GroupId
+        InstanceInitiatedShutdownBehavior: terminate
+        InstanceMarketOptions:
+          MarketType: spot
+          SpotOptions:
+            SpotInstanceType: one-time
+            InstanceInterruptionBehavior: terminate
+        MetadataOptions:
+          HttpEndpoint: enabled
+          HttpTokens: required
+          HttpPutResponseHopLimit: 1
+        BlockDeviceMappings:
+          - DeviceName: /dev/xvda
+            Ebs:
+              VolumeSize: !Ref VolumeSizeGb
+              VolumeType: gp3
+              Encrypted: true
+              DeleteOnTermination: true
+        TagSpecifications:
+          - ResourceType: instance
+            Tags:
+              - { Key: project, Value: !Ref ProjectTag }
+              - { Key: Name, Value: !Sub "${ProjectTag}-train" }
+          - ResourceType: volume
+            Tags:
+              - { Key: project, Value: !Ref ProjectTag }
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: "c7a.16xlarge = 64 vCPU for pooltool simulation + parallel runs. Spot one-time: no persistent request left behind. Price cap left unset (defaults to on-demand) so price never blocks a run"
+        must:
+          - "shutdown behavior terminate: 'shutdown -h' ends the instance and its billing"
+          - "IMDSv2 required"
+          - "no user data here - the launcher passes bucket, job, deadline at run time"
+        mutable: review-required
+
+  AgentWritePolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      Description: Lets the Agent group start/stop only this project's c7a.16xlarge Spot job and use its bucket (reads come from ReadOnlyAccess).
+      Groups:
+        - !Ref AgentGroupName
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: RunFromThisLaunchTemplate
+            Effect: Allow
+            Action: "ec2:RunInstances"
+            Resource: !Sub "arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:launch-template/${TrainingLaunchTemplate}"
+          - Sid: RunOnlyC7a16xlarge
+            Effect: Allow
+            Action: "ec2:RunInstances"
+            Resource: !Sub "arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:instance/*"
+            Condition:
+              StringEquals:
+                "ec2:InstanceType": c7a.16xlarge
+          - Sid: RunSupportingResources
+            Effect: Allow
+            Action: "ec2:RunInstances"
+            Resource:
+              - !Sub "arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:volume/*"
+              - !Sub "arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:network-interface/*"
+              - !Sub "arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:spot-instances-request/*"
+              - !Sub "arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:subnet/*"
+              - !Sub "arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:security-group/${InstanceSecurityGroup.GroupId}"
+              - !Sub "arn:${AWS::Partition}:ec2:${AWS::Region}::image/*"
+          - Sid: TagOnLaunchOnly
+            Effect: Allow
+            Action: "ec2:CreateTags"
+            Resource: !Sub "arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:*/*"
+            Condition:
+              StringEquals:
+                "ec2:CreateAction": RunInstances
+          - Sid: TerminateProjectInstances
+            Effect: Allow
+            Action: "ec2:TerminateInstances"
+            Resource: !Sub "arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:instance/*"
+            Condition:
+              StringEquals:
+                "ec2:ResourceTag/project": !Ref ProjectTag
+          - Sid: PassOnlyTheInstanceRole
+            Effect: Allow
+            Action: "iam:PassRole"
+            Resource: !GetAtt InstanceRole.Arn
+            Condition:
+              StringEquals:
+                "iam:PassedToService": ec2.amazonaws.com
+          - Sid: SsmRunShellOnProjectInstances
+            Effect: Allow
+            Action: "ssm:SendCommand"
+            Resource: !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}::document/AWS-RunShellScript"
+          - Sid: SsmTargetProjectInstancesOnly
+            Effect: Allow
+            Action: "ssm:SendCommand"
+            Resource: !Sub "arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:instance/*"
+            Condition:
+              StringEquals:
+                "ssm:resourceTag/project": !Ref ProjectTag
+          - Sid: ResultsBucketWrite
+            Effect: Allow
+            Action: ["s3:PutObject", "s3:DeleteObject"]
+            Resource: !Sub "${ResultsBucket.Arn}/*"
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: "agent_machine is ReadOnly + sign-in only; this adds the minimum to run one job. Validate with 'aws ec2 run-instances --dry-run' (no launch, no cost)"
+        must:
+          - "no wildcard on actions; instance type pinned; terminate/SSM scoped by project tag"
+          - "PassRole only for InstanceRole"
+        mutable: must-never-change
+
+  MonthlyBudget:
+    Type: AWS::Budgets::Budget
+    Properties:
+      Budget:
+        BudgetType: COST
+        TimeUnit: MONTHLY
+        BudgetLimit:
+          Amount: !Ref MonthlyBudgetUsd
+          Unit: USD
+      NotificationsWithSubscribers:
+        - Notification:
+            NotificationType: ACTUAL
+            ComparisonOperator: GREATER_THAN
+            Threshold: 80
+            ThresholdType: PERCENTAGE
+          Subscribers:
+            - { SubscriptionType: EMAIL, Address: !Ref AlertEmail }
+        - Notification:
+            NotificationType: FORECASTED
+            ComparisonOperator: GREATER_THAN
+            Threshold: 100
+            ThresholdType: PERCENTAGE
+          Subscribers:
+            - { SubscriptionType: EMAIL, Address: !Ref AlertEmail }
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: "third safety net after self-shutdown and the launcher's deadline; covers the whole account, not just this project"
+        must: ["AlertEmail supplied at deploy time, never committed"]
+
+Outputs:
+  BucketName:
+    Description: Results bucket (code bundles under code/, results under runs/).
+    Value: !Ref ResultsBucket
+  LaunchTemplateId:
+    Description: Launch template the launcher starts instances from.
+    Value: !Ref TrainingLaunchTemplate
+  SecurityGroupId:
+    Description: Security group with no inbound rules.
+    Value: !GetAtt InstanceSecurityGroup.GroupId
