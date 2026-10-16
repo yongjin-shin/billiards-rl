@@ -628,8 +628,10 @@ class PairGNNPolicy(nn.Module):
         if not self.aux_dim:
             raise ValueError("aux_loss needs PairGNNPolicy(aux_dim > 0)")
         e, valid = self._encode(rel)
-        err = ((self.aux_head(e) - target) ** 2).mean(dim=-1)
-        return (err * valid).sum() / valid.sum().clamp(min=1)
+        known = torch.isfinite(target).all(dim=-1)                                  # NaN target = no target for that pair (masked)
+        err = ((self.aux_head(e) - torch.nan_to_num(target)) ** 2).mean(dim=-1)
+        w = (valid & known).float()
+        return (err * w).sum() / w.sum().clamp(min=1)
 
     def _pair_loss_kendall(self, rel: torch.Tensor, good_u: torch.Tensor, pairs: torch.Tensor, w: torch.Tensor) -> torch.Tensor:
         """

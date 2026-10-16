@@ -99,7 +99,7 @@ def load_run(run_dir: str) -> PairGNNPolicy:
                       made2_geom=bool(a.get("made2_geom")), enc_layers=a.get("gnn_layers", 2),
                       speed_loss=a.get("speed_loss", "mse"), speed_bins=int(a.get("speed_bins", 0)),
                       uncertainty_weights=bool(a.get("uncertainty_weights", False)),
-                      aux_dim=(1 if a.get("geom_aux_set") == "aim" else 4) if float(a.get("geom_aux_weight", 0) or 0) > 0 else 0,
+                      aux_dim=(1 if a.get("geom_aux_set") in ("aim", "scan") else 4) if float(a.get("geom_aux_weight", 0) or 0) > 0 else 0,
                       aim_encoder=aim_enc, fourier=int(a.get("input_fourier", 0) or 0), made2_no_proposal=bool(a.get("made2_no_proposal", False)))
     m.load_state_dict(torch.load(os.path.join(run_dir, "bc_model.pt"))["gnn"])
     return m.eval()

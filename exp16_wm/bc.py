@@ -43,7 +43,8 @@ from exp16_wm.geometry_aux import N_AUX, aim_targets, pair_geometry, standardize
 LOSSES = ("teacher", "nearest_good")
 
 # optional per-state arrays carried through load/split when every shard has them
-EXTRA_KEYS = ["good_pairs", "good_made", "good_scratch", "pair_n", "pair_made", "pair_any", "pair_scratch"]
+EXTRA_KEYS = ["good_pairs", "good_made", "good_scratch", "pair_n", "pair_made", "pair_any", "pair_scratch",
+              "aux_scan_center", "aux_scan_valid"]                 # the last two: simulator aim targets (--geom-aux-set scan), not in label files
 FACT_KEYS = ("good_made", "good_scratch", "pair_n", "pair_made", "pair_scratch")
 
 
@@ -446,10 +447,44 @@ def train_plateau_converged(train_losses: list[float], window: int, tol: float) 
     return recent > (1.0 - tol) * before
 
 
+def load_scan_targets(label_paths: list[str], target_dir: str) -> tuple[np.ndarray, np.ndarray]:
+    """Simulator aim targets (exp16_wm.aim_sims scan) aligned with load_teacher_data(label_paths): (centre (N, 18) deg, valid (N, 18))."""
+    cs, vs = [], []
+    for lp in sorted(label_paths):
+        tp = os.path.join(target_dir, os.path.basename(lp))
+        z = np.load(tp)
+        if len(z["scan_center_deg"]) != len(np.load(lp)["obs"]):
+            raise ValueError(f"{tp}: {len(z['scan_center_deg'])} rows, the label file {len(np.load(lp)['obs'])}")
+        cs.append(z["scan_center_deg"].astype(np.float32)); vs.append(z["scan_valid"].astype(bool))
+    return np.concatenate(cs), np.concatenate(vs)
+
+
+def aim_encoder_stats(run_dir: str) -> tuple[float, float]:
+    """
+    Target standardisation (mean, std in degrees) of an aux-only aim model, from its results.json if stored, else recomputed from its
+    own data, split and target set — never from the data of the run that uses the encoder (whose states can differ).
+    """
+    r = json.load(open(os.path.join(run_dir, "results.json")))
+    if "aux_mean" in r:
+        return float(r["aux_mean"][0]), float(r["aux_std"][0])
+    a = r["args"]
+    paths = sorted({q for pat in a["data"] for q in glob.glob(pat)})
+    raw = load_teacher_data(paths)
+    if a.get("geom_aux_set") == "scan":
+        raw["aux_scan_center"], raw["aux_scan_valid"] = load_scan_targets(paths, a["aux_target_dir"])
+    data, train, _ = build_split(raw, a.get("val_frac", 0.1), a["seed"], a.get("data_frac", 1.0), "none")
+    if a.get("geom_aux_set") == "scan":
+        t, v = data["aux_scan_center"][..., None], data["aux_scan_valid"]
+    else:
+        t, v = aim_targets(TRANSFORMS["relative"](data["obs"]))
+    _, mean, std = standardize(np.nan_to_num(t), v, train)
+    return float(mean[0]), float(std[0])
+
+
 def load_aim_encoder(run_dir: str) -> PairGNNPolicy:
     """An aux-only aim model (--geom-aux-set aim --aux-only): its last epoch's weights if saved (--save-last), else the selected best."""
     a = json.load(open(os.path.join(run_dir, "results.json")))["args"]
-    if not (a.get("aux_only") and a.get("geom_aux_set") == "aim"):
+    if not (a.get("aux_only") and a.get("geom_aux_set") in ("aim", "scan")):
         raise ValueError(f"{run_dir} is not an aux-only aim model")
     m = PairGNNPolicy(a["gnn_hidden"], enc_layers=a.get("gnn_layers", 2), aux_dim=1, fourier=int(a.get("input_fourier", 0) or 0))
     path = os.path.join(run_dir, "bc_model_last.pt")
@@ -611,8 +646,10 @@ def parse_args():
                    help="> 0: also stop when the training loss has converged over this many epochs (see --train-plateau-tol)")
     p.add_argument("--train-plateau-tol", type=float, default=0.01)
     p.add_argument("--save-last", action="store_true", help="also save the last epoch's weights (bc_model_last.pt) next to the selected best")
-    p.add_argument("--geom-aux-set", type=str, default="four", choices=["four", "aim"],
-                   help="auxiliary geometry targets: 'four' = entry deviation, cushion, two blockers; 'aim' = the exact ghost-ball aim of every pair")
+    p.add_argument("--geom-aux-set", type=str, default="four", choices=["four", "aim", "scan"],
+                   help="auxiliary geometry targets: 'four' = entry deviation, cushion, two blockers; 'aim' = the exact ghost-ball aim of every pair; "
+                        "'scan' = the simulator's success-window centre of every pair (exp16_wm.aim_sims scan, --aux-target-dir)")
+    p.add_argument("--aux-target-dir", type=str, default=None, help="--geom-aux-set scan: directory of the scan target files")
     p.add_argument("--init-from", type=str, default=None,
                    help="--model gnn: initialise the encoder and the aux head from this checkpoint (bc_model.pt); the "
                         "action / selection / made heads start fresh. E.g. an --aux-only run (pretrain on the geometry look-ahead)")
@@ -688,6 +725,10 @@ def main():
     paths = sorted({p for pat in args.data for p in glob.glob(pat)})
     data = load_teacher_data(paths)
     teacher = json.loads(str(np.load(paths[0])["meta"]))["teacher"]
+    if args.geom_aux_weight > 0 and args.geom_aux_set == "scan":    # simulator aim targets ride along through the split
+        if not args.aux_target_dir:
+            raise SystemExit("--geom-aux-set scan needs --aux-target-dir")
+        data["aux_scan_center"], data["aux_scan_valid"] = load_scan_targets(paths, args.aux_target_dir)
     sims = None
     if args.made2_geom and not args.made2_head:
         raise SystemExit("--made2-geom needs --made2-head")
@@ -727,13 +768,19 @@ def main():
             raise SystemExit("--geom-aux-weight needs --model gnn and --augment none")
         if args.geom_aux_set == "aim":                            # the exact aim, from the relative frame the policy sees
             aux, aux_mean, aux_std = standardize(*aim_targets(TRANSFORMS["relative"](data["obs"])), train)
+        elif args.geom_aux_set == "scan":                         # the simulator's window centre; pairs without one are NaN (masked)
+            sv = data["aux_scan_valid"] & aim_targets(TRANSFORMS["relative"](data["obs"]))[1]
+            aux, aux_mean, aux_std = standardize(np.nan_to_num(data["aux_scan_center"])[..., None], sv, train)
+            aux[~sv] = np.nan
         else:
             env_dims = BilliardsEnv(**CLEAR_ENV)
             aux, aux_mean, aux_std = standardize(*pair_geometry(data["obs"], (env_dims.table_width, env_dims.table_length)), train)
             env_dims.close()
-    if aim_enc is not None:                                          # the aim encoder's target standardisation (same seed → same train split)
-        _, a_mean, a_std = standardize(*aim_targets(TRANSFORMS["relative"](data["obs"])), train)
-        aim_stats = (float(a_mean[0]), float(a_std[0]))
+    if aim_enc is not None:                                          # the aim encoders' own target standardisation
+        stats = [aim_encoder_stats(d) for d in args.made2_aim_dirs]
+        if max(abs(s_[0] - stats[0][0]) + abs(s_[1] - stats[0][1]) for s_ in stats) > 1e-4:
+            raise SystemExit(f"--made2-aim-from encoders were standardised differently: {stats}")
+        aim_stats = stats[0]
     data["obs"] = TRANSFORMS[args.obs_transform](data["obs"])
 
     h_tag = ("_gnn" if args.model == "gnn" else "") + \
@@ -747,7 +794,7 @@ def main():
                                                             if args.selection == "factorized" else "")) + \
             ("" if args.gnn_hidden == 128 or args.model != "gnn" else f"_H{args.gnn_hidden}") + \
             ("" if args.gnn_layers == 2 or args.model != "gnn" else f"_L{args.gnn_layers}") + \
-            ("_sl1" if args.speed_loss == "l1" else "") + (f"_sb{args.speed_bins}" if args.speed_bins else "") + ("_kw" if args.uncertainty_weights else "") + (f"_ga{args.geom_aux_weight:g}" if args.geom_aux_weight > 0 else "") + ("_aim" if args.geom_aux_weight > 0 and args.geom_aux_set == "aim" else "") + ("_auxonly" if args.aux_only else "") + ("_madeonly" if args.made_only else "") + ("_noprop" if args.made2_no_proposal else "") + (f"_i{args.init_seed}" if args.init_seed is not None else "") + ("_init" if args.init_from else "") + (f"_ff{args.input_fourier}" if args.input_fourier else "") + \
+            ("_sl1" if args.speed_loss == "l1" else "") + (f"_sb{args.speed_bins}" if args.speed_bins else "") + ("_kw" if args.uncertainty_weights else "") + (f"_ga{args.geom_aux_weight:g}" if args.geom_aux_weight > 0 else "") + ("_aim" if args.geom_aux_weight > 0 and args.geom_aux_set == "aim" else "") + ("_scan" if args.geom_aux_weight > 0 and args.geom_aux_set == "scan" else "") + ("_auxonly" if args.aux_only else "") + ("_madeonly" if args.made_only else "") + ("_noprop" if args.made2_no_proposal else "") + (f"_i{args.init_seed}" if args.init_seed is not None else "") + ("_init" if args.init_from else "") + (f"_ff{args.input_fourier}" if args.input_fourier else "") + \
             ("_geoang" if args.geom_angle else "") + extra_tag + (f"_m2w{args.made2_weight:g}" if args.made2_head else "") + ("geo" if args.made2_geom else "") + ("L" if args.made2_aim_from else "") + ("_wrap" if args.angle_wrap else "_nowrap")
     name = (f"exp16_bc_{teacher}_{args.loss}{h_tag}_a{args.angle_scale_deg:g}_v{args.speed_scale:g}"
             f"_s{args.seed}_{time.strftime('%Y-%m-%d@%H%M')}")
@@ -765,7 +812,7 @@ def main():
                               made_head=args.made_head, made2_head=args.made2_head,
                               geom_angle=args.geom_angle, made2_geom=args.made2_geom,
                               enc_layers=args.gnn_layers, speed_loss=args.speed_loss, speed_bins=args.speed_bins,
-                              uncertainty_weights=args.uncertainty_weights, aux_dim=(1 if args.geom_aux_set == "aim" else N_AUX) if args.geom_aux_weight > 0 else 0,
+                              uncertainty_weights=args.uncertainty_weights, aux_dim=(1 if args.geom_aux_set in ("aim", "scan") else N_AUX) if args.geom_aux_weight > 0 else 0,
                               aim_encoder=aim_enc, fourier=args.input_fourier, made2_no_proposal=args.made2_no_proposal)
         if aim_enc is not None:
             agent.set_aim_stats(*aim_stats)
@@ -803,7 +850,8 @@ def main():
         print(f"  aux-only: {fit['epochs_run']} epochs ({time.time()-t0:.0f}s), best val aux MSE {fit['best_val_loss']:.4f} @{fit['best_epoch']}", flush=True)
         with open(os.path.join(out_dir, "results.json"), "w") as f:
             json.dump({"name": name, "train": {k: v for k, v in fit.items() if k not in ("history", "aux_history", "last_state")},
-                       "val": None, "eval": None, "args": vars(args)}, f, indent=2)
+                       "val": None, "eval": None, "args": vars(args),
+                       "aux_mean": [float(x) for x in aux_mean], "aux_std": [float(x) for x in aux_std]}, f, indent=2)
         np.save(os.path.join(out_dir, "history.npy"), np.array(fit["history"]))
         np.save(os.path.join(out_dir, "aux_history.npy"), np.array(fit["aux_history"]))
         print(f"  saved → {out_dir}", flush=True)

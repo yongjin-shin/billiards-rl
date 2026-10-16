@@ -111,3 +111,58 @@ def test_ensemble_aim_is_the_circular_mean_of_the_encoders():
         encs.append(e)
     a = ensemble_aim(encs, torch.as_tensor(_rel(3)), 0.0, 1.0, chunk=2)
     assert a.shape == (3, 18) and np.allclose(np.abs(np.degrees(a)), 180.0, atol=1e-3)
+
+
+# ── T4 / T5 pieces ──
+
+from exp16_wm.aim_sims import window_centers  # noqa: E402
+
+
+def test_window_centers_mean_successful_offset_and_none_when_no_success():
+    off = (-0.2, -0.1, 0.0, 0.1, 0.2)
+    flags = np.array([[0, 1, 1, 1, 0], [0, 0, 0, 1, 1], [0, 0, 0, 0, 0]], bool)
+    c, v = window_centers(flags, off)
+    assert np.allclose(c[:2], [0.0, 0.15]) and np.isnan(c[2]) and v.tolist() == [True, True, False]
+
+
+def test_aux_loss_masks_nan_targets():
+    torch.manual_seed(0)
+    m = PairGNNPolicy(hidden=16, aux_dim=1)
+    rel = torch.as_tensor(_rel(4, seed=3))
+    t = torch.randn(4, 18, 1)
+    base = m.aux_loss(rel, t)
+    t2 = t.clone(); t2[:, :9] = float("nan")                                              # no target for half the pairs
+    l2 = m.aux_loss(rel, t2)
+    with torch.no_grad():
+        e, valid = m._encode(rel)
+        err = ((m.aux_head(e) - t) ** 2)[..., 0]
+        want = (err[:, 9:] * valid[:, 9:]).sum() / valid[:, 9:].sum()
+    assert torch.isfinite(l2) and torch.allclose(l2, want, atol=1e-6) and not torch.allclose(l2, base)
+
+
+def test_load_scan_targets_aligns_with_the_label_files(tmp_path):
+    from exp16_wm.bc import load_scan_targets
+    lab, tgt = tmp_path / "lab", tmp_path / "tgt"; lab.mkdir(); tgt.mkdir()
+    for name, n, val in (("b.npz", 2, 2.0), ("a.npz", 3, 1.0)):
+        np.savez(lab / name, obs=np.zeros((n, 23), np.float32))
+        np.savez(tgt / name, scan_center_deg=np.full((n, 18), val, np.float32), scan_valid=np.ones((n, 18), bool))
+    c, v = load_scan_targets([str(lab / "b.npz"), str(lab / "a.npz")], str(tgt))
+    assert c.shape == (5, 18) and np.allclose(c[:3], 1.0) and np.allclose(c[3:], 2.0) and v.all()   # sorted order like load_teacher_data
+    np.savez(tgt / "a.npz", scan_center_deg=np.zeros((1, 18), np.float32), scan_valid=np.ones((1, 18), bool))
+    with pytest.raises(ValueError):
+        load_scan_targets([str(lab / "a.npz")], str(tgt))
+
+
+def test_policy_states_shards_load_as_teacher_data_and_keep_games_whole(tmp_path):
+    from exp16_wm.bc import load_teacher_data, split_by_game
+    from exp16_wm.policy_states import write_shards
+    rng = np.random.default_rng(0)
+    game = np.repeat(np.arange(10), 3); n = len(game)
+    rec = {"obs": rng.random((n, 23)).astype(np.float32), "game": game, "shot": np.tile(np.arange(3), 10),
+           "action": rng.random((n, 2)).astype(np.float32), "pocketed": rng.integers(0, 2, n)}
+    paths = write_shards(rec, str(tmp_path), 3, {"teacher": "policy_test"})
+    d = load_teacher_data(paths)
+    assert len(d["obs"]) == n and set(d) >= {"obs", "action", "good_actions", "n_good", "pocketed", "shot", "game"}
+    assert len(np.unique(d["game"])) == 10 and d["good_actions"].shape == (n, 1, 2)
+    tr, va = split_by_game(d["game"], 0.2, 0)
+    assert not set(d["game"][tr]) & set(d["game"][va])

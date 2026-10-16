@@ -57,6 +57,78 @@ def ensemble_aim(encoders: list[PairGNNPolicy], rel: torch.Tensor, mean: float, 
     return torch.cat(out).numpy()
 
 
+def window_centers(flags: np.ndarray, offsets_deg) -> tuple[np.ndarray, np.ndarray]:
+    """flags (…, A) success at each angle offset → (mean successful offset (…) deg, NaN where none; valid (…))."""
+    f = np.asarray(flags, bool); off = np.asarray(offsets_deg, np.float64)
+    n = f.sum(-1)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        c = (f * off).sum(-1) / n
+    return np.where(n > 0, c, np.nan), n > 0
+
+
+def _aims(args):
+    """Resolve --aim-runs for the seed → (encoders, their target mean / std, run dirs)."""
+    from exp16_wm.bc import aim_encoder_stats, load_aim_encoder
+    dirs = []
+    for pat in args.aim_runs:
+        found = glob.glob(pat.format(seed=args.seed))
+        if len(found) != 1:
+            raise SystemExit(f"{pat}: expected one run dir, found {found}")
+        dirs.append(found[0])
+    stats = [aim_encoder_stats(d) for d in dirs]
+    if max(abs(s[0] - stats[0][0]) + abs(s[1] - stats[0][1]) for s in stats) > 1e-4:
+        raise SystemExit(f"aim encoders standardised differently: {stats}")
+    return [load_aim_encoder(d) for d in dirs], stats[0], dirs
+
+
+def scan(args) -> None:
+    """T4: for every state and live pair, play the 31 angle offsets around the learned aim at one speed; the mean successful offset is
+    the simulator's window centre → target files (one per label shard, same basename) for --geom-aux-set scan."""
+    from exp16_wm.frozen_verifier import _init_worker, _simulate_full
+    from exp16_wm.geometry_aux import aim_targets
+    from exp16_wm.obs_transform import relative_obs
+    encs, (mean, std), dirs = _aims(args)
+    ref = PairGNNPolicy(hidden=8)
+    scale, bias = ref.act_scale.numpy().astype(np.float64), ref.act_bias.numpy().astype(np.float64)
+    v_u = (args.speed - bias[1]) / scale[1]
+    os.makedirs(args.out, exist_ok=True)
+    t0, total = time.time(), 0
+    with mp.get_context("spawn").Pool(args.workers, initializer=_init_worker) as pool:
+        for path in sorted(glob.glob(args.data)):
+            z = np.load(path)
+            obs = z["obs"][:args.max_states] if args.max_states else z["obs"]
+            rel = relative_obs(obs)
+            aim = ensemble_aim(encs, torch.as_tensor(rel), mean, std)
+            d = aim - bias[0]
+            aim_u = np.arctan2(np.sin(d), np.cos(d)) / scale[0]
+            live = aim_targets(rel)[1]
+            ang = np.clip(aim_u[..., None] + np.asarray(ANG31) / 180.0, -1, 1)               # (N, 18, 31)
+            tasks, keys = [], []
+            for s in range(len(obs)):
+                js = np.flatnonzero(live[s])
+                if len(js) == 0:
+                    continue
+                acts = np.stack([ang[s, js].reshape(-1), np.full(len(js) * len(ANG31), v_u)], -1) * scale + bias
+                tasks.append((obs[s], acts.astype(np.float32))); keys.append((s, js))
+            flags = np.zeros((len(obs), N_PAIRS, len(ANG31)), bool)
+            for (s, js), (mm, ss) in zip(keys, pool.imap(_simulate_full, tasks, chunksize=4)):
+                ok = mm.reshape(len(js), len(ANG31), N_PAIRS)[np.arange(len(js)), :, js] & ~ss.reshape(len(js), len(ANG31))
+                flags[s, js] = ok
+            off, valid = window_centers(flags, ANG31)
+            center = np.degrees(aim) + np.nan_to_num(off)
+            center = np.where(valid, (center + 180) % 360 - 180, np.nan).astype(np.float32)
+            N = len(z["obs"])                                                                  # pad unprocessed rows (--max-states)
+            full_c = np.full((N, N_PAIRS), np.nan, np.float32); full_c[:len(obs)] = center
+            full_v = np.zeros((N, N_PAIRS), bool); full_v[:len(obs)] = valid
+            full_f = np.zeros((N, N_PAIRS, len(ANG31)), bool); full_f[:len(obs)] = flags
+            np.savez(os.path.join(args.out, os.path.basename(path)), scan_center_deg=full_c, scan_valid=full_v, scan_flags=full_f,
+                     scan_speed=args.speed, scan_offsets_deg=np.asarray(ANG31), sim_aim_runs=np.array(dirs), seed=args.seed)
+            n = int(live.sum()) * len(ANG31); total += n
+            print(f"  {os.path.basename(path)}: {len(obs)} states, {n} simulations, live pairs with a window {valid[live].mean():.1%}, "
+                  f"|centre − learned aim| median {np.nanmedian(np.abs(off[valid])):.3f}°, {time.time() - t0:.0f}s", flush=True)
+    print(f"saved {args.out}: {total} simulations ({time.time() - t0:.0f}s)", flush=True)
+
+
 def gen(args) -> None:
     from exp16_wm.bc import build_split, load_aim_encoder, load_teacher_data
     from exp16_wm.frozen_verifier import _init_worker, _simulate_full
@@ -64,15 +136,8 @@ def gen(args) -> None:
     from exp16_wm.obs_transform import relative_obs
     from exp16_wm.sim_identity import to_bitmask
     paths = sorted(glob.glob(args.data))
-    dirs = []
-    for pat in args.aim_runs:
-        found = glob.glob(pat.format(seed=args.seed))
-        if len(found) != 1:
-            raise SystemExit(f"{pat}: expected one run dir, found {found}")
-        dirs.append(found[0])
-    encs = [load_aim_encoder(d) for d in dirs]
-    data, train, _ = build_split(dict(load_teacher_data(paths)), args.val_frac, args.seed, 1.0, "none")   # the aim encoders' standardisation
-    _, mean, std = standardize(*aim_targets(relative_obs(data["obs"])), train)
+    encs, (m_, s_), dirs = _aims(args)                              # standardisation of the aim encoders' own training data
+    mean, std = np.array([m_]), np.array([s_])
     ref = PairGNNPolicy(hidden=8)
     scale, bias = ref.act_scale.numpy().astype(np.float64), ref.act_bias.numpy().astype(np.float64)
     os.makedirs(args.out, exist_ok=True)
@@ -109,6 +174,8 @@ def gen(args) -> None:
 
 def main() -> None:
     p = argparse.ArgumentParser()
+    p.add_argument("cmd", nargs="?", default="gen", choices=["gen", "scan"])
+    p.add_argument("--speed", type=float, default=1.0, help="scan: the speed (m/s) the angle offsets are played at")
     p.add_argument("--data", default="logs/teacher_data/relabel_s1000/robust/*.npz", help="label files (only their states are used)")
     p.add_argument("--aim-runs", nargs="+", required=True, help="aux-only aim run dir globs with {seed}")
     p.add_argument("--seed", type=int, default=0); p.add_argument("--val-frac", type=float, default=0.1)
@@ -117,7 +184,7 @@ def main() -> None:
     p.add_argument("--out", required=True)
     args = p.parse_args()
     torch.set_num_threads(2)
-    gen(args)
+    {"gen": gen, "scan": scan}[args.cmd](args)
 
 
 if __name__ == "__main__":
