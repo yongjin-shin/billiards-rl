@@ -6245,3 +6245,21 @@ made head는 그대로이므로 입력 `a − â`에는 pair head 제안이 남�
 | T0 | control 대비 개선이 0.05 미만 | made head만으로는 pair·행동 선택이 안 된다 | pair 간 보정(calibration) 분석 |
 
 **한계(미리)**: seed 1개(사용자 방식: seed 하나 먼저). state는 teacher 게임의 것. 후보는 학습한 조준각 주변 ±0.3°로 한정(그 밖의 샷은 고려하지 않음). 조준각 encoder 자체는 공식 정답으로 학습된 것(T4에서 대체).
+
+### T1·T2 결과 (seed 0, 2026-10-16)
+
+**T1**: teacher state 16.6k개 × 모든 live pair × 후보 8개 = **1,655,664번 시뮬레이션**(815초, 8 worker; `logs/teacher_data/relabel_s1000/aimsims_s0/`). 목표 pair가 들어간 비율은 shard별 11~15% — 넣을 수 없는 pair(막힘, 큰 컷 각도)까지 모두 포함하기 때문이다.
+**T2**: made head loss만으로 500 epoch(1,360초). made BCE train 0.0329 / val 0.0325(과적합 없음), 체크포인트 epoch 469. 학습에는 train state의 시뮬레이션만 쓰고 val 시뮬레이션은 체크포인트 선택에만 썼다(`bc.py`의 `sims_tr` / `sims_va`). pair head·selection head는 학습되지 않음(pair head 각도 오차 19°로 무작위 수준 — 의도대로).
+
+| seed 0 | control | E11 (teacher 기반) | **T2 (teacher 없음)** |
+|---|---|---|---|
+| **게임 shots/game (짝지은 2000판)** | 3.592 | 3.377 | **3.219** |
+| control 대비 / E11 대비 (짝지은 SE) | – | −0.215 ± 0.034 / – | **−0.373 ± 0.037 / −0.158 ± 0.039** |
+| 게임 샷 성공률 | 83.2% | 88.5% | **93.0%** |
+| val clean (label 있는 val state) | – | 85.4% | **90.0%** |
+| teacher와 같은 pair를 고른 비율 | – | 73.4% | **63.5%** |
+| run 안의 평가 (500판) | – | – | 3.29 shots, 샷 성공률 90.9% |
+
+**판단표**: 사전 표의 어느 행에도 해당하지 않는다 — T=(±0.05)·T−·T0만 정의했고 **E11보다 0.05 넘게 좋은 경우를 정의하지 않았다.** 결과는 E11 대비 −0.158 ± 0.039(약 4 SE)로 teacher 기반보다 좋다. 사전 계획의 다음 단계(T=일 때의 다음)를 따른다: seed 5개 확인, 이어서 T4(공식 제거)·T5(정책 state).
+**읽을 수 있는 것 (가설)**: teacher의 pair 선택을 따르지 않고(teacher와 같은 pair 63.5%) **한 샷 성공률이 가장 높은 pair·행동**을 고른다. 학습 데이터가 추론 때의 후보 분포(모든 pair의 조준각 격자)와 같고, encoder가 BC loss와 나누지 않고 made 예측에만 쓰인다. E14의 ALL(teacher 시뮬레이션으로 학습한 made head로 모든 pair에서 고르기)이 나빴던 것과 대비된다 — 그때의 문제는 made head를 모든 pair에 대해 학습하지 않은 것이었던 셈이다.
+**한계**: seed 1개. teacher 게임의 state를 쓴다(T5에서 대체). 조준각 encoder는 공식 정답으로 학습(T4에서 대체). teacher(2.98)와의 격차는 0.24 shots.
