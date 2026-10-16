@@ -294,11 +294,13 @@ def train_bc(agent: VanillaSAC, data: dict[str, np.ndarray], train: np.ndarray, 
              selection: str = "global", use_extras: bool = False,
              sims: dict[str, np.ndarray] | None = None, made2_weight: float = 1.0, sims_batch: int = 1024,
              aux: np.ndarray | None = None, aux_weight: float = 0.0, aux_only: bool = False,
-             train_plateau: int = 0, train_plateau_tol: float = 0.01) -> dict:
+             train_plateau: int = 0, train_plateau_tol: float = 0.01, made_only: bool = False, made_val_sims: int = 20000) -> dict:
     """select: 'loss' keeps the lowest val loss; 'within' the highest val within-threshold rate
     (the val loss is dominated by a few far-off predictions and can disagree with it).
     aux_only: train the encoder + aux head on the geometry look-ahead alone (no action / selection / made loss);
     the 'val loss' is then the val aux MSE and the checkpoint is the lowest of it.
+    made_only: train on the made2 BCE of `sims` alone (no action / selection loss, teacher-free when the sims come from a search);
+    the 'val loss' is then the made2 BCE of up to made_val_sims simulations of val states and the checkpoint is the lowest of it.
     train_plateau = W > 0: also stop when the training loss has converged — the lowest training loss of the last W epochs is not
     more than train_plateau_tol (relative) below the lowest before them."""
     if select not in ("loss", "within"):
@@ -310,6 +312,12 @@ def train_bc(agent: VanillaSAC, data: dict[str, np.ndarray], train: np.ndarray, 
             raise ValueError("aux_only needs aux targets and aux_weight > 0")
         if sims is not None:
             raise ValueError("aux_only does not train the made head (no sims)")
+        select = "loss"
+    if made_only:
+        if sims is None:
+            raise ValueError("made_only needs sims")
+        if aux_only:
+            raise ValueError("made_only and aux_only exclude each other")
         select = "loss"
     torch.manual_seed(seed)
     rng = np.random.default_rng(seed)
@@ -343,6 +351,10 @@ def train_bc(agent: VanillaSAC, data: dict[str, np.ndarray], train: np.ndarray, 
         sims_tr = np.where(train[sims["row"]])[0]
         s_row = torch.as_tensor(sims["row"]); s_a = torch.as_tensor(sims["a_unit"])
         s_mask = sims["made"]; s_scr = torch.as_tensor(sims["scratch"])   # made bitmask decoded per batch
+        sims_va = np.where(val[sims["row"]])[0]
+        if made_only and len(sims_va) == 0:
+            raise ValueError("made_only needs simulations of val states for the checkpoint")
+        sims_va = np.sort(np.random.default_rng(seed + 7).choice(sims_va, size=min(made_val_sims, len(sims_va)), replace=False))
 
     best_score, best_val, best_state, best_epoch, history = -float("inf"), float("inf"), None, -1, []
     stop_reason = None
@@ -354,12 +366,13 @@ def train_bc(agent: VanillaSAC, data: dict[str, np.ndarray], train: np.ndarray, 
         tr_loss = tr_aux = 0.0
         for i in range(0, len(perm), batch):
             b = perm[i:i + batch]
-            l = None if aux_only else model.train_loss(obs[b], t_u[b], g_u[b], w, pairs=None if pr is None else pr[b],
+            l = None if (aux_only or made_only) else model.train_loss(obs[b], t_u[b], g_u[b], w, pairs=None if pr is None else pr[b],
                                                       extras=None if ex is None else {k: v[b] for k, v in ex.items()})
             if sims is not None:
                 sb = rng.choice(sims_tr, size=min(sims_batch, len(sims_tr)), replace=False)
                 made_b = torch.as_tensor(from_bitmask(s_mask[sb]))
-                l = l + made2_weight * model.module.made2_loss(obs[s_row[sb]], s_a[sb], made_b, s_scr[sb])
+                lm = made2_weight * model.module.made2_loss(obs[s_row[sb]], s_a[sb], made_b, s_scr[sb])
+                l = lm if l is None else l + lm
             if use_aux:
                 la = model.module.aux_loss(obs[b], aux_t[b])
                 l = aux_weight * la if l is None else l + aux_weight * la
@@ -375,6 +388,13 @@ def train_bc(agent: VanillaSAC, data: dict[str, np.ndarray], train: np.ndarray, 
             va_aux = float(model.module.aux_loss(obs[va_idx], aux_t[va_idx])) if use_aux else float("nan")
             if aux_only:
                 va_loss, va_within = va_aux, float("nan")
+            elif made_only:                                          # val made2 BCE on a fixed sample of val simulations
+                tot, cnt = 0.0, 0
+                for lo in range(0, len(sims_va), 4096):
+                    sv = sims_va[lo:lo + 4096]
+                    tot += float(model.module.made2_loss(obs[s_row[sv]], s_a[sv], torch.as_tensor(from_bitmask(s_mask[sv])), s_scr[sv])) * len(sv)
+                    cnt += len(sv)
+                va_loss, va_within = tot / cnt, float("nan")
             else:
                 pred_va = model.predict_unit(obs[va_idx])
                 va_loss = float(model.train_loss(obs[va_idx], t_u[va_idx], g_u[va_idx], w,
@@ -407,6 +427,10 @@ def train_bc(agent: VanillaSAC, data: dict[str, np.ndarray], train: np.ndarray, 
     return {"best_val_loss": best_val, "best_epoch": best_epoch, "epochs_run": len(history),
             "select": select, "best_score": best_score, "final_lr": opt.param_groups[0]["lr"], "history": history,
             "aux_history": aux_history, "last_state": last_state, "stop_reason": stop_reason}
+
+
+ANG31 = tuple(np.round(np.arange(-0.3, 0.3 + 1e-9, 0.02), 4))     # refine grid used in the evaluations (deg around the centre)
+ABS7 = (0.75, 1.0, 1.25, 1.5, 2.0, 3.0, 5.0)                        # absolute refine speeds (m/s)
 
 
 def train_seed(seed: int, init_seed: int | None) -> int:
@@ -573,6 +597,11 @@ def parse_args():
     p.add_argument("--geom-aux-weight", type=float, default=0.0,
                    help="> 0: auxiliary look-ahead of geometry — a head on each pair embedding predicts the pocket entry deviation, "
                         "the ball's cushion distance and the blockers on the two shot paths (training only); this is the loss weight")
+    p.add_argument("--made-only", action="store_true",
+                   help="train the made2 head (and the encoder) on --sims alone: no action / selection loss; evaluated with infer=all_pairs. "
+                        "With search-generated sims (exp16_wm.aim_sims) nothing comes from the teacher's labels")
+    p.add_argument("--made2-no-proposal", action="store_true",
+                   help="made2 head input without (a − pair head proposal); for --made-only, where the pair head is not trained")
     p.add_argument("--init-seed", type=int, default=None,
                    help="seed of the weight initialisation and the batch order (default: --seed); the train/val split always follows --seed. "
                         "For ensembles of models on the same split")
@@ -686,6 +715,8 @@ def main():
         extra_paths = sorted({p for pat in args.train_only_data for p in glob.glob(pat)})
         data, train, val = append_train_only(data, train, val, load_teacher_data(extra_paths))
         extra_tag = "_plus-" + os.path.basename(os.path.dirname(os.path.dirname(extra_paths[0])))
+    if args.made_only and not (args.made2_head and args.made2_geom):
+        raise SystemExit("--made-only needs --made2-head --made2-geom (it chooses among candidates around the aim)")
     if args.init_from and args.model != "gnn":
         raise SystemExit("--init-from needs --model gnn")
     if args.aux_only and (args.geom_aux_weight <= 0 or args.made2_head):
@@ -716,7 +747,7 @@ def main():
                                                             if args.selection == "factorized" else "")) + \
             ("" if args.gnn_hidden == 128 or args.model != "gnn" else f"_H{args.gnn_hidden}") + \
             ("" if args.gnn_layers == 2 or args.model != "gnn" else f"_L{args.gnn_layers}") + \
-            ("_sl1" if args.speed_loss == "l1" else "") + (f"_sb{args.speed_bins}" if args.speed_bins else "") + ("_kw" if args.uncertainty_weights else "") + (f"_ga{args.geom_aux_weight:g}" if args.geom_aux_weight > 0 else "") + ("_aim" if args.geom_aux_weight > 0 and args.geom_aux_set == "aim" else "") + ("_auxonly" if args.aux_only else "") + (f"_i{args.init_seed}" if args.init_seed is not None else "") + ("_init" if args.init_from else "") + (f"_ff{args.input_fourier}" if args.input_fourier else "") + \
+            ("_sl1" if args.speed_loss == "l1" else "") + (f"_sb{args.speed_bins}" if args.speed_bins else "") + ("_kw" if args.uncertainty_weights else "") + (f"_ga{args.geom_aux_weight:g}" if args.geom_aux_weight > 0 else "") + ("_aim" if args.geom_aux_weight > 0 and args.geom_aux_set == "aim" else "") + ("_auxonly" if args.aux_only else "") + ("_madeonly" if args.made_only else "") + ("_noprop" if args.made2_no_proposal else "") + (f"_i{args.init_seed}" if args.init_seed is not None else "") + ("_init" if args.init_from else "") + (f"_ff{args.input_fourier}" if args.input_fourier else "") + \
             ("_geoang" if args.geom_angle else "") + extra_tag + (f"_m2w{args.made2_weight:g}" if args.made2_head else "") + ("geo" if args.made2_geom else "") + ("L" if args.made2_aim_from else "") + ("_wrap" if args.angle_wrap else "_nowrap")
     name = (f"exp16_bc_{teacher}_{args.loss}{h_tag}_a{args.angle_scale_deg:g}_v{args.speed_scale:g}"
             f"_s{args.seed}_{time.strftime('%Y-%m-%d@%H%M')}")
@@ -735,7 +766,7 @@ def main():
                               geom_angle=args.geom_angle, made2_geom=args.made2_geom,
                               enc_layers=args.gnn_layers, speed_loss=args.speed_loss, speed_bins=args.speed_bins,
                               uncertainty_weights=args.uncertainty_weights, aux_dim=(1 if args.geom_aux_set == "aim" else N_AUX) if args.geom_aux_weight > 0 else 0,
-                              aim_encoder=aim_enc, fourier=args.input_fourier)
+                              aim_encoder=aim_enc, fourier=args.input_fourier, made2_no_proposal=args.made2_no_proposal)
         if aim_enc is not None:
             agent.set_aim_stats(*aim_stats)
             with torch.no_grad():                                    # how good is the learned aim on the val rows (all live pairs)
@@ -762,7 +793,7 @@ def main():
                    use_pairs=args.pair_supervision or modular, selection=args.selection, use_extras=modular,
                    sims=sims, made2_weight=args.made2_weight, sims_batch=args.sims_batch,
                    aux=aux, aux_weight=args.geom_aux_weight, aux_only=args.aux_only,
-                   train_plateau=args.train_plateau, train_plateau_tol=args.train_plateau_tol)
+                   train_plateau=args.train_plateau, train_plateau_tol=args.train_plateau_tol, made_only=args.made_only)
     if fit["stop_reason"]:
         print(f"  stopped: {fit['stop_reason']}", flush=True)
     if args.save_last and isinstance(agent, PairGNNPolicy):
@@ -786,6 +817,8 @@ def main():
           f" val loss {fit['best_val_loss']:.6f}  |  {json.dumps({k: round(v, 4) for k, v in vm.items()})}", flush=True)
     agent.save(os.path.join(out_dir, "bc_model.pt"))
 
+    if args.made_only:                                       # no trained pair / selection head: choose with the made head over all pairs
+        agent.infer, agent.refine_deg, agent.refine_speed_abs = "all_pairs", ANG31, ABS7
     ev = evaluate_policy(TransformedPolicy(agent, args.obs_transform), args.eval_seed, args.eval_games, CLEAR_ENV)
     print(f"  policy alone ({args.eval_games} games): {json.dumps({k: (round(v, 3) if v is not None else None) for k, v in ev.items()})}",
           flush=True)
@@ -797,7 +830,7 @@ def main():
         print(f"  policy alone with scratch penalty {args.scratch_penalty}: "
               f"{json.dumps({k: (round(v, 3) if v is not None else None) for k, v in ev_pen.items()})}", flush=True)
     ev_modes = None
-    if args.made2_head:                                     # same model, the made head used at inference
+    if args.made2_head and not args.made_only:              # same model, the made head used at inference
         ev_modes = {}
         for mode in ("verify", "refine", "verify_refine"):
             agent.infer = mode

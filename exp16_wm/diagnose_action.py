@@ -305,10 +305,8 @@ def made_logit(m: PairGNNPolicy, o: dict, k: torch.Tensor, cand: torch.Tensor) -
     rows = torch.arange(len(k)); C = cand.shape[1]
     a = o["means"][rows, k]
     e_k = o["e"][rows, k][:, None].expand(-1, C, -1)
-    feats = [e_k, cand, action_diff(cand, a[:, None].expand(-1, C, -1)) * m.made2_scale]
-    if m.made2_geom:                                                              # the aim term (exact or learned aim)
-        feats.append(m._geom_feature(o["aim"][rows, k][:, None].expand(-1, C), cand[..., 0]))
-    return m.head_made2(torch.cat(feats, -1)).squeeze(-1)
+    aim_k = o["aim"][rows, k][:, None].expand(-1, C) if m.made2_geom else None          # the aim term (exact or learned aim)
+    return m.head_made2(m._made2_features(e_k, cand, a[:, None].expand(-1, C, -1), aim_k)).squeeze(-1)
 
 
 def refine_at(m: PairGNNPolicy, o: dict, k: torch.Tensor) -> torch.Tensor:

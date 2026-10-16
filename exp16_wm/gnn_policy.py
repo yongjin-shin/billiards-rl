@@ -89,7 +89,7 @@ class PairGNNPolicy(nn.Module):
                  factorized: bool = False, scratch_head: bool = False, made_head: bool = False,
                  made2_head: bool = False, geom_angle: bool = False, made2_geom: bool = False,
                  enc_layers: int = 2, speed_loss: str = "mse", speed_bins: int = 0, uncertainty_weights: bool = False, aux_dim: int = 0,
-                 aim_encoder: "PairGNNPolicy | list[PairGNNPolicy] | None" = None, fourier: int = 0):
+                 aim_encoder: "PairGNNPolicy | list[PairGNNPolicy] | None" = None, fourier: int = 0, made2_no_proposal: bool = False):
         super().__init__()
         if fourier < 0:
             raise ValueError(f"fourier must be ≥ 0, got {fourier}")
@@ -150,7 +150,9 @@ class PairGNNPolicy(nn.Module):
         if made_head:
             self.head_made = nn.Linear(H, 1)      # can this pair be made (coarse-scan success rate) — look-ahead auxiliary
         if made2_head:
-            self.head_made2 = _mlp(H + 4 + int(made2_geom), H, 1)   # [e_ij, a, (a − a_ij)·scale] → will action a pocket pair ij
+            # [e_ij, a, (a − a_ij)·scale, (aim term)] → will action a pocket pair ij; made2_no_proposal drops (a − a_ij)
+            self.head_made2 = _mlp(H + 2 + (0 if made2_no_proposal else 2) + int(made2_geom), H, 1)
+        self.made2_no_proposal = made2_no_proposal
         self.aux_dim = aux_dim                          # auxiliary geometry targets predicted from each pair embedding (training only)
         if aux_dim:
             self.aux_head = nn.Sequential(nn.Linear(H, 64), nn.ReLU(), nn.Linear(64, aux_dim))
@@ -304,17 +306,23 @@ class PairGNNPolicy(nn.Module):
         ghost = b[:, :, None, :] - 2 * BALL_RADIUS * d / d.norm(dim=-1, keepdim=True).clamp(min=1e-9)
         return torch.atan2(ghost[..., 1], ghost[..., 0]).reshape(B, N_PAIRS)
 
+    def _made2_features(self, e: torch.Tensor, a: torch.Tensor, prop: torch.Tensor, aim: torch.Tensor | None) -> torch.Tensor:
+        """The made2 head input for actions a (…, 2) of pairs with embeddings e (…, H), proposals prop (…, 2), aims (…) (rad)."""
+        feats = [e, a]
+        if not self.made2_no_proposal:
+            feats.append(action_diff(a, prop.detach()) * self.made2_scale)
+        if self.made2_geom:
+            feats.append(self._geom_feature(aim, a[..., 0]))
+        return torch.cat(feats, dim=-1)
+
     def made2_logits(self, o: dict[str, torch.Tensor], a: torch.Tensor) -> torch.Tensor:
         """
         o = forward_full(rel); a (B, 2) one action for every pair or (B, 18, 2) one per pair, in [-1, 1].
         → (B, 18) logits of "action a pockets pair ij cleanly"; invalid pairs masked.
         """
-        e, means = o["e"], o["means"].detach()
+        means = o["means"]
         a = a[:, None, :].expand_as(means) if a.dim() == 2 else a
-        feats = [e, a, action_diff(a, means) * self.made2_scale]
-        if self.made2_geom:
-            feats.append(self._geom_feature(o["aim"], a[..., 0]))
-        z = self.head_made2(torch.cat(feats, dim=-1)).squeeze(-1)
+        z = self.head_made2(self._made2_features(o["e"], a, means, o.get("aim"))).squeeze(-1)
         return z.masked_fill(~o["valid"], _NEG)
 
     def _geom_feature(self, aim: torch.Tensor, a_angle_unit: torch.Tensor) -> torch.Tensor:
@@ -348,11 +356,9 @@ class PairGNNPolicy(nn.Module):
         for j in range(o["e"].shape[1]):
             cand = self._unit_offsets(torch.stack([aim_u[:, j], o["means"][:, j, 1]], dim=-1))              # (B, C, 2)
             C = cand.shape[1]
-            feats = [o["e"][:, j][:, None].expand(-1, C, -1), cand,
-                     action_diff(cand, o["means"][:, j][:, None].expand(-1, C, -1)) * self.made2_scale]
-            if self.made2_geom:
-                feats.append(self._geom_feature(o["aim"][:, j][:, None].expand(-1, C), cand[..., 0]))
-            z = self.head_made2(torch.cat(feats, dim=-1)).squeeze(-1)                                       # (B, C)
+            z = self.head_made2(self._made2_features(o["e"][:, j][:, None].expand(-1, C, -1), cand,
+                                                     o["means"][:, j][:, None].expand(-1, C, -1),
+                                                     o["aim"][:, j][:, None].expand(-1, C))).squeeze(-1)       # (B, C)
             sc = z if prior is None else prior[:, j][:, None] + F.logsigmoid(z)
             sc = sc.masked_fill(~o["valid"][:, j][:, None], -float("inf"))
             top, arg = sc.max(dim=1)
@@ -434,11 +440,9 @@ class PairGNNPolicy(nn.Module):
             return a if self.select_angle == "proposal" else torch.stack([aim_u, a[:, 1]], dim=-1)
         cand = self._refine_candidates(a, aim_u)                                      # (B, C, 2)
         C = cand.shape[1]
-        e_k = o["e"][rows, k][:, None].expand(-1, C, -1)
-        feats = [e_k, cand, action_diff(cand, a[:, None].expand(-1, C, -1)) * self.made2_scale]
-        if self.made2_geom:
-            feats.append(self._geom_feature(o["aim"][rows, k][:, None].expand(-1, C), cand[..., 0]))
-        z = self.head_made2(torch.cat(feats, dim=-1)).squeeze(-1)
+        aim_k = o["aim"][rows, k][:, None].expand(-1, C) if self.made2_geom else None
+        z = self.head_made2(self._made2_features(o["e"][rows, k][:, None].expand(-1, C, -1), cand,
+                                                 a[:, None].expand(-1, C, -1), aim_k)).squeeze(-1)
         return cand[rows, z.argmax(dim=1)]
 
     def train_loss(self, rel: torch.Tensor, teacher_u: torch.Tensor, good_u: torch.Tensor,
@@ -749,7 +753,8 @@ class PairGNNPolicy(nn.Module):
                     "hidden": self.hidden, "enc_layers": self.enc_layers,
                     "speed_loss": self.speed_loss, "speed_bins": self.speed_bins,
                     "uncertainty_weights": self.uncertainty_weights, "aux_dim": self.aux_dim,
-                    "made2_aim_learned": bool(self._aim_encoders()), "made2_aim_n": len(self._aim_encoders()), "fourier": self.fourier}, path)
+                    "made2_aim_learned": bool(self._aim_encoders()), "made2_aim_n": len(self._aim_encoders()), "fourier": self.fourier,
+                    "made2_no_proposal": self.made2_no_proposal}, path)
 
 
 assert REL_DIM == 3 * N_BALLS + 2 * N_POCKETS
