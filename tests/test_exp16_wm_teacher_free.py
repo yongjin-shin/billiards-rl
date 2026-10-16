@@ -166,3 +166,49 @@ def test_policy_states_shards_load_as_teacher_data_and_keep_games_whole(tmp_path
     assert len(np.unique(d["game"])) == 10 and d["good_actions"].shape == (n, 1, 2)
     tr, va = split_by_game(d["game"], 0.2, 0)
     assert not set(d["game"][tr]) & set(d["game"][va])
+
+
+# ── exploration for the state collection (X1, X2) ──
+
+def test_explore_policy_mixes_base_actions_and_random_live_pair_shots():
+    from exp16_wm.policy_states import ABS7, ExplorePolicy
+    torch.manual_seed(0)
+    m = PairGNNPolicy(hidden=16, made2_head=True, made2_geom=True)                      # exact aim is enough here
+
+    class Base:
+        def act(self, obs, deterministic=True):
+            return np.array([9.0, 9.0], np.float32)                                          # a marker action
+    raw = np.array([0.5, 0.2, 0.3, 0.6, 0, 0.7, 0.7, 1, 0.5, 0.8, 0, *[0, 0, 0, 0.5, 0, 1, 1, 0, 1, 0.5, 1, 1]], np.float32)
+    assert all((ExplorePolicy(Base(), m, 0.0, seed=1).act(raw) == 9.0).all() for _ in range(5))
+    pol = ExplorePolicy(Base(), m, 1.0, seed=1)
+    from exp16_wm.obs_transform import relative_obs
+    with torch.no_grad():
+        o = m.forward_full(torch.as_tensor(relative_obs(raw))[None])
+    live_aims = np.degrees(o["aim"][0, o["valid"][0]].numpy())
+    for _ in range(20):
+        a = pol.act(raw)
+        assert np.isclose(min(ABS7, key=lambda v: abs(v - a[1])), a[1], atol=1e-4)            # one of the 7 speeds
+        da = np.abs((np.degrees(a[0]) - live_aims + 180) % 360 - 180)
+        assert da.min() <= 0.3 + 1e-4                                                        # within 0.3° of a live pair's aim
+    mix = ExplorePolicy(Base(), m, 0.3, seed=2)
+    share = np.mean([(mix.act(raw) != 9.0).any() for _ in range(400)])
+    assert 0.22 < share < 0.38
+
+
+def test_random_layouts_are_valid_non_overlapping_and_load_as_data(tmp_path):
+    from exp16_wm.bc import load_teacher_data
+    from exp16_wm.policy_states import random_layouts, write_shards
+    pockets = np.array([0, 0, 0, 0.5, 0, 1, 1, 0, 1, 0.5, 1, 1], np.float32)
+    rec = random_layouts(300, pockets, (0.9906, 1.9812), seed=0)
+    obs = rec["obs"]
+    live = 3 - obs[:, [4, 7, 10]].sum(1)
+    assert set(np.unique(live)) == {1, 2, 3} and all(0.25 < np.mean(live == k) < 0.42 for k in (1, 2, 3))
+    for o in obs[:50]:
+        pts = [o[0:2]] + [o[2 + 3 * b:4 + 3 * b] for b in range(3) if o[4 + 3 * b] < 0.5]
+        assert all(0.05 <= c <= 0.95 for p in pts for c in p)
+        for i in range(len(pts)):
+            for j in range(i + 1, len(pts)):
+                assert np.hypot((pts[i][0] - pts[j][0]) * 0.9906, (pts[i][1] - pts[j][1]) * 1.9812) >= 0.062
+    assert np.allclose(obs[:, 11:23], pockets)
+    d = load_teacher_data(write_shards(rec, str(tmp_path), 2, {"teacher": "random_layouts"}))
+    assert len(d["obs"]) == 300 and len(np.unique(d["game"])) == 300
