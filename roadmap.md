@@ -518,7 +518,30 @@ rssm_v5 재학습 시 이 `--batch-size` 옵션을 쓸 것. 단, 이 모델 크�
 - Paid Plan 업그레이드 확인(`accountPlanType: PAID`, 남은 크레딧 $120 유지).
 - **smoke-2 (09:13, 실패, 약 $0.02)**: Linux에서 `pooltool-billiards==0.5.0`이 `panda3d==1.11.0.dev3702`(PyPI에 없는 dev 빌드)를 요구해 설치가 멈췄다. Mac은 같은 pooltool 0.5.0이지만 panda3d 1.10.16을 쓴다(pooltool이 OS별로 다르게 요구) — 그래서 Mac에서는 드러나지 않았다. `setup_cloud.sh`에 `--extra-index-url https://archive.panda3d.org/` 추가(73f9c3e). Mac의 설치 버전과 `requirements-cloud.txt` 18개 패키지는 모두 일치함을 확인.
 - **smoke-3 (09:19, 성공)**: STATUS 0, 약 2.5분(약 $0.05, Spot $0.93~1.18/시간). 서버는 **64 vCPU**(`nproc` 64, torch threads 64), torch 2.10.0+cpu·numpy 2.4.2·numba 0.64.0, Python 3.13.16, smoke test 10 passed 1 skipped(skip = relabel sims 데이터가 번들에 없어서, 예상된 것). 서버는 스스로 종료됐고 남은 instance 없음.
-- **서버와 Mac의 차이(주의)**: panda3d(서버 1.11 dev, Mac 1.10.16)와 CPU 구조(x86 vs arm64)가 다르다. 물리 계산이 두 환경에서 같은 결과를 내는지는 아직 확인하지 않았다 → 다음 단계에서 같은 state·같은 action 몇십 개를 양쪽에서 시뮬레이션해 비교한다. 확인 전에는 **서버 결과끼리만 비교**한다(같은 코드·같은 환경 control).
+- **서버와 Mac의 차이(주의)**: panda3d(서버 1.11 dev, Mac 1.10.16)와 CPU 구조(x86 vs arm64)가 다르다. 물리 계산이 두 환경에서 같은 결과를 내는지는 이때 확인하지 않았다 → 바로 아래 parity-1로 확인했다.
+- **parity-1 (2026-10-17, 서버 약 7분 ≈ $0.12, Mac은 140초)**: 같은 62,140 케이스(`exp16_wm/sim_parity.py`: 무작위 상태 1000개 × 무작위 샷 20개 + env 상태 70개 × 조준각 ±3°를 0.02° 간격으로 × 속도 1.0·3.0 m/s)를 Mac(arm64, panda3d 1.10.16)과 서버(x86_64, panda3d 1.11 dev)에서 시뮬레이션해 비교했다. 입력은 seed로 고정되고 dump에 저장돼 양쪽이 같은 케이스를 쳤음을 검사한다.
+  | 항목 | 결과 |
+  |---|---|
+  | 최종 위치 차이 median | 8e-15 m (사실상 비트 수준 동일) |
+  | outcome(made·scratch·에러) 다름 | **4 / 62,140 (0.0064%)** — 무작위 1, 조준각 scan 3 |
+  | event 순서 다름 | 97 / 62,140 (0.16%) — event 10개 미만 0%, 10~20개 0.06%, 20~30개 0.43%, 30개 이상 2.7% (**긴 다중 충돌 경로에 몰림**) |
+  | 조준각 scan 42,140점 중 made 여부가 뒤집힌 점 | 2점 — 한 곳은 창 경계가 0.02° 한 칸 이동(+0.74°), 다른 한 곳은 주변이 모두 실패인 고립된 성공점 1개(+1.24°) |
+  | pooltool 예외(numba quartic solver) | 양쪽 모두 **같은 2건**(24364, 52658)에서 발생 — 플랫폼과 무관한 deterministic 문제, 약 3만 건에 1건 |
+  | 속도 | 시뮬레이션 1건 Mac 약 2.2 ms, 서버 1코어 약 4.5 ms (서버 1코어 ≈ Mac 1코어의 절반) |
+
+  **해석**: 두 환경은 비트 단위로 같지는 않지만 거의 같다. 차이는 충돌이 많은 긴 경로(부동소수점 순서에 민감한 chaotic 구간)에서만 생기고, 우리가 쓰는 짧은 경로(event 10개 미만)에서는 0이었다. 성공 창 경계가 한 칸 움직인 경우는 scan 4만 점 중 1점이라 창 중심(평균)에 미치는 영향은 무시할 수준이다. 게임 단위로 추정하면(샷 수 약 3, 샷당 outcome 차이 약 0.007%) 2000판 중 약 0.4판 정도에서 갈라질 것으로 보여 표본 오차(±0.023 shots)보다 훨씬 작다 — 다만 이 추정은 정책이 두는 샷이 아니라 무작위·scan 샷 분포에서 얻은 것이다.
+  **결론과 규칙**: 서버 결과를 학습·평가에 쓴다. 단, 개별 샷 단위로 Mac 결과와 1:1로 맞추려 하지 않고, **같은 코드 control은 같은 환경 안에서** 만든다(서버 결과끼리, Mac 결과끼리). 서버 첫 평가 때 같은 checkpoint를 Mac과 서버 양쪽에서 2000판씩 돌려 게임 단위 차이를 직접 재 본다.
+- **pooltool 0.5.0 quartic solver 예외 조사 (2026-10-17)**
+  - **현상**: `pt.simulate`가 `ValueError: cannot assign slice of shape (2,) from input of shape (4,)`를 낸다. 같은 입력이면 항상 난다(deterministic), Mac·서버 모두 같은 케이스에서 난다.
+  - **재현 입력**: parity 케이스 24364, 52658(`logs/parity/mac.npz`). 둘 다 **delta가 정확히 0.0**(가장 가까운 공의 중심을 정면 조준)이고 속도 1.0 m/s다. delta=0인 scan 140점 중 2점(1.4%)에서만 났고, delta≠0인 scan 4만 점에서는 0건이다.
+  - **원인 (확인)**: 시뮬레이션 6번째 event(sliding→rolling) 직후, 한 공 쌍의 ball-ball 충돌 quartic 계수가 `a = b = 0`(c≈0.2325, d≈0.1999, e≈0.0397, 두 케이스가 거의 같음)으로 퇴화해 사실상 2차식이 된다. `_solve`는 이때 `np.roots`를 부르는데 `np.roots`는 앞쪽 0을 떼고 root를 2개만 돌려주고, `_solve_many`가 그것을 4칸 배열에 넣으려다 numba가 ValueError를 낸다. 개별 `solve()`는 길이를 검사하지 않아 에러가 안 나고 `solve_many`에서만 난다.
+  - **퇴화하는 이유 (추정, 미검증)**: 두 케이스의 계수가 거의 같고 6번째 event가 sliding→rolling이라, 정면 충돌 직후 같은 방향으로 구르는 두 공(수구와 목표공)의 가속도가 정확히 같아져 상대 가속도가 0이 되는 경우로 보인다. delta가 아주 조금만 달라도 가속도 방향이 달라져 발생하지 않는다.
+  - **파이프라인 영향**: `env.step`(simulator.py), `planner.simulate_candidate`, `outcomes.made_slots`, `pair_stats`는 모두 `pt.simulate`를 try/except 없이 부른다. 그래서 예외가 그대로 올라오고, `frozen_verifier._simulate_full` → `pool.imap` 경로(aim_sims 창 스캔)에서는 worker 예외가 부모로 전달돼 **run 전체가 죽는다.** 지금까지 수백만 건이 완주한 것은, 발생하려면 delta가 부동소수점으로 정확히 0.0이어야 하기 때문으로 보인다(정책이 내는 값이나 "학습된 조준각 ± offset" 격자는 거의 정확히 0이 되지 않는다. parity scan은 격자가 0.0을 포함해서 걸렸다). 이 설명은 코드를 읽고 내린 추정이며, 파이프라인 전체에서 발생 빈도를 센 것은 아니다.
+  - **pooltool 0.6.0**: solver를 새로 짰고(`_quartic_numba.py`) `a == 0`이면 예외 대신 `zeros(4)`를 돌려준다. 크래시는 없지만 2차식으로 퇴화한 충돌의 root를 무시하는 것이라 물리가 조용히 달라질 수 있다(이번 두 케이스는 root가 모두 음수라 영향이 없는데, 일반적으로는 확인하지 않았다). 시뮬레이션 결과가 달라질 수 있어 올리지 않는다.
+  - **선택지**: ① 그대로 두고, 새 코드의 scan 격자에서 정확한 0 offset을 피한다. ② 예외 경로에서만 동작하는 guard를 둔다(예외 시 delta에 1e-9 rad를 더해 한 번 재시도하고 횟수를 기록; 예외가 없던 경우의 결과는 비트 단위로 그대로라 같은 코드 control이 유지된다. 단 `env.step`은 system을 inplace로 바꾸므로 시도 전에 복사해 두어야 한다). ③ pooltool에 upstream issue를 올린다. 우선순위는 낮고, 서버에서 긴 run을 돌릴 때 중간에 죽는 비용이 크므로 ②를 추천한다.
+  - **결정과 구현 (2026-10-17, ② 선택)**: `simulator.play_shot(system, phi_deg, V0, inplace=...)`를 추가하고 `BilliardsEnv.step`, `planner.simulate_candidate`, `outcomes.made_slots`, `pair_stats`가 이것을 쓰게 했다. 예외 메시지가 `cannot assign slice of shape`인 ValueError만 잡아, 샷 직전 상태에서 aim을 1e-9 → 1e-8 → 1e-7 rad(가장 큰 것이 약 6e-6°로 scan 간격 0.02°보다 훨씬 작음)씩 키워 최대 3번 다시 시도한다. 다른 예외나 3번 모두 실패한 경우는 그대로 올린다. 재시도는 stderr에 한 줄씩 남고(서버 `job.log`에서 보임) `simulator.QUARTIC_RETRIES`에 센다(프로세스별 값이라 multiprocessing worker의 횟수는 부모가 못 본다). `env.step`은 드문 재시도 경로에서만 `self.system`을 새 객체로 바꾼다.
+  - **같은 코드 control이 유지되는지 확인**: 정상 경로는 strike + `pt.simulate`와 똑같은 연산이라 raw pooltool과 비트 단위로 같다(테스트가 최종 `rvw` 전체와 event 수를 비교). 이 변경 전에 기록한 Mac dump의 62,140 케이스를 새 경로(`made_slots`)로 다시 돌려, 에러가 없던 **62,138건은 made·scratch가 모두 같고**, 실패하던 2건(24364, 52658)은 가장 작은 보정(1e-9 rad)으로 복구됨을 확인했다. 속도는 그대로(142초 대 140초; `system.copy()`는 샷 1건의 1%).
+  - **범위 밖**: `world_model/generate_data_fixeddt.py` 등 world model 쪽 `pt.simulate` 호출과 `exp16_wm/sim_parity.py`(일부러 raw로 두어 예외를 결과로 비교)는 바꾸지 않았다.
 
 **아직 못 한 검증**: `validate-template`(문법)만 통과. cfn-lint·cfn-guard는 설치돼 있지 않아 설치 승인 후 돌린다. `setup_cloud.sh`(특히 Linux x86_64에서 pooltool·numba·torch CPU wheel 설치)와 launch 권한은 위 3번의 smoke job 전에는 확인되지 않은 상태다.
 
