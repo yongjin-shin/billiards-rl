@@ -531,6 +531,14 @@ rssm_v5 재학습 시 이 `--batch-size` 옵션을 쓸 것. 단, 이 모델 크�
 
   **해석**: 두 환경은 비트 단위로 같지는 않지만 거의 같다. 차이는 충돌이 많은 긴 경로(부동소수점 순서에 민감한 chaotic 구간)에서만 생기고, 우리가 쓰는 짧은 경로(event 10개 미만)에서는 0이었다. 성공 창 경계가 한 칸 움직인 경우는 scan 4만 점 중 1점이라 창 중심(평균)에 미치는 영향은 무시할 수준이다. 게임 단위로 추정하면(샷 수 약 3, 샷당 outcome 차이 약 0.007%) 2000판 중 약 0.4판 정도에서 갈라질 것으로 보여 표본 오차(±0.023 shots)보다 훨씬 작다 — 다만 이 추정은 정책이 두는 샷이 아니라 무작위·scan 샷 분포에서 얻은 것이다.
   **결론과 규칙**: 서버 결과를 학습·평가에 쓴다. 단, 개별 샷 단위로 Mac 결과와 1:1로 맞추려 하지 않고, **같은 코드 control은 같은 환경 안에서** 만든다(서버 결과끼리, Mac 결과끼리). 서버 첫 평가 때 같은 checkpoint를 Mac과 서버 양쪽에서 2000판씩 돌려 게임 단위 차이를 직접 재 본다.
+- **pooltool 0.5.0 quartic solver 예외 조사 (2026-10-17)**
+  - **현상**: `pt.simulate`가 `ValueError: cannot assign slice of shape (2,) from input of shape (4,)`를 낸다. 같은 입력이면 항상 난다(deterministic), Mac·서버 모두 같은 케이스에서 난다.
+  - **재현 입력**: parity 케이스 24364, 52658(`logs/parity/mac.npz`). 둘 다 **delta가 정확히 0.0**(가장 가까운 공의 중심을 정면 조준)이고 속도 1.0 m/s다. delta=0인 scan 140점 중 2점(1.4%)에서만 났고, delta≠0인 scan 4만 점에서는 0건이다.
+  - **원인 (확인)**: 시뮬레이션 6번째 event(sliding→rolling) 직후, 한 공 쌍의 ball-ball 충돌 quartic 계수가 `a = b = 0`(c≈0.2325, d≈0.1999, e≈0.0397, 두 케이스가 거의 같음)으로 퇴화해 사실상 2차식이 된다. `_solve`는 이때 `np.roots`를 부르는데 `np.roots`는 앞쪽 0을 떼고 root를 2개만 돌려주고, `_solve_many`가 그것을 4칸 배열에 넣으려다 numba가 ValueError를 낸다. 개별 `solve()`는 길이를 검사하지 않아 에러가 안 나고 `solve_many`에서만 난다.
+  - **퇴화하는 이유 (추정, 미검증)**: 두 케이스의 계수가 거의 같고 6번째 event가 sliding→rolling이라, 정면 충돌 직후 같은 방향으로 구르는 두 공(수구와 목표공)의 가속도가 정확히 같아져 상대 가속도가 0이 되는 경우로 보인다. delta가 아주 조금만 달라도 가속도 방향이 달라져 발생하지 않는다.
+  - **파이프라인 영향**: `env.step`(simulator.py), `planner.simulate_candidate`, `outcomes.made_slots`, `pair_stats`는 모두 `pt.simulate`를 try/except 없이 부른다. 그래서 예외가 그대로 올라오고, `frozen_verifier._simulate_full` → `pool.imap` 경로(aim_sims 창 스캔)에서는 worker 예외가 부모로 전달돼 **run 전체가 죽는다.** 지금까지 수백만 건이 완주한 것은, 발생하려면 delta가 부동소수점으로 정확히 0.0이어야 하기 때문으로 보인다(정책이 내는 값이나 "학습된 조준각 ± offset" 격자는 거의 정확히 0이 되지 않는다. parity scan은 격자가 0.0을 포함해서 걸렸다). 이 설명은 코드를 읽고 내린 추정이며, 파이프라인 전체에서 발생 빈도를 센 것은 아니다.
+  - **pooltool 0.6.0**: solver를 새로 짰고(`_quartic_numba.py`) `a == 0`이면 예외 대신 `zeros(4)`를 돌려준다. 크래시는 없지만 2차식으로 퇴화한 충돌의 root를 무시하는 것이라 물리가 조용히 달라질 수 있다(이번 두 케이스는 root가 모두 음수라 영향이 없는데, 일반적으로는 확인하지 않았다). 시뮬레이션 결과가 달라질 수 있어 올리지 않는다.
+  - **선택지**: ① 그대로 두고, 새 코드의 scan 격자에서 정확한 0 offset을 피한다. ② 예외 경로에서만 동작하는 guard를 둔다(예외 시 delta에 1e-9 rad를 더해 한 번 재시도하고 횟수를 기록; 예외가 없던 경우의 결과는 비트 단위로 그대로라 같은 코드 control이 유지된다. 단 `env.step`은 system을 inplace로 바꾸므로 시도 전에 복사해 두어야 한다). ③ pooltool에 upstream issue를 올린다. 우선순위는 낮고, 서버에서 긴 run을 돌릴 때 중간에 죽는 비용이 크므로 ②를 추천한다. **미결정**(사용자 확인 대기).
 
 **아직 못 한 검증**: `validate-template`(문법)만 통과. cfn-lint·cfn-guard는 설치돼 있지 않아 설치 승인 후 돌린다. `setup_cloud.sh`(특히 Linux x86_64에서 pooltool·numba·torch CPU wheel 설치)와 launch 권한은 위 3번의 smoke job 전에는 확인되지 않은 상태다.
 
