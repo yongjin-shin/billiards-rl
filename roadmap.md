@@ -515,6 +515,10 @@ rssm_v5 재학습 시 이 `--batch-size` 옵션을 쓸 것. 단, 이 모델 크�
 - smoke job 첫 launch(08:59, 사용자 승인 후 예약 실행)가 **실패했다**: `InvalidParameterCombination: The specified instance type is not eligible for Free Tier`. dry run은 권한만 보기 때문에 이 오류를 못 잡았다. 조회해 보니 계정이 **Free Plan**(`accountPlanType: FREE`, 남은 크레딧 $120, 만료 2027-04-16)이고, Free Plan은 Free Tier 대상 instance type만 허용한다. instance·Spot 요청은 만들어지지 않았다(과금 없음). 같은 launch를 한 번 더 시도해도 같은 오류라 반복하지 않았다.
 - **다음 필요한 것(사용자)**: Billing 콘솔에서 계정을 **Paid Plan으로 업그레이드**. 업그레이드 후 남은 크레딧이 유지되는지는 확인 화면의 안내를 읽고 판단해야 한다(AWS 문서 기준으로 확인 필요). 그다음 Claude가 같은 smoke job을 다시 시도한다(launch 전에 사용자 확인).
 - launcher 보완: `run_aws`가 실패 시 AWS 에러 문장을 숨기던 문제를 고쳤다(19841bb).
+- Paid Plan 업그레이드 확인(`accountPlanType: PAID`, 남은 크레딧 $120 유지).
+- **smoke-2 (09:13, 실패, 약 $0.02)**: Linux에서 `pooltool-billiards==0.5.0`이 `panda3d==1.11.0.dev3702`(PyPI에 없는 dev 빌드)를 요구해 설치가 멈췄다. Mac은 같은 pooltool 0.5.0이지만 panda3d 1.10.16을 쓴다(pooltool이 OS별로 다르게 요구) — 그래서 Mac에서는 드러나지 않았다. `setup_cloud.sh`에 `--extra-index-url https://archive.panda3d.org/` 추가(73f9c3e). Mac의 설치 버전과 `requirements-cloud.txt` 18개 패키지는 모두 일치함을 확인.
+- **smoke-3 (09:19, 성공)**: STATUS 0, 약 2.5분(약 $0.05, Spot $0.93~1.18/시간). 서버는 **64 vCPU**(`nproc` 64, torch threads 64), torch 2.10.0+cpu·numpy 2.4.2·numba 0.64.0, Python 3.13.16, smoke test 10 passed 1 skipped(skip = relabel sims 데이터가 번들에 없어서, 예상된 것). 서버는 스스로 종료됐고 남은 instance 없음.
+- **서버와 Mac의 차이(주의)**: panda3d(서버 1.11 dev, Mac 1.10.16)와 CPU 구조(x86 vs arm64)가 다르다. 물리 계산이 두 환경에서 같은 결과를 내는지는 아직 확인하지 않았다 → 다음 단계에서 같은 state·같은 action 몇십 개를 양쪽에서 시뮬레이션해 비교한다. 확인 전에는 **서버 결과끼리만 비교**한다(같은 코드·같은 환경 control).
 
 **아직 못 한 검증**: `validate-template`(문법)만 통과. cfn-lint·cfn-guard는 설치돼 있지 않아 설치 승인 후 돌린다. `setup_cloud.sh`(특히 Linux x86_64에서 pooltool·numba·torch CPU wheel 설치)와 launch 권한은 위 3번의 smoke job 전에는 확인되지 않은 상태다.
 
