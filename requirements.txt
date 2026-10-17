@@ -16,3 +16,9 @@ matplotlib
 
 # Build compatibility
 setuptools==69.5.1
+
+# Exp-16 training / analysis
+wandb
+scipy
+scikit-learn
+pytest

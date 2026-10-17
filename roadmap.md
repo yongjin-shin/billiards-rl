@@ -25,6 +25,17 @@ Experiment plans and next directions. For completed experiment results, see [exp
              └─ [x] R-SSM v5 재학습(val_rmse 1.71900) + free-running eval + magnitude-bin weighting(방향 검증 완료)
              └─ [ ] v7: magnitude-bin weighting 실제 학습 검증
              └─ [ ] WM → RL 통합
+             └─ [x] 과제 재정의(clear-speed: 다 넣을 때만 종료, 공당 +1, 샷당 −1, 30샷 안전 상한) + vanilla seed 0 → 7.89샷
+                    (후반 하락은 사라졌지만 15만 step 이후 개선 없음, 조준 대신 "세게 치기" 국소 최적)
+             └─ [x] pooltool 탐색 플래너 기준점: 기하 + 탐색 4시드 2.24샷 / 기하 없는 무작위 탐색 200후보 2.50샷
+             └─ [x] SAC 엔트로피 −2→−7 (seed 0) → 7.39샷: 조준 흔들림 4.4°→0.34°로 줄었지만 조준 오차 그대로(2.08°)
+                    → RL 신호로는 세게 치기를 못 벗어남
+[-] 행동 재파라미터화 — (공, 포켓) 선택 + ghost-ball 보정각 + 속도 — 보류 (2026-10-09, bitter lesson: 도메인 지식 주입)
+[~] 탐색 + 학습 (expert iteration) — 시뮬레이터 탐색이 찾은 샷을 정책이 배우고, 정책이 탐색 후보를 제안 (2026-10-09 제안)
+             └─ [~] 0단계: 모방학습(behaviour cloning) — 기하 플래너 교사로 빠른 검증 → 무작위 탐색 교사로
+                    └─ [x] raw 좌표로는 과적합(정책 단독 9~11샷) → relative obs → GNN(공·포켓 pair, N-ball 일반화)
+                    └─ [x] robust/margin teacher label, overfit test로 학습 결함 발견 → pair supervision: 3개 label 모두 ~4.35 shots/game (SAC 7.89)
+                    └─ [ ] 후속 TODO 12개 → 아래 "Next: BC 후속 작업" 참고 (현재 실행 중인 실험 없음, 2026-10-09 22:30)
 [ ] Exp-17   Phase 1 HRL — System 2 (ball selection discrete 3) + System 1 (Phase 1 Exp-10 freeze)
 
 [ ] cushion / bank shots
@@ -393,6 +404,466 @@ R-SSM 상상 롤아웃을 연결하는 실제 통합(Option A/B/C) — WM frozen
 `compute_shot_ss_loss`의 shot당 forward(batch_size=1)를 wavefront 기반 배치 forward로 교체 (Phase 0~3). 속도 1.7~3.7배 개선 확인. 상세, 검증 방법, 벤치마크 수치는 [experiments.md](experiments.md) 참고.
 
 rssm_v5 재학습 시 이 `--batch-size` 옵션을 쓸 것. 단, 이 모델 크기(h_dim=32)에서는 MPS 커널 오버헤드가 커서 CPU가 MPS보다 빠르므로 `--device cpu` 권장.
+
+---
+
+## Next: teacher 없는 탐색 + 학습 → System 2식 RL (2026-10-16 정리)
+
+### 왜
+- 학습한 조준각 cascade(E11)로 BC 정책이 3.60 → 3.43 shots(seed 5개, 짝지은 2000판)가 됐다. 이 구조는 "빠른 제안(조준각 GNN + selection) + 느린 검토(후보 여러 개를 made head로 평가)"라서 탐색 기반 RL(AlphaZero식 expert iteration)로 자연스럽게 이어진다.
+- E14: 실제 경기에서 pair head의 행동 제안은 필요 없고(−0.017, N), teacher가 주는 것 중 필요한 것은 **pair 선택 정답**(selection 사전 확률을 빼면 +0.059, G−)과 **made head 학습 데이터**, 그리고 학습 state뿐이다. 조준각 GNN의 정답은 사람이 만든 ghost-ball 공식이다.
+- 사람 지식(공식)과 teacher에 기대면 쿠션 샷·다른 공 맞혀 넣기·회전 등으로 넓힐 수 없다. 정답을 시뮬레이터 결과에서 얻으면 계산을 늘리는 만큼 좋아진다.
+
+### 구조 대응
+| 역할 | 지금 | AlphaZero식 |
+|---|---|---|
+| System 1 (빠른 제안) | 조준각 GNN 4개 + selection head | policy prior |
+| System 2 (검토) | 후보 격자 + made head로 평가·선택 | 탐색 |
+| 평가 함수 | made head = 이번 샷이 들어갈 확률(한 단계) | value / Q |
+| 학습 | 시뮬레이터로 후보를 쳐 본 결과 | 탐색 결과로 재학습 |
+
+### 단계 (각 단계: 짝지은 2000판 × seed 5개로 teacher 기반 E11과 비교, ±0.05 shots 안이면 "teacher 없이도 같다")
+| 단계 | 내용 | 확인할 것 | 비용(추정) |
+|---|---|---|---|
+| T1 | 학습 state마다 **모든 live pair**에 대해 학습한 조준각 주변 후보를 시뮬레이션 | – | 약 300만 번, 8코어 약 30분 |
+| T2 | made head를 그 결과로 학습(pair head 제안 입력 `a − â` 없이), 이 made head 하나로 pair와 행동을 함께 고름 | E11과 같은가 | 학습 약 20분 × seed |
+| T3 | 성공 창 넓이를 보는 점수(주변 후보 평균 성공 확률, 또는 made head 앙상블)로 고르기 | E14에서 본 "후보가 많을수록 과대평가된 후보를 고르는" 문제가 줄어드는가 | 추론만 |
+| T4 | 조준각 GNN 정답을 공식 대신 시뮬레이터로 찾은 성공 창 중심으로 | 공식 없이 같은 정밀도인가 | 시뮬레이션 약 1시간 |
+| T5 | 정책이 직접 둔 게임의 state로 T1~T2 반복 | teacher의 state 없이 유지·개선되는가 | 반복당 약 1시간 |
+
+**진행 (2026-10-16)**: T1·T2 seed 0 완료 — teacher의 pair·행동·시뮬레이션 없이 made head만으로 학습·선택한 정책이 **짝지은 2000판 3.219 shots**(E11 3.377 대비 −0.158 ± 0.039, control 3.592 대비 −0.373), 샷 성공률 93.0%. teacher 기반보다 좋다. seed 확인은 건너뜀(사용자 결정). **T4: 조준각 정답을 시뮬레이터 창 중심으로 → 3.238(T2 대비 +0.019, 같음 — 공식 불필요). T5: 정책이 둔 state로 → 3.107(T2 대비 −0.112, 샷 성공률 96.3%, teacher 2.98과 0.13 차이).** **L1(T4+T5 합친 한 바퀴, teacher·공식 없이): 3.155(T5 대비 +0.048 ± 0.023, 판단 L= — 유지되지만 경계, 약간 나쁜 방향).** **L1-a(L1 state + 공식 조준각) 3.179(T5 대비 +0.071) → 원인은 조준각이 아니라 state(좋은 정책의 state만으로는 좁아짐 = 탐색 부족). L1-mix(이전 state와 섞기) 3.130(T5 ±0.05, 유지).** X1(수집 때 30% 탐색) 3.178(L1-a와 같음), X2(무작위 배치) 3.235(T5보다 +0.128, 나쁨 — 게임 state 분포가 중요). **N1(2026-10-17): T5를 초기화만 바꿔 2번 재학습 → 3.196, 3.138 (run 3개 평균 3.147, sd 0.045). 학습 잡음이 커서 L1·L1-a·L1-mix·X1은 모두 T5와 구별되지 않는다 — "탐색 부족" 결론 철회. T2 대비 T5의 개선도 확인 안 됨(sd의 1.6배). 이후 비교는 설정마다 run 여러 개, 또는 여러 run의 made head 평균으로 잡음을 줄인다.** 그다음: end-to-end(EE1), V(s').
+
+### 구성 요소 정리: 사람 지식 / 얼림 (2026-10-16, T5·L1 시점)
+
+**사람 지식이 들어간 것과 아닌 것**
+| 구성 요소 | 지금 (T5·L1) | 사람 지식? | 비고 |
+|---|---|---|---|
+| 시뮬레이터 (pooltool 물리) | 학습 데이터·정답의 출처 | 환경 | 정책 밖. 탐색의 비용을 정함 |
+| 관측 표현 (수구 원점, 가장 가까운 공을 +x로 회전) | 고정 | **예** (좌표 설계) | |
+| 행동 표현 (가장 가까운 공 방향 기준 각도, 속도 0.5~8 m/s, 타점 고정 a=0·b=0.25) | 고정 | **예** | 타점은 보류 목록 |
+| GNN 구조 (공 노드, 공-공 message, 공×포켓 pair, side 포켓 표시) | 고정 | **예** (구조적 사전 지식) | pair = 결정 단위라는 가정 |
+| 후보 격자 (조준각 ±0.3°·0.02° 간격, 절대 속도 7개) | 고정 | **예** (탐색 범위 설계) | |
+| 조준각 정답 | 시뮬레이터 성공 창 중심 (T4) | 아니오 | 창 중심 정의(1.0 m/s, 성공 각도 평균)는 설계 선택. 스캔 시작점은 이전 encoder → 처음 한 번은 공식에서 출발 |
+| made head 정답 (목표 공이 목표 포켓, scratch 없음) | 시뮬레이터 결과 | 과제 정의 | |
+| pair 선택·행동 정답 (teacher) | 안 씀 (T2 이후) | – | teacher는 시뮬레이터 탐색 planner였음 |
+| 학습 state | 정책이 둔 게임 (T5·L1) | 아니오 | 처음 정책(T2)은 teacher state로 학습됨 — 반복할수록 희미해짐 |
+| 결정 규칙 (모든 pair·후보 중 made 확률 최대, 한 샷만 봄) | 고정 | **예** (탐욕적 한 단계) | 다음 샷 V(s')가 다음 단계 |
+| 앙상블 4개·원형 평균, 학습 길이 2000 epoch | 고정 | 방법 선택 | 정밀도 도구 |
+
+**얼림(freeze)이 필요한 것과 아닌 것**
+| 구성 요소 | 지금 | 얼림 근거 |
+|---|---|---|
+| 조준각 encoder 4개 | 먼저 따로 학습 → made head 학습 동안 **얼림** | BC loss와 함께 학습하면 정밀도를 잃었다(joint 보조 목표, 사전학습 → BC). **BC 없이 made loss와 함께 학습할 때도 필요한지는 시험하지 않았다** → 아래 end-to-end 실험 |
+| 정책 encoder + made head | 함께 처음부터 학습 | 얼릴 이유 없음 |
+| pair head·selection head | teacher 없는 구성에서는 학습·사용 안 함 | – |
+| 시뮬레이터 | 고정 (환경) | – |
+
+### end-to-end로 가려면 필요한 실험 (설계, 미실행)
+지금은 "조준각 encoder 학습(얼림) → made head 학습" 2단계다. 한 번의 학습으로 합치려면 아래를 확인해야 한다. 모두 L1과 같은 데이터(정책 state, 시뮬레이터 정답·결과), seed 0, 짝지은 2000판으로 T5/L1과 비교.
+
+| # | 실험 | 묻는 것 | 비용(추정) |
+|---|---|---|---|
+| EE1 | **하나의 네트워크**: encoder + 조준각 head(시뮬레이터 정답 MSE) + made head(그 네트워크 자신의 조준각을 입력으로)를 함께 학습, made BCE + λ·조준각 MSE (λ 몇 가지), 2000 epoch | 얼리지 않고 함께 학습해도 조준각 정밀도(창 중심 오차)와 게임이 유지되는가 — BC가 없으면 경쟁이 없는가 | run당 약 1.5~2시간 |
+| EE2 | EE1 + made loss가 조준각 쪽으로 gradient를 보내지 않게(stop-gradient) | 정밀도 손실이 있으면 그것이 made gradient 때문인가 | EE1과 같음 |
+| EE3 | EE1을 초기화만 바꿔 4개 학습해 앙상블(조준각·made 확률 평균) | 단일 네트워크로는 정밀도가 부족할 때, end-to-end 모델의 앙상블로 같은 효과를 내는가 | EE1 × 4 (병렬) |
+| EE4 | 조준각 정답 없이 made 결과만으로: 제안 head가 시뮬레이터에서 성공한 행동으로 학습(성공 행동의 회귀), 후보는 제안 주변 | 기하 목표(창 중심)조차 없이 "들어갔다/안 들어갔다"만으로 되는가 — 가장 순수한 end-to-end | run당 약 2시간 + 성공 행동 수집 |
+
+판단 순서: EE1이 T5/L1과 같으면(±0.05) 얼림이 필요 없다 → 2단계를 1단계로 합친다. EE1이 나쁘면 EE2로 원인을 가르고, EE3로 앙상블을 시험한다. EE4는 EE1~3 중 하나가 된 뒤에.
+
+### 클라우드 실행 계획 (2026-10-16 정리, AWS Spot c7a.16xlarge 사용 확정, 준비 중)
+
+**왜**: 루프 한 바퀴(약 2.5시간)의 대부분이 pooltool 시뮬레이션(CPU 전용)이고, EE1~EE3·seed 확인은 학습 run을 여러 개 동시에 돌려야 한다. GPU보다 **코어가 많은 CPU**가 맞다(시뮬레이션은 코어 수에 비례, 학습은 run을 병렬로). Mac GPU(MPS)는 학습 step 64 ms(CPU 8 thread 약 85 ms)로 이득이 작다.
+**선택**: AWS EC2 **Spot c7a.16xlarge**(64 vCPU, AMD, 코어당 성능 높음; 검색 기준 spot 약 $1.16/시간, on-demand $3.28). 대안: Oracle Ampere A1(ARM, 약 $0.83/시간 — 설치 호환성·느린 코어), Vultr VX1 64 vCPU(약 $1.44/시간, 회수 없음). 예상 비용: 루프 한 바퀴 약 1.2시간 ≈ $1.5, EE1~EE3(8 run 동시) 약 2시간 ≈ $2.5.
+**확인 결과 (2026-10-16, 읽기 전용 조회)**: 이 Mac의 AWS profile(`agent-toolkit`, IAM user `agent_machine`)은 기본 리전이 서울(`ap-northeast-2`)인데, **서울에는 c7a.16xlarge가 없다**(offering 조회 결과 없음). 같은 조회로 리전을 비교했다(최근 3시간 Spot 가격, Linux).
+| 리전 | c7a.16xlarge 제공 AZ 수 | Spot $/시간 (AZ별 범위) |
+|---|---|---|
+| **us-east-1** | 5 | 0.93~1.19 |
+| us-east-2 | 3 | 0.98~1.17 |
+| us-west-2 | 4 | 1.13~1.30 |
+| ap-southeast-1 | 3 | 0.92~1.50 |
+| eu-west-1 / eu-central-1 / ap-northeast-1 | 3 | 1.44~2.02 |
+→ **us-east-1 제안**: AZ가 가장 많아 Spot 풀이 많고(회수 위험 분산) 가격도 최저 구간. 이 학습은 배치라 한국과의 거리(지연)는 무관하다. 서울 기본 리전은 쓰지 않고 명령마다 `--region us-east-1`을 명시한다.
+**Spot vCPU 한도**: 모든 리전에서 "All Standard Spot Instance Requests" = **5** (64 vCPU 필요) → 선택한 리전에서 **64 이상으로 상향 요청**이 먼저다(승인까지 시간이 걸릴 수 있음).
+
+**역할 분담**
+| 누가 | 할 일 |
+|---|---|
+| 사용자 (한 번) | AWS 가입·결제, Spot vCPU 한도("All Standard ... Spot Instance Requests") 64 이상 상향 요청, 예산 알림, **권한이 좁은 IAM 사용자**(EC2 켜기·조회·끄기 + S3 버킷 하나) 생성, 이 Mac에서 `aws configure`(키는 채팅에 붙이지 않음) |
+| Claude | `brew install awscli`, `requirements-cloud.txt`(지금 환경과 같은 버전: Python 3.13, torch 2.10 CPU, pooltool-billiards 0.5.0, numba 0.64 등 — 저장소에 의존성 파일이 아직 없음), `setup_cloud.sh`(uv로 Python 3.13, 환경 구성, 테스트 일부로 확인), 단계별 실행 스크립트(worker 수 인자), 정책 state 수집 병렬화, 서버 켜기·진행 확인·결과 회수·끄기 |
+**안전장치 (Claude 세션이 끊겨도 동작)**: ① 작업 끝에 결과를 S3에 올리고 서버 스스로 종료(종료 시 삭제 옵션) ② 켤 때 최대 사용 시간 예약 종료(예: 4시간) ③ AWS 예산 알림. 서버를 **켜는 것은 매번 사용자 확인**(또는 미리 정한 허용 범위 안에서), **끄는 것은 작업이 끝나면 바로**.
+**코드 전달 (2026-10-16 변경)**: 처음 계획은 GitHub push 후 서버에서 clone이었다. 그런데 remote가 SSH 주소(`git@github.com:...`)라 서버가 clone하려면 deploy key나 token을 서버에 둬야 한다. 결과를 담을 S3 bucket을 어차피 만들기 때문에, **`git archive HEAD`로 만든 tar.gz(+ 추가로 넣을 데이터·모델)를 S3에 올리고 서버가 instance role로 내려받는** 방식으로 바꿨다. 서버에 비밀이 하나도 없고, 올린 것이 정확히 commit된 HEAD라 "같은 코드" 대조(같은 코드·같은 seed control)도 보장된다. 그래서 commit 안 된 tracked 변경이 있으면 launcher가 멈춘다.
+
+**현재 권한 상태 (2026-10-16 확인)**: `agent_machine`은 group `Agent`에 속하고 거기엔 `ReadOnlyAccess`와 `SignInLocalDevelopmentAccess`만 붙어 있다. 즉 계획에 적은 "EC2 켜기·끄기 + S3 bucket 하나" 권한은 아직 없고, Spot vCPU 한도 상향 요청도 거절됐다(`servicequotas:RequestServiceQuotaIncrease` 없음). 새 IAM 사용자를 따로 만드는 대신, 아래 stack이 `Agent` group에 **이 job에 필요한 최소 권한만** 붙인다(c7a.16xlarge 시작, project 태그가 붙은 instance 종료·SSM 명령, 이 bucket 쓰기, instance role PassRole). 키를 새로 만들거나 채팅에 붙일 일이 없다.
+
+**준비된 것 (이 branch, 아직 AWS에 아무것도 만들지 않음)**
+| 파일 | 역할 |
+|---|---|
+| `cloud/stack.yaml` | CloudFormation: results bucket(비공개·암호화·TLS만·60일 후 삭제), instance role(SSM + 이 bucket만), inbound 없는 security group, launch template(Spot c7a.16xlarge, IMDSv2, 암호화 EBS, 종료 동작 terminate), `Agent` group 최소 권한 policy, 월 예산 알림, Spot service-linked role(이 계정엔 아직 없음) |
+| `cloud/launch.py` | 코드 bundle → S3 → instance 시작. 기본은 **dry run**(EC2에 "이 launch가 허용되나"만 물어봄), `--go`를 줘야 실제로 시작. 최대 12시간 상한, 서버 안에서 `shutdown -h +N` 예약(command가 멈춰도 종료), 끝나면(실패해도) log·결과를 S3에 올리고 스스로 종료 |
+| `cloud/setup_cloud.sh` | 서버에서 uv → Python 3.13 → torch CPU wheel → `requirements-cloud.txt` → smoke test |
+| `requirements-cloud.txt` | 지금 `.venv`와 같은 버전(torch 2.10.0, pooltool-billiards 0.5.0, numba 0.64.0 …), 모두 `==` 고정 |
+| `tests/test_cloud_*.py` | stack 안전 속성(inbound 없음, IMDSv2, terminate, 권한에 `*` 없음 등)과 launcher(user-data 생성, 입력 검증, bundle) 31개 |
+
+**사용자가 할 일 (순서대로)**
+1. **Spot vCPU 한도 상향 요청**: Service Quotas 콘솔 → 리전 us-east-1 → Amazon EC2 → "All Standard (A, C, D, H, I, M, R, T, Z) Spot Instance Requests" → 64 이상. 승인까지 시간이 걸리므로 가장 먼저.
+2. **stack 배포 (한 번)**: `agent_machine`으로는 못 하므로 IAM·S3·Budgets 권한이 있는 본인 계정으로(콘솔 CloudFormation → Create stack → `cloud/stack.yaml` 업로드도 됨). 이메일은 예산 알림 수신 주소.
+   `aws cloudformation create-stack --region us-east-1 --stack-name billiards-rl-cloud --template-body file://cloud/stack.yaml --capabilities CAPABILITY_IAM --parameters ParameterKey=VpcId,ParameterValue=vpc-03f8ab9036f38afd9 ParameterKey=AlertEmail,ParameterValue=<이메일>` (vpc는 us-east-1 기본 VPC)
+3. 배포가 끝나면 Claude가 `launch.py` dry run으로 권한을 확인하고(비용 없음), 짧은 smoke job(약 10분, 약 $0.2)으로 `setup_cloud.sh`가 Linux에서 실제로 되는지 먼저 본다. **실제 launch는 그때 사용자에게 확인받고 시작한다.**
+
+**진행 기록 (2026-10-17)**
+- 1번 완료: Spot vCPU 한도 64 승인·적용 확인(08:59 KST). 2번 완료: stack `billiards-rl-cloud` 배포 성공(us-east-1), `agent_machine`으로 dry run 통과.
+- smoke job 첫 launch(08:59, 사용자 승인 후 예약 실행)가 **실패했다**: `InvalidParameterCombination: The specified instance type is not eligible for Free Tier`. dry run은 권한만 보기 때문에 이 오류를 못 잡았다. 조회해 보니 계정이 **Free Plan**(`accountPlanType: FREE`, 남은 크레딧 $120, 만료 2027-04-16)이고, Free Plan은 Free Tier 대상 instance type만 허용한다. instance·Spot 요청은 만들어지지 않았다(과금 없음). 같은 launch를 한 번 더 시도해도 같은 오류라 반복하지 않았다.
+- **다음 필요한 것(사용자)**: Billing 콘솔에서 계정을 **Paid Plan으로 업그레이드**. 업그레이드 후 남은 크레딧이 유지되는지는 확인 화면의 안내를 읽고 판단해야 한다(AWS 문서 기준으로 확인 필요). 그다음 Claude가 같은 smoke job을 다시 시도한다(launch 전에 사용자 확인).
+- launcher 보완: `run_aws`가 실패 시 AWS 에러 문장을 숨기던 문제를 고쳤다(19841bb).
+- Paid Plan 업그레이드 확인(`accountPlanType: PAID`, 남은 크레딧 $120 유지).
+- **smoke-2 (09:13, 실패, 약 $0.02)**: Linux에서 `pooltool-billiards==0.5.0`이 `panda3d==1.11.0.dev3702`(PyPI에 없는 dev 빌드)를 요구해 설치가 멈췄다. Mac은 같은 pooltool 0.5.0이지만 panda3d 1.10.16을 쓴다(pooltool이 OS별로 다르게 요구) — 그래서 Mac에서는 드러나지 않았다. `setup_cloud.sh`에 `--extra-index-url https://archive.panda3d.org/` 추가(73f9c3e). Mac의 설치 버전과 `requirements-cloud.txt` 18개 패키지는 모두 일치함을 확인.
+- **smoke-3 (09:19, 성공)**: STATUS 0, 약 2.5분(약 $0.05, Spot $0.93~1.18/시간). 서버는 **64 vCPU**(`nproc` 64, torch threads 64), torch 2.10.0+cpu·numpy 2.4.2·numba 0.64.0, Python 3.13.16, smoke test 10 passed 1 skipped(skip = relabel sims 데이터가 번들에 없어서, 예상된 것). 서버는 스스로 종료됐고 남은 instance 없음.
+- **서버와 Mac의 차이(주의)**: panda3d(서버 1.11 dev, Mac 1.10.16)와 CPU 구조(x86 vs arm64)가 다르다. 물리 계산이 두 환경에서 같은 결과를 내는지는 아직 확인하지 않았다 → 다음 단계에서 같은 state·같은 action 몇십 개를 양쪽에서 시뮬레이션해 비교한다. 확인 전에는 **서버 결과끼리만 비교**한다(같은 코드·같은 환경 control).
+
+**아직 못 한 검증**: `validate-template`(문법)만 통과. cfn-lint·cfn-guard는 설치돼 있지 않아 설치 승인 후 돌린다. `setup_cloud.sh`(특히 Linux x86_64에서 pooltool·numba·torch CPU wheel 설치)와 launch 권한은 위 3번의 smoke job 전에는 확인되지 않은 상태다.
+
+**branch 정리 (제안)**: 지금 `feature/exp16-imitation-teacher`가 원격보다 111 commit 앞서 있고, 최근 작업(teacher 없는 학습·루프)은 이름과 맞지 않는다. ① 지금 branch를 push하고 `dev`로 PR(CLAUDE.md: main 직접 merge 금지) ② 다음 단계(클라우드 실행 스크립트, 루프 반복, EE1~EE4)는 지금 HEAD에서 새 branch `feature/exp16-teacher-free`로.
+
+### 그다음: 여러 단계(다음 샷)를 보는 RL
+- 지금 made head는 이번 샷만 본다. 과제의 목표(적은 샷으로 모두 넣기)에는 넣은 뒤 수구 위치(다음 샷이 쉬운가)도 중요하다.
+- 평가를 `Q(s, a) = P(made | s, a) × (1 + V(s'))` 꼴로 확장한다. `s'`는 시뮬레이터 또는 world model로 얻는다.
+- world model의 역할: 포켓 판단만큼 정밀하지 않아도 되는 "수구가 대략 어디에 멈추나"(다음 상태, scratch 위험). 쿠션 반사·충돌이 이어지는 rollout은 오차가 커지므로 포켓 판단에는 쓰지 않는다.
+- 회전(타점) 행동(보류 목록)은 `V(s')`가 생긴 뒤에야 의미가 있다.
+- 참고: 일반 RL(SAC)은 7.4~7.9 shots에 머물렀다. 제안 + 검증 + 탐색을 구조로 넣은 쪽이 훨씬 잘 된다.
+
+### 위험
+- 한 made head로 모든 pair·후보를 고르면 과대평가된 후보를 고를 수 있다(E14). T3로 대응.
+- teacher의 state 분포에서 벗어나면(T5) 정책이 처음 보는 state가 늘어난다.
+
+## Next: 탐색 + 학습 (expert iteration) (2026-10-09 제안)
+
+### 왜
+
+- **bitter lesson**: 계산이 늘수록 강해지는 일반적 방법은 탐색과 학습이고, 사람 지식(기하 주입 등)은 결국 이 둘에 밀린다.
+  이 과제에서는 탐색이 이미 사람 지식 없이 이긴다 — 무작위 후보 + pooltool 시뮬레이션만으로 50후보/샷 2.98샷,
+  200후보/샷 2.50샷(샷당 성공률 94% → 100%). vanilla SAC는 7.89샷(샷당 ~38%).
+- **SAC가 못 푸는 이유는 학습 신호**: 노이즈 낀 정책 그래디언트로 행동 범위의 ~0.07%인 정답 각도를 더듬어 찾아야 한다.
+  학습 중 조준 흔들림(std 4.5°) 아래서는 정답 조준(21%)이 세게 치기(33%)보다 못해 국소 최적에 머문다
+  (experiments.md "SAC 엔트로피 보너스 측정"). 탐색은 같은 시뮬레이터로 정답 샷을 직접 찾는다.
+- → 탐색이 찾은 샷을 정책이 **지도학습 목표로** 배우게 하면, 노이즈 그래디언트보다 훨씬 정확하고 강한 신호가 된다.
+
+### 루프
+
+```
+반복:
+  1. 데이터: 현재 정책으로 게임을 진행. 매 샷 후보 = 정책 샘플 K개 + 무작위 M개
+     → 각 후보를 pooltool 복사본에서 쳐보고 최선 a* 선택 (처음엔 즉시 리워드 기준)
+     → (s, a*) 저장, 실제로는 a*를 친다
+  2. 학습: 정책 π(a|s)를 a*에 대한 지도학습(log π(a*|s) 최대화 또는 회귀)으로 갱신
+  3. 정책이 좋아질수록 정책 샘플이 좋은 후보가 되어 탐색 예산(K+M)을 줄일 수 있다
+평가: 정책만으로(탐색 없이, 시뮬레이터 없이 한 번에) 친 게임당 샷 수
+```
+
+- 사람 지식 0: 후보는 정책 샘플과 무작위뿐, 기하 계산 없음.
+- 핵심 지표는 **탐색 없는 정책 단독 성능** — 탐색을 학습으로 얼마나 압축했는가. 기준점: vanilla SAC 7.89샷(하한),
+  무작위 탐색 200후보 2.50샷 / 기하 플래너 2.24샷(상한 쪽).
+- 보조 지표: 같은 성능을 내는 데 필요한 탐색 예산, 학습 곡선.
+
+### 단계
+
+1. **즉시 리워드 기준 탐색 + 정책 증류** — 위 루프 그대로. 매 샷 넣는 것(조준)을 사람 지식 없이 배우는지.
+2. **가치 기반 탐색** — 후보 점수를 즉시 리워드 대신 `r + γ·V(s')`로(V는 탐색으로 개선된 플레이의 return으로 학습).
+   다음 샷 포지션과 한 샷 다중 포켓(3.0 → 2.2샷 구간, 충돌 뒤 물리)을 학습으로 다루는 단계.
+3. **world model 연결 (MuZero 방식)** — 탐색에 쓰는 pooltool을 학습된 모델로 대체. 그동안의 WM 작업이 의미를 갖는 자리:
+   critic 보조 loss가 아니라 탐색용 모델. 선결 조건은 자유 롤아웃 정확도 — 현재 R-SSM 자유 롤아웃의 pocket 판별은
+   AUC 0.56(D4)으로 탐색에 쓰기엔 부족하다.
+
+### 비용
+
+- 후보 1개 시뮬레이션 ~2ms → 200후보/샷이면 ~0.4초/샷. 20만 샷 데이터 = 코어 1개로 ~22시간, 10코어로 ~2.2시간.
+  50후보/샷이면 1/4. 정책이 좋아져 예산을 줄이면 더 싸진다.
+
+### 열린 질문
+
+- 정책 형태: 지금의 TanhGaussian actor를 그대로 쓰고 지도학습만 바꿀지, 좁은 정답 각도를 잘 표현하는 출력(혼합분포 등)이 필요할지.
+- 즉시 리워드 기준 a*는 탐욕적이다 — 2단계 전까지는 포지션 플레이를 배우지 못한다.
+- ~~SAC(엔트로피 낮춤) 결과와의 관계~~ → 답 나옴(2026-10-09, seed 0): 조준 흔들림을 0.34°까지 줄여도 정책은 세게 치기에서
+  벗어나지 못했다(조준 오차 2.08° 그대로, 7.89 → 7.39샷). 학습 신호 문제가 노이즈보다 근본적이라는 근거 → 정답을 직접 주는
+  모방학습(0단계)부터 진행 중.
+
+---
+
+## Next: BC 후속 작업 (pair supervision 이후, 2026-10-09)
+
+### 현재까지의 결과 (GNN, relative obs, 증강 없음, 1.67만 states, policy alone 500 games, seed 0 1회)
+
+| label | WTA, const lr (이전) | **pair supervision, cosine lr** | intended pair made (label 기준) |
+|---|---|---|---|
+| robust teacher v1 | 6.18 shots/game | **4.35** | 97.7% |
+| margin teacher v2 (각도×속도 2D margin) | (미실행) | **4.41** | 95.5% |
+| geom teacher (32 cand.) | 9.48 | **4.34** | 73.5% |
+
+SAC 7.89, 엔트로피 낮춘 SAC 7.39, teacher 자체: geom 2.24 / random search 2.50 / robust 2.98. **label 종류의 차이는 pair supervision에서 사라졌다** (이전 6.18 vs 9.48은 WTA 불안정성의 산물).
+policy의 shot 실패 분해(robust+pairs, val): chosen pair miss ~24%, chosen pair made지만 scratch 8%, 다른 pair를 clean하게 넣음 1~4%.
+선택한 pair와 action의 일관성(clean pocket 중 chosen pair였던 비율)은 94~98%.
+
+### 현재 상태 (2026-10-12) — 결과 사다리와 병목
+
+정책 단독 500 games, seed 3개 평균(별도 표기 없으면 GNN, relative obs, robust label, pair supervision). 상세와 근거는 experiments.md의 2026-10-11 항목들.
+
+| 단계 | shots/game | success | 무엇을 바꿨나 |
+|---|---|---|---|
+| vanilla SAC (참고) | 7.89 | 38.7% | – |
+| BC baseline A | 4.51 ± 0.23 | 66.2% | label pair 없는 1.37% row를 WTA loss로 학습(그 row가 train loss의 66%를 차지) |
+| **BC 새 baseline** (`--no-wta-fallback`) | **4.14 ± 0.14** | 71.9% | 그 row를 loss에서 제외 |
+| + made head(look-ahead 2단계) select | 4.11 ± 0.20 | 72.5% | action을 받는 made head를 학습(칠 때는 안 씀) → 해롭지 않음 |
+| + verify + refine(각도 31 × 절대 speed 7) | **3.90 ± 0.21** | 76.7% | made head로 pair 재선택 + action 후보 평가(시뮬레이터 없이) |
+| **+ encoder 깊이 4**(2층 → 4층, made head 포함, verify+refine) | **3.55 ± 0.10** | 84.2% | encoder MLP를 깊게(기하 입력 없이 학습만으로) — pair head 각도 오차 −24%, 창 적중 81 → 86.5% |
+| 깊이 6 / 깊이 8 (층 수만 변경, 500 epoch) | 3.77 ± 0.16 / 3.94 ± 0.11 | 79.6% / 76.0% | 깊이 4보다 **나쁨**(8층은 control 수준). train loss가 안 내려갔다 → **1500 epoch에서 깊이 6이 회복(아래 행): 학습 예산 부족이었음** |
+| 깊이 6, 1500 epoch (깊이 4도 1500 epoch) | 3.51 ± 0.05 (깊이 4: 3.59 ± 0.10) | 85.1% (83.4%) | 같은 길이 깊이 4 대비 "효과 인정" 기준 미충족(각도 −0.009°는 경계, 게임 차이는 표준편차 안). 깊이 4는 길게 돌려도 불변. 비용 약 3.5배 |
+| (진단 전용) + 기하 조준각 차이 입력 | 3.46 ± 0.12 | 86.4% | made head에 ghost-ball 조준각과의 차이를 입력 — **상한 참고, 최종 모델이 아님** |
+| teacher (robust / geom) | 2.98 / 2.24 | – | – |
+
+**병목 = `e_ij`(pair embedding)가 각도를 0.1° 정밀도로 담지 못하는 것.** 근거: (1) 남은 공 2개 state는 성공 창 폭이 같은데(0.96° vs 0.92°) 모델 각도 오차가 2배(0.22° vs 0.12°); (2) label은 순수 기하 조준각의 ±0.05° 안이라 깨끗하다; (3) made head는 train과 val 정확도가 같아(AUC 0.831 vs 0.846) 다양성이 아니라 해상도 문제; (4) head에 기하 조준각 차이를 직접 주면 창 위치 적중이 81% → 95%, 2개 state 성공이 66.8% → 76.8%.
+
+**2026-10-12 보강·정정** (experiments.md "깊이 4에서 남은 실패는 어디서 오는가"): (5) 깊이 4에서 label pair를 정확히 줘도 verify+refine이 13.7%p 실패하고 선택 손실은 4.2%p다 → 남은 실패의 약 77%가 선택이 아니라 정밀도다. (6) 각도만 고치는 refine(made head 격자·gradient)은 이득 0이고 refine의 이득은 speed 격자에서 나온다. **정정**: (4)와 용량 실험에서 쓴 "스캔 argmax가 창 안"은 made head의 해상도가 아니라 **pair head proposal의 적중률과 같은 값**이다(깊이 4: 86.5% = 86.5%, 우연 53.8%; proposal이 창 밖인 44개 state에서 head가 창 안으로 옮긴 것은 4.5%). made head는 proposal에 앵커돼 있어 proposal 밖의 창 위치 정보가 없고, 기하 입력(95.1%)만 그 정보를 준다. 이전 서술은 기록으로 두고 해석만 바로잡는다.
+
+**기각된 가설** (전부 실험으로): 일반화/데이터 양(공 2개 데이터 3.7배 추가에도 불변), 포켓된 공 slot 표현, label 불일치·불규칙(flip), 방해 공, 창 폭/난이도, speed hedging(모델이 두 모드 사이로 평균을 내지만 성공에 영향 없음), selection 구조/target(①②), scratch head(④), made head 보조 target(⑤), 이웃 message 간섭(`--geom-angle`), 다른 공의 target(③ `good_made`: combination shot이 pair head 학습을 망가뜨림), scatter 구제(타겟이 아닌 공이 들어가는 비율 ~1%), refine 후보 수/각도 범위(포화).
+
+**열린 결정** (사용자가 정한다):
+1. 학습만으로 정밀도를 못 올리면 ghost-ball 기하 조준각 차이를 made head(verifier)에만 입력으로 허용할지. "탐색 + 학습" 방침(bitter lesson)과 충돌한다. 단 위 정정대로 "argmax ≥ 90%"는 made head 해상도가 아니라 proposal 정확도의 기준이다.
+2. **다음 단계 (2026-10-12)**: (a) search → distill(TODO 19: 분포 head + 시뮬레이터 best-of-N → 성공 샘플로 재학습), (b) speed 쪽 개선(TODO 21), (c) loss 스케일. 학습 길이 실험은 끝났다(깊이 축은 일단 닫음: 깊이 4, 500 epoch이 비용 대비 최선).
+
+### 아이디어 지도 (2026-10-12) — 주제별 2단계 정리
+
+현재 병목은 **고른 pair의 action 정밀도**다(깊이 4에서 label pair를 줘도 13.7%p 실패, pair 선택 손실은 4.2%p). 그 실패는 (pair head 출력, select 기준으로) **각도(+9.9%p)와 speed(+8.0%p)가 거의 가산적**으로 만들고, 깊이 4는 각도만 개선했다. 단 실제 정책은 verify+refine이라 refine의 speed 격자가 speed 문제를 일부 풀고 있어, speed 상한 +8.0%p는 파이프라인의 개선 여지가 아니었다(speed 분포 head로 확인). 상태 표기: **[완료]** 결과 있음 / **[진행]** 실행 중 / **[미착수]** 아직 안 함 / **[보류]** 사전에 멈춤. 숫자는 experiments.md의 해당 절.
+
+**1. 데이터와 teacher**
+- **[완료]** label 없는 1.37% row를 WTA loss로 학습하던 문제 → `--no-wta-fallback`으로 4.51 → 4.14 (그 row가 train loss의 66%)
+- **[완료]** 공 2개 데이터 3.7배 추가 → 불변. label 불일치·flip, 방해 공, 창 폭/난이도 → 기각
+- **[완료]** 게임 vs val 격차 규명(#16): 분포 이동 없음(남은 공 수별 성공률이 val과 1.5%p 이내). 실패 직후 state만 어렵고(71.3% vs 82.2%) 실패의 27%만 거기서 나옴 → 정책이 가는 state에서 label을 받는 이득의 상한은 clean +2.0%p 정도
+- **[보류]** DAgger(#10): 위 결과로 우선순위 낮음
+- **[미착수]** position play·multi-ball teacher(#11) (지금 게임 성능은 shots/game ≈ 3 / 샷 성공률로만 결정됨)
+
+**2. Pair 선택**
+- **[완료]** factorized ①, made selection target ②, scratch head ④ → control과 동일. `good_made` ③ → 7.63으로 악화. made head 보조 target ⑤ → 효과 없음
+- **[완료]** 깊이 4에서 선택 손실 4.2%p (병목 아님). 깊이 > 4에서는 3개 state의 선택이 나빠짐
+
+**3. Action 정밀도: 모델 구조와 학습 (현재 병목)**
+- **[완료]** GNN + pair supervision, encoder 깊이 4 → 3.90 → 3.55. 폭 256 → 작은 효과(보류). 깊이 6/8 → 3.77 / 3.94(최적화 문제)
+- **[완료]** 이웃 message 빼기(`--geom-angle`), 포켓된 공 slot 표현 → 효과 없음. angle wrap-aware loss → policy 악화(이유 미규명). lr decay 단독 → 악화
+- **[완료]** 학습 길이 3배(1500 epoch): 깊이 6의 500 epoch 열세(3.77)는 학습 예산 부족이었고(1500 epoch에서 3.51), 같은 길이의 깊이 4(3.59)와는 차이 없음. 깊이 4는 길게 돌려도 불변
+- **[미착수]** residual/LayerNorm + lr 3e-4(#18, 필요성 크게 줄어듦: 깊이 6도 길이로 수렴함), 좌표 sin/cos(#14), 폭+깊이 결합
+- **[미착수]** loss 스케일 `--angle-scale-deg 0.1`, EMA/마지막 epoch checkpoint(#9), lr/clip 정리(#1b), Laplace NLL robust loss(#20)
+- **[미착수]** 2개 state 약점의 구조적 원인(#17), 이전 비교의 pair supervision 조건 재실행(#7)
+
+**4. 추론 때 보정 (made head, verify/refine)**
+- **[완료]** made head + verify + refine(각도 31 × 절대 speed 7) → 3.90. refine의 이득은 각도가 아니라 speed에서 나옴. 각도만 조정(격자·gradient)은 이득 0
+- **[완료]** made head의 "스캔 argmax가 창 안"은 proposal 적중률과 같은 값(정정), head는 proposal에 앵커됨
+- **[완료]** verify+refine 출력 기준 oracle 교체와 실패 예산(판단표 C): 정책 실패 17.8%p = 각도 7.7 + pair 선택 4.2 + speed 2.9 + 결합·기타 1.9 + 못 고침 1.2. speed 여지는 select 기준 8.0이 아니라 2.9%p, 각도·speed 결합은 1.9%p로 작음(cascade 불필요). 남은 공 2개 각도 손실 16.3%p
+- **[완료]** oracle 교체(label의 각도/speed로 바꿔 치기): 각도 +9.9%p, speed +8.0%p로 거의 가산적(판단표 E). (select 기준, 위 실패 예산으로 대체됨) **깊이 4는 각도 쪽만 개선**(speed는 그대로), 남은 공 2개의 약점은 각도
+- **[완료·참고용]** 기하 조준각 차이 입력 → 3.46 (상한 참고, 최종 모델 아님)
+- **[보류]** gradient refine ∇ₐP(made)(#15) — head가 proposal 밖 정보를 가질 때까지
+- **[완료·판단 불가]** 기하 look-ahead 보조 목표(`--geom-aux-weight 5`, 포켓 입구 편차·쿠션 거리·경로상 다른 공): 고정 encoder probe R²가 control과 같아 정보가 심기지 않았고(판단표 M), 보조 head 자신도 학습 state에서 R² 0.23~0.53(underfit), 게임 3.66 vs 3.55·success@1 −0.3~−2.3%p(seed 변동 안). 유용성은 미판단. 보조 loss 곡선(seed 0): 1.0 → 0.64, 마지막 epoch까지 계속 내려감(t90 = epoch 344, 250→499 낙폭이 총 낙폭의 38%, 판단표 A) → "못 배운다"가 아니라 학습량·가중치 부족일 가능성. 가중치 5 → 20(seed 0)도 보조 MSE 0.64 → 0.555뿐(판단표 W), probe R² 불변 → 가중치는 한계가 아님. 보조 head는 같은 `e`를 읽는 사후 MLP보다 못 읽음(label pair 기준) → 목표만 학습하는 encoder(aux-only): 보조 val MSE 0.1865(joint 0.56~0.65), 경로상 다른 공은 R² 0.97 이상으로 풀림 → 용량이 아니라 BC loss와의 경쟁이 원인(가설). 단 입구 편차·쿠션 거리는 혼자 학습해도 R² 0.5~0.7. 사전학습 → BC(첫 epoch에 새 head가 encoder를 덮어씀)는 blocker probe 0.79 / 0.67을 남겼지만 made head success@1 77.8%·각도 0.122°로 두 축 모두 나빠짐. 얼린 특징 위 made head(A/B/C): 기하 특징을 줘도 success@1이 오히려 −1.3%p(판단표 D) → 기하 특징을 **얼린 채 읽으면** 순위가 오르지 않음→ **적응형(정책과 분리된 encoder를 made BCE로 end-to-end 학습)도 83.0~83.7%(무작위 초기화 82.4%)로 안 오름(판단표 N).** made head success@1이 입력·초기화·적응과 상관없이 82~84%에 머묾 → 다른 한계 의심. **노이즈 조준각 진단(판단표 F): 정확한 조준각을 줘도 success@1 85.7%(A 83.2%, +2.5%p)뿐 → 조준각 정밀도 가설 철회.** **원인 분석(정정)**: speed 몫은 oracle을 센 착오(teacher speed로는 +2.9%p, 이전과 동일). top-1 실패의 74%는 후보 순위가 아니라 verify가 teacher와 다른 pair를 고른 state(실패의 59%)와 제안이 0.3° 넘게 빗나간 state(15%)에서 나옴; 정상 state는 이미 93.1%. 평가 표가 pair를 고정해서 made head 실험들이 82~84%에서 안 움직였음. pair 선택을 포함한 평가 필요. **2026-10-13 E0~E3**: teacher pair 교체 +13%p(다른 pair 묶음), on-policy pair 후보·데이터 2배로 재학습해도 불변(N), 학습한 조준각(전용 encoder)은 0.113°로 pair head 0.086°보다 정밀하지 않음(P0), **깊이 4 + 정확한 조준각은 게임 3.55 → 3.37·clean +3.1%p(G1)** → **E4 학습한 조준각 cascade: 게임 3.62(control 3.55, seed 3개 모두 나쁨, 판단표 C0)** → 조준각 정밀도는 실제 원인(E2: −0.18 shots)이지만 학습으로 그 정밀도를 못 얻음(E3·E4). E4 검증: 손실의 85%가 조준각 오차 ≥ 0.1° state. **E5·E6: Fourier 입력은 효과 없음(T0), 학습 길이가 꼬리를 줄임 — 조준각 encoder 3000 epoch에서 중앙값 0.039°·p90 0.173°·0.1° 이상 20.1%(500 epoch 53.0%, pair head 41.5%)**, 통과 기준 20%에 0.1%p 미달(TG). E7(encoder 1개) seed 0: clean +1.7%p, shots −0.04(불분명). E8: 단일 encoder 포화(5000 epoch 17.7%), **encoder 4개 평균은 오차가 독립이라 10.0%** → **E9(4개 평균 cascade) seed 0: 짝지은 2000판 shots 3.592 → 3.393(−0.199 ± 0.031), 샷 성공률 83.2 → 88.1%, 정확한 조준각(E2 −0.141)과 같거나 그 이상**. **E10(seed 1·2 재현): 3 seed 짝지은 2000판 shots 3.572 → 3.402(−0.170, seed 모두 개선, 판단 C1), 정확한 조준각(E2 −0.183)의 약 93%, action 유지(select −0.4%p, 각도 −0.002°) → 채택 후보.** **추론 비용: 샷당 1.11 ms(control 0.35, 시뮬레이터 검증 약 41 ms). E11(같은 길이 2000 epoch × 4개, `--init-seed`, 학습량 38% 감소) × seed 5개: 짝지은 2000판 shots 3.60 → 3.43(−0.173, 5/5 개선), clean v+r +3.0%p, action 평균 유지(각도 +0.004°, select −0.7%p; seed 4만 개별 초과) → 채택.** E12(추론만): 후보 격자 중심을 학습한 조준각으로 옮겨도 게임 불변(AIM −0.004, BOTH +0.015, G=); **pair head 각도를 학습한 조준각으로 바꾸면 select val clean 73.9 → 78.7%(+4.8%p, 5/5, A+)** → E13: verify 평가점을 학습한 조준각으로 바꾸면 teacher pair 일치 +1.0%p지만 게임 +0.043(0/5 개선, G=) — 채택 안 함. E14: made head만으로 모든 pair 격자에서 고르면 +0.059(G−, selection 사전 확률은 필요), selection 사전 확률 + 모든 pair 조준각 격자는 −0.017(N, pair head 제안은 추론에 불필요). 다음 후보: pair 선택의 정답을 시뮬레이터 결과에서(teacher 제거), pair head 잔차 학습(조준각 입력), 탐색으로 얻은 목표로 조준각 encoder 학습(공식 제거), 정책 앙상블. 병목 후보: 조준각의 서브 0.1° 정밀도(pair head 정밀도와 같은 한계)
+- **[미착수·아이디어]** made head를 proposal 앵커에서 풀기(입력 차이 제거 또는 proposal 무작위 섭동). 격자 oracle의 상한(99.2% vs 84.8%)은 크지만, 기하 입력을 준 made head도 verify+refine이 82.6%(2층)에 그쳐 학습된 verifier로 얼마나 따라갈지는 불확실하다
+- **[완료·기각]** 재시도 시 탐색(TODO 22): miss·scratch 직후 샷의 object ball 배치가 그대로인 비율은 22~24%뿐(대부분 새 배치). 그대로인 그룹이 더 어렵지만(−9.9%p) 전체 샷의 4%라 이득 상한 +0.4%p → 접음
+- **[완료·부정적]** speed 분포 head(TODO 21): L1과 구간별 확률(21구간) 모두 select 수준에서는 의도대로(select clean +3.2/+3.6%p, 틈 실패 70% → 43%) 그러나 verify+refine 파이프라인에서 게임이 나빠짐(3.55 → 3.78/3.82, 3 seed 모두). 실패가 틈에서 "잘못된 모드(아래)"로 이동. 채택하지 않음. 확률대로 뽑기도 도움 안 됨
+
+**5. 탐색 + 학습 (expert iteration, RL 연결)**
+- **[완료]** Laplace 샘플링: 샘플 하나를 그대로 치면 손해, 시뮬레이터가 6개 중 고르면 81.8 → 92.6% (추론 때 시뮬레이터가 있을 때의 상한)
+- **[완료]** 틀 정리: 샷 단위 contextual bandit, RL 용어 대응
+- **[완료]** 격자 oracle: 모델 action 주변(각도 ±0.3° × speed 7개)에 해가 99.2% state에 있는데 made head는 84.8%만 고름 → 시뮬레이터 검증/탐색의 근거
+- **[미착수]** search → distill(#19): A positives-only / B baseline REINFORCE + negatives / C 경계 중앙 label
+- **[미착수]** 분포 head(Laplace/mixture) 학습, policy gradient 계열 fine-tune(#12)
+
+**6. 방법론과 검증**
+- **[완료]** control 동일성 확인, 판단표 사전 등록, 기준선 정정, `eval_by_balls` / `diagnose_action` 도구화
+- **[미착수]** seed 5개 반복(판단표 E/F 행이 나올 때), margin/geom32 label의 seed 반복(#1)
+
+**결정 대기**: (1) 기하 조준각 입력을 made head에만 허용할지(bitter lesson과 충돌), (2) 다음 단계를 search → distill로 갈지 residual/LayerNorm 깊이 재시도로 갈지.
+
+### 지금 실험할 만한 것 (2026-10-12, 우선순위, verify+refine 기준 실패 예산 반영)
+
+**기준 데이터 — 정책이 실제로 치는 행동의 실패 예산(깊이 4, 실패 17.8%p)**: **각도 7.7 (43%)** / pair 선택 4.2 (23%) / speed 2.9 (16%) / 각도·speed 결합·기타 1.9 / label action으로도 못 고침 1.2. 남은 공 2개 state의 각도 손실은 16.3%p, 3개 state의 pair 선택은 6.5%p. 판단표 C(각도 지배). 상세는 experiments.md "verify+refine 출력 기준 oracle 교체와 실패 예산".
+자원: 학습 길이 실험이 끝나 CPU가 비었다. 판단표는 실행 직전에 결과를 보기 전에 정한다(experiments.md 규칙).
+
+| 순위 | 실험 | 겨냥하는 몫과 근거 | 비용 | 시점 |
+|---|---|---|---|---|
+| – | ~~각도 정밀도: loss 스케일 `--angle-scale-deg 0.1`~~ / Kendall 자동 가중치 | **[완료·효과 없음]** 각도 가중치 4배: 각도 오차 0.097 → 0.096°(변화 없음, 판단표 C), 게임 3.62. Kendall: 각도 오차 +0.018°, 게임 3.83(기준보다 나쁨, 판단표 D). 각도 가중치는 병목이 아님 | – | – |
+| 2 | **각도 정밀도: 창 폭 가중 손실** (좁은 창에 정밀도를 몰아주기) | 각도 창 폭이 state마다 3.6배 이상 다름(실측). 점 label은 폭을 모름. 가설(미검증). 폭 계산이 선행(약 16분, 학습 없음) | 폭 계산 + 손실 코드·테스트 + BC 3 runs | 1번 결과 후 |
+| 3 | **각도 verifier**: made head가 각도를 고르지 못함(격자에 해 99.2% vs made head 84.8%). **search → distill 1단계(시뮬레이터 결과로 made head on-policy fine-tune, positive·negative 사용)는 효과 없음**(success@1 +0.2%p, 게임 +0.075 shots, 판단표 C). encoder를 고정한 made head는 데이터가 있어도 순위를 못 올림. **기하 look-ahead 보조 목표도 encoder에 정보를 심지 못함**(판단표 M, 보조 head가 학습 state에서도 R² 0.23~0.53). 다음은 encoder가 기하 목표를 배울 수 있는지 확인 → 아니면 verifier 전용 encoder(원시 좌표) 또는 추론 때 시뮬레이터 검증 | 완벽한 verifier는 게임 3.55 → 3.02 shots(샷당 시뮬레이터 확인 평균 11회). 각도 손실이 proposal 때문인지 verifier 때문인지는 verifier 쪽으로 기움 | 설계 필요 | 지금 가능 |
+| 4 | **pair 선택** (손실 4.2%p, 3개 state 6.5%p) | 새 아이디어 없음. 3개 state에서 선택 손실이 각도와 비슷한 크기 | – | 보류 |
+| – | speed 개선 | **접음.** 최종 행동 기준 여지가 2.9%p뿐이고(select 기준 8.0%p는 refine이 풀어 줌), speed 분포 head는 게임이 나빠짐 | – | – |
+| – | cascade / 결합 모델링 | **접음.** 각도·speed 결합 손실이 1.9%p뿐이라 얻을 몫이 작음 | – | – |
+| – | 깊이 / 학습 길이 / 재시도 노이즈 / DAgger | **닫음.** 깊이 4, 500 epoch이 비용 대비 최선(각도 손실은 깊이가 줄이나 speed·선택이 늘어 깊이 6도 P가 같음). 재시도 이득 상한 +0.4%p, 정책 state 이득 상한 +2.0%p | – | – |
+| 상시 | 새 run부터 **마지막 epoch 가중치도 저장**(#9) | 최댓값 선택의 낙관 편향 보정(best-vs-last 비교) | 코드 약 5줄 + 테스트 | 다음 학습 run 전에 |
+
+**일단 보류**: sin/cos 표현(#14)과 Laplace NLL(#20)은 loss 스케일 결과가 나온 뒤, gradient refine(#15)과 made head 앵커 해소는 기하 입력 결정 후(상한은 크지만 학습된 verifier가 따라갈지 불확실), 폭 256 + 깊이 4 결합은 효과가 작아 보류.
+
+### 다음 방향 (판단 트리)
+
+결과별 판단 세부표는 experiments.md "encoder 용량 실험 — 결과별 판단표"(기준점과 정정 포함)에 있다.
+
+| 지금 | 결과 | 다음 |
+|---|---|---|
+| encoder 용량 — 폭 256: 효과 작음(보류). 깊이 4: 효과 큼(판단표 C). 깊이 6/8(500 epoch): 깊이 4보다 나쁨. **학습 길이 3배: 깊이 6은 회복(3.77 → 3.51), 같은 길이 깊이 4(3.59)와 차이 없음, 깊이 4는 불변** | **깊이 축은 닫는다**: 깊이 4, 500 epoch 유지(비용 대비 최선). 깊이 8·residual/LayerNorm은 보류 | 남은 공 2개의 각도에서 깊이 6의 −20%(사후 관찰)가 중요해지면 재검토 |
+| 깊이 4 고정 상태에서 남은 실패 분해(experiments.md "깊이 4에서 남은 실패는 어디서 오는가") — **pair를 맞춰도 13.7%p 실패(선택 손실 4.2%p의 약 3배), 각도만 고치는 refine은 이득 0** | 학습 중 각도 정밀도를 더 짜내는 것 vs 시뮬레이터로 후보를 검증하는 탐색 | **사용자 결정 필요**: search → distill(TODO 19)을 먼저 할지, 깊이 재시도(TODO 18)를 먼저 할지 |
+| 깊이 재시도에서 개선 | 소폭 ↑ | sin/cos(Fourier) 좌표 표현을 같은 지표로 시험 |
+| | 변화 없음 | 학습 쪽(긴 학습, lr, EMA/마지막 epoch checkpoint = #9, loss 스케일 `--angle-scale-deg` 0.1) |
+| | train ↑ val ↓ | 데이터/정규화 |
+| made head가 proposal 밖의 정보를 가질 때(proposal이 창 밖인 state에서 head가 창 안으로 옮기는 비율이 의미 있게 오를 때; 깊이 4는 4.5%) | – | gradient로 action을 연속 공간에서 조정(`∇_a P(made)`, #6의 남은 부분). 지금 구조에서는 각도 gradient/격자 이득 0 |
+| 용량·표현·학습을 다 해도 proposal 정확도(= 스캔 argmax)가 90%에 못 미침 | – | **사용자 결정**: made head에만 기하 입력 허용 vs 학습만 계속 vs 탐색(TODO 19) |
+| 게임과 val 격차 | **규명 완료**: 분포 이동 없음, 정책 state의 이득 상한 clean +2.0%p | DAgger(#10)는 우선순위 낮음 |
+
+### 진행 상태 (2026-10-12, 아래 TODO 표 번호 기준)
+
+| # | 상태 |
+|---|---|
+| 1 | **완료.** 새 baseline은 `--no-wta-fallback` 4.14 ± 0.14 (baseline A 4.51은 fallback 때문에 높았음) |
+| 2+3+4 | **완료, 효과 없음.** ①구조·②target·④scratch는 control(4.08 ± 0.28)과 동일, ③ `good_made` target은 combination shot 때문에 7.63으로 악화(같은 공만 남기면 복구). 상세는 experiments.md |
+| 5 | **완료.** action-conditional made head(`--made2-head`), verify로 선택 재정렬 |
+| 6 | **부분 완료.** sims에 (ball, pocket) identity를 복원(`sim_identity.py`)하고 후보 평가 방식 refine까지 완료(각도는 포화, speed는 절대 격자가 최선). **∇_a P(made)는 head 정밀도(argmax ≥ 90%)가 오른 뒤로 보류** |
+| 9 | 아직. 용량 실험에서 학습 쪽 시도가 필요해지면 먼저 한다 |
+| 10 | 보류(위 판단 트리) |
+
+**신규 TODO** (2026-10-12)
+
+| # | 항목 | 이유 | 비용 | 의존 |
+|---|---|---|---|---|
+| 13 | **encoder 용량: 완료(2026-10-12).** 깊이 4가 비용 대비 최선(3.90 → 3.55), 폭 256은 효과 작음(3.84, 보류), 깊이 6 / 8은 500 epoch에서 3.77 / 3.94로 나빴으나 **1500 epoch에서 깊이 6이 3.51로 회복**(학습 예산 부족), 같은 길이 깊이 4(3.59)와는 차이 없음. 깊이 4는 길게 돌려도 불변 | 정밀도 병목이 용량(특히 깊이)인지 | – | – |
+| 14 | **좌표 sin/cos(Fourier) 표현** | 작은 각도 차이를 더 잘 구분하도록 | BC | 13 결과에 따라 |
+| 15 | **gradient refine** `∇_a P(made)` — **2026-10-12: 보류.** 4개 모델 모두 각도 gradient·격자 refine 이득 0(방향은 95~96% 맞지만 proposal로 되돌리는 방향, made head가 proposal에 앵커) | 후보 격자 없이 연속 탐색. 단 head가 proposal 밖의 정보를 가져야 의미 | 낮음(추론) | made head를 proposal 앵커에서 풀기(미착수) 또는 기하 입력 허용(열린 결정 1) |
+| 16 | **게임 vs val 격차 확인: 완료(2026-10-12).** 분포 이동 없음(남은 공 수별 성공률이 val과 1.5%p 이내), 실패 직후 state만 어려움(71.3% vs 82.2%, 실패의 27%). made head 이득이 게임에서 작았던 이유는 이 분석으로는 설명되지 않는다(미해결) | policy가 가는 state는 teacher state와 분포가 다름 | – | – |
+| 17 | **2개 state 약점의 구조적 원인** | 용량으로 안 풀리면 입력 분포·최적화 쪽(남은 공 2개 state만 각도 오차 2배) | – | 13 결과에 따라 |
+| 18 | ~~깊이 > 4 최적화 안정화~~ **[보류]**: encoder MLP에 residual connection 또는 LayerNorm, lr 3e-4로 6/8층 재시도 | 깊이 6이 1500 epoch에서 수렴해 필요성이 줄었고, 깊이 6이 깊이 4를 못 넘음 | – | – |
+| 19 | **search → distill (expert iteration)**: head가 분포(Laplace/mixture)를 내고, 샘플 N개를 시뮬레이터로 쳐서 성공한 샘플을 label로 재학습(filtered BC). 샷 단위 contextual bandit(shots/game ≈ 3 / 샷 성공률이 모든 모델에서 맞음) | 같은 label pair에서 샘플 6개 중 하나라도 성공하는 비율이 b = 0.10°에서 깊이 4 81.8% → 92.6%, 격자 oracle은 각도 31 × speed 7 중 99.2%(made head는 84.8%). critic이 필요 없고(시뮬레이터가 진짜 1-step return) 추론은 정책 단독. RL 대응은 experiments.md "head에서 샘플링해서 치면?" | 시뮬레이터 약 100k 샷/라운드(약 4분, 추정) + BC | **사용자 결정**(열린 결정 2) |
+| 21 | ~~speed 쪽 개선~~ **완료·부정적(2026-10-12)**: speed head를 L1 / 구간별 확률(21구간)로 바꿨더니 select clean은 +3.2/+3.6%p 오르고 틈 실패 70% → 43%였지만 verify+refine 게임이 3.55 → 3.78/3.82(3 seed 모두 나쁨). 채택하지 않음. 남은 의문: verify+refine 출력 기준으로 speed·각도 중 무엇이 남았는가(아래 우선순위 1번) | oracle 교체의 speed +8.0%p는 select 기준이라 파이프라인의 여지가 아니었음(정정) | – | – |
+| 22 | ~~재시도 시 탐색~~ **완료·기각(2026-10-12)**: miss 직후 배치가 그대로인 비율 22~24%(판단표 B), 이득 상한 +0.4%p. 원래 제안: 직전 샷이 miss였고 state가 거의 같으면 각도에 노이즈를 주는 롤아웃 | miss 직후 성공률 70.4% vs 정상 82.2%. 결정론적 정책이 같은 action을 반복해 또 실패하는 것일 수 있음(미검증). 샘플링이 이득이 되는 경우 | 학습 없음, 롤아웃 | – |
+| 20 | **Laplace NLL(고정 scale)을 robust loss로**: 제곱 오차 대체 | train loss의 66%가 label 없는 1.4% row에서 나왔고 loss가 소수 row에 지배됨. 샘플별 scale 학습은 어려운 2개 state를 덜 보게 할 위험이 있어 고정 | BC | – |
+
+### TODO 19 설계 메모: search → distill의 loss 비교 (2026-10-12 초안, 실행 전에 확정)
+
+**틀**: 샷 하나 = reset이 되는 contextual bandit. 정책이 각도(와 speed)를 흔들어 샘플 N개를 만들고, 시뮬레이터로 쳐서 성공/실패를 얻고, 그 결과로 정책을 다시 학습한다. 추론은 정책 단독. SAC로 말하면 actor loss의 Q 자리에 critic 대신 시뮬레이터의 1-step return이 들어가고, entropy ↔ 분포 폭 b. RL 용어 대응은 experiments.md "head에서 샘플링해서 치면?".
+
+**세 loss를 같은 state·같은 샘플로 비교** (실패 샘플을 어떻게 쓰는가)
+
+| | 방법 | 실패 샘플의 역할 | 위험 |
+|---|---|---|---|
+| A | **positives-only (filtered BC)**: 성공 샘플을 label로 supervised | 쓰지 않음 | 상태당 샘플이 전부 성공한 state(b = 0.10°에서 52.8%)는 정보 없이 "샘플 평균 쪽" 노이즈 업데이트. 전부 실패(7.4%)는 신호 없음 |
+| B | **per-state baseline REINFORCE**: advantage = R − (그 state 샘플들의 평균 성공률), 실패는 반대 방향으로 밀기, clip | 성공과 대비되는 음의 advantage | 한계 없는 밀기(평균이 멀리 가고 σ 증가) → advantage·ratio clip. 실패 원인이 각도가 아닐 수 있음(credit assignment) |
+| C | **경계 중앙 label**: 각도를 정렬해 `실패…성공…실패`에서 양쪽 첫 실패의 중점을 label로 | 창의 경계를 알려줌(저분산 supervised target) | 샘플이 창 양쪽 바깥에 있어야 함(좁은 노이즈로는 혼합 state 40%만). 한쪽만 있을 때의 처리는 미정 |
+
+- 기댓값 gradient는 A와 B가 같고(baseline이 state에만 의존) B는 분산만 줄인다. 새 정보는 혼합 state(약 40%)의 경계에서 온다.
+- 1단계는 **각도만**(label pair, speed = proposal)으로 한다: 실패 원인이 각도로 한정돼 credit assignment가 깨끗하다. speed·pair는 그다음. 실패 원인이 speed인 state(각도 노이즈로 닿지 못하는 ~7%)는 각도 샘플링만으로 신호가 없다.
+- 샘플링 예산은 세 방법이 같아야 한다(같은 state, 같은 샘플). 시작은 Laplace(b = 0.10°) × N = 6~8, 학습 state는 teacher train state(이전 run과 같은 코드·같은 split). 시뮬레이터 약 15k state × 8 ≈ 120k 샷, 약 5분(추정).
+
+**주의 (앞선 설명 정정)**
+- "샘플 6개로 81.8% → 92.6%"는 **추론 때 시뮬레이터가 고를 때의 상한**이지 distill 후 정책 단독 성능이 아니다.
+- teacher state에서는 teacher label이 이미 거의 창 중앙이다(기하 조준각 ±0.05°, teacher 성공 99.8%). search로 얻는 점 label은 teacher보다 정밀하지 않다. 기대하는 이득은 (i) 정책이 실제로 가는 state(게임 vs val 격차, #16)와 (ii) 창 안이면 gradient가 0인 tail 집중 loss이다. 따라서 teacher state에서만 비교하면 이득이 안 보일 수 있고, 그 경우 판단 D가 아니라 "state 분포를 정책이 가는 곳으로 옮긴 뒤 재시도"가 다음 행동이다.
+
+**비교 기준과 판단표 (초안)**: 정책 단독 500 games shots/game, seed 3개. control = 같은 길이·같은 구조의 현재 최선(깊이 4, 500 epoch 3.55 ± 0.10, 학습 길이 실험 결과로 바뀔 수 있음). "효과 인정" = seed 3개 모두 개선 + 평균 차이 ≥ 0.15 shots.
+
+| # | 관측 | 해석 | 다음 행동 |
+|---|---|---|---|
+| A | A·B·C 모두 control 안(차이 < 0.15) | teacher state에서 distill은 이득 없음 | 정책이 가는 state(DAgger식)로 분포를 옮겨 재시도, 또는 열린 결정 1(기하 입력) |
+| B | A만 개선, B·C는 A와 같음 | positives로 충분 | negative는 쓰지 않는다 |
+| C | B가 A보다 좋음(효과 인정) | 분산 감소 또는 경계 정보가 도움 | B 유지, speed·pair로 확장 |
+| D | C가 A·B보다 좋음(효과 인정) | 경계 중앙 label이 최선 | C로 확장, 양쪽 경계가 없는 state의 처리 설계 |
+| E | B가 A보다 나쁘거나 불안정(σ 증가, loss spike) | negative의 위험(한계 없는 밀기·credit assignment) | clip 강화 또는 A/C |
+| F | seed 하나만 반대 | 불확실 | seed 5개 |
+
+### TODO (우선순위순)
+
+| # | 항목 | 이유 | 비용 | 의존 |
+|---|---|---|---|---|
+| 1 | **Seed 반복** (pair supervision 3개 label × seed ≥3) | **seed 버그 수정 후** robust label은 3 seeds 완료: shots 4.51±0.23, success 66±3%. margin, geom32는 아직 1회 → seed std ~0.2-0.3 shots 때문에 label 간 4.34~4.41 차이는 판단 불가 | BC 5분/run | – |
+| 1b | **lr/clip 정리**: wrap 없음 + lr 3e-4, wrap + grad clip 등으로 baseline 설정 확정 | wrap 있음에서 lr 1e-3→3e-4가 5.59→4.94 (lr 민감). 1e-4는 6.30. wrap 없음은 lr 1e-3만 해 봄 | 6 runs ~10분 | – |
+| 2+3+4 | **한 번에 진행 중 (2026-10-09)** — 설계는 experiments.md "Pair-level outcome 통계로 selection 개선" 참고. 같은 데이터 하나로 묶임: 모든 pair(≤18)의 coarse candidate 20개를 simulation하고 event log로 pair별 {n, intended pair made(no scratch), any clean pocket, scratch} 저장(`exp16_wm/pair_stats.py`) | – | ~15분 + BC 3 seeds | – |
+| 2 | ↳ **factorized selection**: ball head + per-ball pocket softmax, target ∝ pair별 made hits (feasible한데 unlabeled인 pair가 false negative였던 문제) | label은 top-2 pair만 → 이 문제 | | |
+| 3 | ↳ **Outcome-grounded pair**: angle matching 대신 `good_made`(event log)로 regression/selection target (한 action이 여러 pair를 made하면 각 pair head가 그 action을 target으로) | geom label의 26%가 intended pair와 다른 outcome | | |
+| 4 | ↳ **Scratch**: "made" 정의에 no-scratch 포함 + pair별 scratch head(inference에 penalty 옵션) | chosen pair를 넣고도 scratch 8-11% | | |
+| 5 | **Made head** P(made_ij \| e_ij, a_ij) → pair 선택 보정(verifier) | selection이 "이 action이 성공할까"를 직접 보지 않음 | 중 | 3 |
+| 6 | **Dense success map** (sims 500만-2,100만 건) + test-time refinement ∇_a P(made) | miss 24%(0.1° 정밀도) 직접 겨냥. 단 sims에 (ball, pocket) identity 없음 → 기록 추가 후 재simulation 또는 angle matching(purity 72-99%) | 높음 | 5 |
+| 7 | **pair supervision 조건으로 이전 비교 재실행**: MLP vs GNN, augmentation(flip4는 pocket 순열 필요), data 8×, model size | 이전 모든 GNN 수치는 WTA 학습 | BC 여러 번 | 1 |
+| 8 | ~~robust+pairs의 val loss 이상~~ **완료 (2026-10-09)**: 원인 = ±180° seam에서 각도 loss 폭발(label의 1.3%가 backward shot, val 5개 state가 loss의 99%). pair 매핑 버그 아님. wrap-aware로 고치면 val loss는 정상이 되나 **policy는 악화**(4.51→5.59 shots, lr 3e-4에서도 4.94) → 기본값은 raw loss 유지(`--angle-wrap` opt-in). 이유 미규명 | – | – |
+| 9 | **Checkpoint 선택 잡음**: val within-0.2° 비율이 epoch마다 ±8%p 흔들림 → 최댓값 선택은 낙관적 | EMA weights / 더 큰 val / 마지막 epoch 평균 | 낮음 | – |
+| 10 | **DAgger**: policy가 가는 state에서 teacher에게 다시 label | train/val은 teacher states만. policy rollout은 다른 분포 | 중 | 1 |
+| 11 | **Multi-ball / position play**: robust teacher는 1.0m/s 1-ball shot을 골라 2.98 shots (geom 2.24) | "창이 충분히 넓은 shot 중 more balls" 기준 | 중 | – |
+| 12 | **SAC fine-tune from BC init** (엔트로피 낮춤) | BC 4.3 shots → teacher 2.2~3.0 격차, position play는 RL이 필요할 수 있음 | 중 | 1, 8 |
+
+실행 순서 제안: 1(seed) → 8(val loss 이상) → 2+3+4(label/selection 개선, 한 번에) → 5 → 7 → (6, 10, 11, 12는 결과 보고 결정).
+
+### 보류/기각
+- 행동 재파라미터화(ghost-ball 보정각): bitter lesson, 아래 보류 섹션.
+- lr decay 단독: 전체 데이터에서 도움 없음(robust 6.18 → 12.25).
+- **angle wrap-aware loss** (2026-10-09): val loss 이상(±180° seam spike)의 원인이었고 함수는 수학적으로 검증됐지만(주기, 범위, sin/cos 일치), 3 seeds 모두에서 policy가 나빠짐(4.51→5.59 shots; lr 3e-4에서도 4.94). 검증으로 기각된 가설: Adam 브레이크(step당 update 크기 0.0499 vs 0.0525로 동일), tanh seam trap(갇힌 출력 0개, non-seam label의 회귀 오차 동일). 원인 미규명 → 기본값은 raw loss 유지, `--angle-wrap` opt-in. 규명하려면 epoch별 학습 곡선이 갈라지는 시점 추적(미실행).
+- margin v2 no-pairs(WTA) baseline: queue script 오류로 미실행, pair supervision이 대체해서 필요하면 나중에.
+- **타점(회전) 행동** (2026-10-15 확인, 보류): 시뮬레이터는 (각도, 속도)만 정하고 타점은 pooltool 기본값으로 **모든 샷이 좌우 중앙(`a=0`)·중심보다 위(`b=0.25`, 밀어치기)·큐 수평(`theta=0`)으로 고정**이다(`simulator.py` `strike(phi, V0)`). pooltool은 좌우 회전 `a`, 밀어치기·끌어치기 `b`, 큐 각도 `theta`를 지원하므로 행동을 (각도, 속도, a, b)로 넓힐 수 있다 — 다음 샷을 위한 수구 위치 조절·scratch 회피용. 지금은 고정 타점으로 한 샷을 제대로 넣는 것이 먼저라 보류. 다시 볼 때 첫 단계: 기하 planner(2.24 shots)에 회전 탐색을 더한 상한부터.
+
+---
+
+## 보류: 행동 재파라미터화 — (공, 포켓) 선택 + ghost-ball 보정각 + 속도 (2026-10-09 제안 → 같은 날 보류)
+
+> **보류 이유 (bitter lesson)**: 기하를 행동에 넣으면 문제의 대부분을 사람이 푸는 셈이고 학습이 할 일이 거의 남지 않는다.
+> 그럴 거면 플래너로 끝이다. 실제로 기하 없이 무작위 후보 + 시뮬레이션 탐색만으로도 200후보/샷이면 2.50샷·샷당 성공률
+> 100%가 나온다(experiments.md "기하 없이 탐색만으로는?"). 즉 이 과제는 사람 지식 없이 계산(탐색)으로 풀리고, SAC가 못
+> 푸는 이유는 지식 부족이 아니라 학습 신호가 약하기 때문이다. 그래서 방향을 "탐색 + 학습"(아래 섹션)으로 바꾼다.
+> 아래 분석(조준 기하 vs 충돌 뒤 물리 구분 등)은 문제 이해용 기록으로 남긴다.
+
+### 왜
+
+pooltool 탐색 플래너를 RL과 같은 clear-speed 과제로 분석하다가 나온 방향이다(experiments.md "과제 재정의",
+"기준점: pooltool 탐색 플래너" 참조).
+
+- **무작위로 치면 6.7%만 들어간다**(무작위 행동 200개 기준). 행동 공간 대부분이 헛샷이다.
+- **ghost-ball 직선 조준(보정 0, 속도 3m/s)만으로 94%의 샷에서 들어가는 (공, 포켓) 조합이 있다.** 그 각도 주변
+  후보(±0.4°, 속도 3개)는 절반이 실제로 들어간다. 플래너는 평균 2.2샷에 다 넣고 샷당 성공률은 100%다
+  (seed 0, 50게임/116샷 분석 + 500게임 본평가).
+- **RL(vanilla, 같은 과제)은 게임당 ~7.6샷**, 샷당 ~0.4개다(seed 0, ~480k step 시점).
+- 같은 이야기를 하는 기존 결과: D4에서 critic Q의 pocket AUC 0.66 < 0-파라미터 직선 기하 0.746. Exp-12에서
+  행동 파라미터화만 바꿔도(delta → abs) 5M step에서 −3.9pp.
+
+→ 이 과제의 어려움은 물리가 아니라 **조준 기하**다. 지금 행동 공간(`delta_angle ∈ [−π, π]`, 가장 가까운 공 방향
+기준)에서는 RL이 좌표로부터 ±0.1° 수준의 조준을 스스로 배워야 하고, 포켓되는 각도 폭이 행동 범위의 ~0.07%다.
+`delta_angle`이 "공 중심 조준"을 행동에 넣어서 abs_angle보다 나았듯이, 한 단계 더 나가 **"공을 포켓으로 보내는
+조준"을 행동에 넣는다.**
+
+### 행동 정의
+
+```
+a = (k, δ, v)
+  k = (공 i, 포켓 j)   이산, 남은 공 × 6포켓 ≤ 18. 컷 각도 > 80° 등 불가능한 조합은 마스킹
+  δ ∈ [−Δ, +Δ]        연속, ghost-ball 조준각 φ_ghost(i, j)에 더하는 작은 보정각 (예: Δ = 2°)
+  v ∈ [0.5, 8.0] m/s   연속, 속도
+실제 타격 각도 = φ_ghost(i, j) + δ
+```
+
+- δ = 0이면 "공 i를 포켓 j로 보내는 직선 기하 조준"이다. 플래너 분석상 이것만으로 대부분 들어가므로, 정책은
+  throw·속도에 따른 작은 어긋남만 보정하면 된다.
+- 포켓되는 각도 폭(±0.1~0.2°)이 행동 범위의 ~0.07%에서, ±2° 범위 기준 ~5% 수준으로 커진다.
+- Exp-17(HRL) 17b/17c와 이산 선택은 같다. 차이는 연속 부분이 각도 전체가 아니라 **기하 조준 주변의 보정**만
+  배운다는 점이다.
+
+### 구현 후보 (순서)
+
+1. **k를 휴리스틱으로 고정**(예: 컷 각도 최소 조합)하고 (δ, v)만 SAC로 학습 — 조준 재파라미터화 효과만 먼저 분리 확인.
+2. **k까지 학습** — hybrid SAC(이산 categorical + 연속) 또는 Exp-17 HRL 구조(System 2 = k, System 1 = (δ, v)) 재사용.
+
+### 조건 / 비교
+
+- 과제: clear-speed 과제(다 넣을 때만 종료, 공당 +1, 샷당 −1, 30샷 안전 상한).
+- 비교 대상: vanilla(clear) 4시드, 플래너 기준점(~2.2샷), **학습 없는 휴리스틱**(컷 각도 최소 조합 + δ = 0)
+  — 학습이 기하 이상의 것을 더하는지 확인하기 위해.
+- 지표: 평균 샷 수, 샷당 성공률, 학습 곡선.
+
+### 열린 질문
+
+- **기하로 되는 부분과 안 되는 부분이 다르다.** ghost-ball 기하는 "첫 번째 공을 포켓으로 보내는 조준"까지만 준다.
+  충돌 뒤의 일 — 큐볼이 꺾여 나가 회전·마찰로 휘어 굴러가는 경로, 첫 공이 다른 공을 맞히는 것, 큐볼이 두 번째
+  공을 넣는 것 — 은 직선 기하로 계산되지 않는다. 플래너가 한 샷에 2개를 넣은 샷(seed 0 분석에서 26%, 첫 샷은
+  54%)도 기하로 계산한 게 아니라 후보를 pooltool로 쳐보고 우연히 2개가 들어간 것을 고른 결과다.
+  - 7.6샷(RL) → 3.0샷(매 샷 1개씩 확실히): **조준 기하**로 해결되는 부분, 격차 ~4.6샷. 이 재파라미터화가 겨냥하는 곳.
+  - 3.0샷 → 2.2샷(플래너): **충돌 뒤 물리**(한 샷 다중 포켓), 격차 ~0.8샷. 기하로는 안 되고 미리 쳐보기나 학습이
+    필요하다. 재파라미터화 후에는 δ·v 범위 안에서 RL이 경험으로 배워야 하는 부분이고, 물리를 아는 모델(world
+    model)이 실제로 도움이 될 수 있는 자리도 여기다.
+- 다음 샷 포지션(큐볼 위치)까지 고려하려면 k 선택이 장기 가치를 봐야 한다 → 이산 Q가 필요할 수 있다.
+- 뱅크/키스 샷은 이 행동 공간에서 표현할 수 없다. 플래너 본평가(seed 0)에서 무작위 탐색이 필요했던 샷은
+  9/1110이라 영향은 작아 보인다.
 
 ---
 

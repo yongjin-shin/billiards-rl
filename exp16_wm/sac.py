@@ -3,6 +3,7 @@ SAC agents for Exp-16.
 
 VanillaSAC : standard TanhGaussian SAC (twin Q).
 WMSAC      : inherits VanillaSAC, overrides only update_critic to add WM loss.
+GeomSAC    : VanillaSAC whose critic also sees differentiable pre-shot geometry features.
 """
 
 import copy
@@ -10,7 +11,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from .networks import Actor, Critic, WorldModelCritic
+from .networks import Actor, Critic, GeomCritic, WorldModelCritic
 
 
 # ──────────────────────────────────────────────
@@ -225,6 +226,9 @@ class WMSAC(VanillaSAC):
         wm_coef:       float     = 1.0,    # weight of WM loss relative to Bellman
         device:        str       = "cpu",
     ):
+        # h_mix_p: prob. that q reads the real h instead of ĥ in the current-(s,a)
+        # Bellman term (Exp-16 M). Set each step by the training loop; 0 = original WMSAC.
+        self.h_mix_p = 0.0
         # call parent __init__ but we'll replace the critic immediately after
         super().__init__(
             obs_dim, action_dim, act_low, act_high,
@@ -257,6 +261,11 @@ class WMSAC(VanillaSAC):
             y = reward + self.gamma * (1 - done) * q_target
 
         q1, q2, h1_hat, h2_hat = self.critic(obs, action)
+        if self.h_mix_p > 0.0:
+            # Only the executed (s,a) has a real h; target and actor terms keep ĥ.
+            use_real = torch.rand(h_real.shape[0], 1, 1, device=self.device) < self.h_mix_p
+            q1 = self.critic.q1(torch.where(use_real, h_real, h1_hat).flatten(1))
+            q2 = self.critic.q2(torch.where(use_real, h_real, h2_hat).flatten(1))
 
         bellman_loss = 0.5 * (F.mse_loss(q1, y) + F.mse_loss(q2, y))
         wm_loss      = 0.5 * (F.mse_loss(h1_hat, h_real) + F.mse_loss(h2_hat, h_real))
@@ -270,6 +279,7 @@ class WMSAC(VanillaSAC):
             "critic_loss":  critic_loss.item(),
             "bellman_loss": bellman_loss.item(),
             "wm_loss":      wm_loss.item(),
+            "h_mix_p":      self.h_mix_p,
         }
 
     def update(self, batch: dict) -> dict:
@@ -293,3 +303,36 @@ class WMSAC(VanillaSAC):
             "critic_target": self.critic_target.state_dict(),
             "log_alpha":     self.log_alpha.detach().cpu(),
         }, path)
+
+
+# ──────────────────────────────────────────────
+# GeomSAC  (Exp-16 G)
+# ──────────────────────────────────────────────
+
+class GeomSAC(VanillaSAC):
+    """
+    VanillaSAC with GeomCritic: Q(s, a, geom(s, a)). geom is computed in torch so
+    the actor's ∂Q/∂a also flows through the geometry features. Everything else
+    (updates, save/load) is inherited unchanged.
+    """
+
+    def __init__(
+        self,
+        obs_dim:    int,
+        action_dim: int,
+        act_low:    np.ndarray,
+        act_high:   np.ndarray,
+        n_balls:    int,
+        hidden:     list[int] = [256, 256],
+        lr:         float     = 3e-4,
+        tau:        float     = 0.005,
+        gamma:      float     = 0.99,
+        device:     str       = "cpu",
+    ):
+        super().__init__(obs_dim, action_dim, act_low, act_high,
+                         hidden=hidden, lr=lr, tau=tau, gamma=gamma, device=device)
+        self.critic = GeomCritic(obs_dim, action_dim, n_balls, hidden).to(self.device)
+        self.critic_target = copy.deepcopy(self.critic)
+        for p in self.critic_target.parameters():
+            p.requires_grad_(False)
+        self.critic_opt = torch.optim.Adam(self.critic.parameters(), lr=lr)

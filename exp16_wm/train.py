@@ -26,7 +26,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from simulator import BilliardsEnv, TRAJ_MAX_EVENTS, TRAJ_EVENT_DIM, DEFAULT_RSSM_CHECKPOINT
 from train import _tee_output
 from exp16_wm.buffer import ReplayBuffer, TrajectoryReplayBuffer
-from exp16_wm.sac import VanillaSAC, WMSAC
+from exp16_wm.sac import GeomSAC, VanillaSAC, WMSAC
 from world_model.rssm_model import H_DIM
 
 
@@ -47,7 +47,7 @@ def get_obs_dim(n_balls: int) -> int:
 def parse_args():
     p = argparse.ArgumentParser()
     p.add_argument("--agent",           type=str,   default="vanilla",
-                   choices=["vanilla", "wm"])
+                   choices=["vanilla", "wm", "geom"])
     p.add_argument("--seed",            type=int,   default=0)
     p.add_argument("--n-envs",          type=int,   default=10)
     p.add_argument("--total-steps",     type=int,   default=1_000_000)
@@ -62,6 +62,16 @@ def parse_args():
     p.add_argument("--eval-freq",       type=int,   default=10_000)
     p.add_argument("--eval-episodes",   type=int,   default=50)
     p.add_argument("--best-ckpt-window", type=int,  default=5)
+    p.add_argument("--best-ckpt-metric", type=str,  default="pocket_rate",
+                   choices=list(CKPT_METRICS),
+                   help="eval metric whose moving average picks best_model "
+                        "(mean_reward when pocket rate saturates, e.g. large --max-steps)")
+    p.add_argument("--target-entropy",  type=float, default=None,
+                   help="SAC target entropy (tanh space); default -action_dim")
+    p.add_argument("--target-entropy-end",   type=float, default=None,
+                   help="if set, anneal target entropy linearly to this value")
+    p.add_argument("--target-entropy-steps", type=int,   default=1_000_000,
+                   help="env steps over which target entropy anneals, then held")
     p.add_argument("--device",          type=str,   default="cpu")
     p.add_argument("--wandb-project",   type=str,   default="billiards-rl-exp16")
     p.add_argument("--no-wandb",        action="store_true")
@@ -74,6 +84,10 @@ def parse_args():
     p.add_argument("--wm-coef",         type=float, default=1.0)
     p.add_argument("--wm-target",       type=str,   default="traj",
                    choices=["traj", "rssm"])
+    p.add_argument("--h-mix-start",     type=float, default=0.0,
+                   help="WM only: initial prob. q reads real h instead of ĥ (Exp-16 M)")
+    p.add_argument("--h-mix-steps",     type=int,   default=1_000_000,
+                   help="WM only: env steps over which h-mix prob decays linearly to 0")
     return p.parse_args()
 
 
@@ -82,6 +96,67 @@ def wm_dims(args) -> tuple[int, int]:
     if args.wm_target == "rssm":
         return args.n_balls + 1, H_DIM   # +1 for cue
     return TRAJ_MAX_EVENTS, TRAJ_EVENT_DIM
+
+
+def h_mix_prob(step: int, start: float, decay_steps: int) -> float:
+    """Linear decay start → 0 over decay_steps env steps, then 0."""
+    if start <= 0.0 or decay_steps <= 0:
+        return 0.0
+    return max(0.0, start * (1.0 - step / decay_steps))
+
+
+CKPT_METRICS = ("pocket_rate", "mean_reward")
+
+
+def target_entropy_at(step: int, start: float, end: float | None, anneal_steps: int) -> float:
+    """Linear start → end over anneal_steps env steps, then held at end (end=None → constant start)."""
+    if end is None or anneal_steps <= 0:
+        return start if end is None else end
+    frac = min(1.0, max(0.0, step / anneal_steps))
+    return start + (end - start) * frac
+
+
+def initial_best_ckpt(metric: str) -> float:
+    """Starting 'best so far' for checkpoint selection.
+
+    pocket_rate keeps the original 0.0 start; mean_reward can be negative
+    (e.g. 3 - shots used), so it starts at -inf to save the first eval.
+    """
+    if metric == "pocket_rate":
+        return 0.0
+    if metric == "mean_reward":
+        return float("-inf")
+    raise ValueError(f"unknown best-ckpt metric: {metric}")
+
+
+def ckpt_value(metric: str, pocket_rate: float, mean_reward: float) -> float:
+    """The eval value fed into update_best_ma for the chosen metric."""
+    if metric == "pocket_rate":
+        return pocket_rate
+    if metric == "mean_reward":
+        return mean_reward
+    raise ValueError(f"unknown best-ckpt metric: {metric}")
+
+
+def summarize_final_eval(ep_lens: list[int], ep_pocketed: list[int],
+                         ep_pocketed_at_k: list[int], n_balls: int) -> dict:
+    """
+    Speed-of-clear stats for the final eval.
+
+    ep_lens          : shots used per episode
+    ep_pocketed      : balls pocketed by the end of each episode
+    ep_pocketed_at_k : balls pocketed within the first k shots (k=5 → comparable
+                       to the old max_steps=5 pocket rate, for reference only)
+    """
+    n = len(ep_lens)
+    if n == 0:
+        return {"mean_shots": None, "mean_shots_cleared": None, "pocket_rate_at5": None}
+    cleared = [l for l, p in zip(ep_lens, ep_pocketed) if p == n_balls]
+    return {
+        "mean_shots":         float(np.mean(ep_lens)),
+        "mean_shots_cleared": float(np.mean(cleared)) if cleared else None,
+        "pocket_rate_at5":    float(np.sum(ep_pocketed_at_k)) / n / n_balls,
+    }
 
 
 def update_best_ma(history: list[float], new_value: float, window: int,
@@ -107,6 +182,18 @@ def update_best_ma(history: list[float], new_value: float, window: int,
 
 def build_agent(args):
     obs_dim = get_obs_dim(args.n_balls)
+    if args.agent == "geom":
+        return GeomSAC(
+            obs_dim    = obs_dim,
+            action_dim = ACTION_DIM,
+            act_low    = ACT_LOW,
+            act_high   = ACT_HIGH,
+            n_balls    = args.n_balls,
+            lr         = args.lr,
+            tau        = args.tau,
+            gamma      = args.gamma,
+            device     = args.device,
+        )
     if args.agent == "vanilla":
         return VanillaSAC(
             obs_dim    = obs_dim,
@@ -137,7 +224,7 @@ def build_agent(args):
 
 def build_buffer(args):
     obs_dim = get_obs_dim(args.n_balls)
-    if args.agent == "vanilla":
+    if args.agent != "wm":
         return ReplayBuffer(obs_dim, ACTION_DIM, args.buffer_size)
     else:
         max_events, event_dim = wm_dims(args)
@@ -153,7 +240,12 @@ def build_buffer(args):
 def make_exp_dir(args) -> str:
     ts      = time.strftime("%Y-%m-%d@%H%M")
     env_tag = f"_multi{args.n_balls}_ms{args.max_steps}" if args.n_balls > 1 else ""
-    name    = f"exp16_{args.agent}{env_tag}_s{args.seed}_{ts}"
+    mix_tag = f"_hmix{args.h_mix_start:g}" if args.agent == "wm" and getattr(args, "h_mix_start", 0.0) > 0 else ""
+    ent_tag = ""
+    if getattr(args, "target_entropy", None) is not None or getattr(args, "target_entropy_end", None) is not None:
+        ent_start = args.target_entropy if args.target_entropy is not None else -float(ACTION_DIM)
+        ent_tag = f"_ent{ent_start:g}" + (f"to{args.target_entropy_end:g}" if args.target_entropy_end is not None else "")
+    name    = f"exp16_{args.agent}{mix_tag}{ent_tag}{env_tag}_s{args.seed}_{ts}"
     path = os.path.join("logs", "experiments", name)
     os.makedirs(os.path.join(path, "eval"),       exist_ok=True)
     os.makedirs(os.path.join(path, "best_model"), exist_ok=True)
@@ -192,6 +284,7 @@ def _train_inner(args, exp_dir):
         "eval_freq":       args.eval_freq,
         "eval_episodes":   args.eval_episodes,
         "best_ckpt_window": args.best_ckpt_window,
+        "best_ckpt_metric": args.best_ckpt_metric,
         "device":          args.device,
         "n_balls":         args.n_balls,
         "max_steps":       args.max_steps,
@@ -199,6 +292,11 @@ def _train_inner(args, exp_dir):
         "trunc_penalty":   args.trunc_penalty,
         "wm_coef":         args.wm_coef,
         "wm_target":       args.wm_target,
+        "h_mix_start":     args.h_mix_start,
+        "h_mix_steps":     args.h_mix_steps,
+        "target_entropy":       args.target_entropy,
+        "target_entropy_end":   args.target_entropy_end,
+        "target_entropy_steps": args.target_entropy_steps,
         "exp_dir":         exp_dir,
         "timestamp":       time.strftime("%Y-%m-%dT%H:%M:%S"),
     }
@@ -226,7 +324,11 @@ def _train_inner(args, exp_dir):
           f"  lr={args.lr}  gamma={args.gamma}")
     print(f"  buffer={args.buffer_size:,}  batch={args.batch_size}"
           f"  learning_starts={args.learning_starts:,}")
-    print(f"  eval_freq={args.eval_freq:,}  eval_episodes={args.eval_episodes}")
+    print(f"  eval_freq={args.eval_freq:,}  eval_episodes={args.eval_episodes}"
+          f"  best_ckpt={args.best_ckpt_metric} ma({args.best_ckpt_window})")
+    if args.target_entropy is not None or args.target_entropy_end is not None:
+        print(f"  target_entropy={args.target_entropy}  → end={args.target_entropy_end}"
+              f"  over {args.target_entropy_steps:,} steps")
     print(f"  exp_dir: {exp_dir}")
     print(f"{'═' * W}")
 
@@ -263,6 +365,8 @@ def _train_inner(args, exp_dir):
     # ── agent & buffer ────────────────────────
     print(f"  [3/4] Building {args.agent} agent ...", end=" ", flush=True)
     agent  = build_agent(args)
+    ent_start = args.target_entropy if args.target_entropy is not None else agent.target_entropy
+    agent.target_entropy = ent_start
     n_params = sum(p.numel() for p in agent.actor.parameters()) + \
                sum(p.numel() for p in agent.critic.parameters())
     print(f"done  ({n_params:,} params  device={args.device})")
@@ -277,8 +381,10 @@ def _train_inner(args, exp_dir):
 
     obs = vec_env.reset()
 
-    best_pocket_rate = 0.0        # best moving-average pocket_rate seen so far
+    best_pocket_rate = 0.0        # best moving-average pocket_rate seen so far (display)
     pocket_rate_history: list = []
+    best_ckpt_ma     = initial_best_ckpt(args.best_ckpt_metric)   # drives best_model saving
+    ckpt_history: list = []
     best_mean_reward = float("-inf")
     total_steps      = 0
     last_eval_step   = 0
@@ -344,6 +450,11 @@ def _train_inner(args, exp_dir):
 
         # ── update ─────────────────────────────────────────────────────────
         if total_steps >= args.learning_starts and len(buffer) >= args.batch_size:
+            if args.agent == "wm":
+                agent.h_mix_p = h_mix_prob(total_steps, args.h_mix_start, args.h_mix_steps)
+            if args.target_entropy_end is not None:
+                agent.target_entropy = target_entropy_at(total_steps, ent_start,
+                                                         args.target_entropy_end, args.target_entropy_steps)
             for _ in range(args.gradient_steps):
                 batch   = buffer.sample(args.batch_size)
                 metrics = agent.update(batch)
@@ -361,8 +472,12 @@ def _train_inner(args, exp_dir):
             fps     = total_steps / elapsed
 
             if mean_r > best_mean_reward:  best_mean_reward = mean_r
-            pocket_rate_history, pocket_rate_ma, best_pocket_rate, is_new_best = update_best_ma(
+            pocket_rate_history, pocket_rate_ma, best_pocket_rate, _ = update_best_ma(
                 pocket_rate_history, pocket_rate, args.best_ckpt_window, best_pocket_rate,
+            )
+            ckpt_history, ckpt_ma, best_ckpt_ma, is_new_best = update_best_ma(
+                ckpt_history, ckpt_value(args.best_ckpt_metric, pocket_rate, mean_r),
+                args.best_ckpt_window, best_ckpt_ma,
             )
             if is_new_best:
                 agent.save(os.path.join(exp_dir, "best_model", "best_model.pt"))
@@ -382,8 +497,11 @@ def _train_inner(args, exp_dir):
                 "eval/best_mean_reward": best_mean_reward,
                 "eval/best_pocket_rate": best_pocket_rate * 100,
                 "eval/ep_len_mean":      float(np.mean(ep_lens)),
+                "eval/ckpt_ma":          ckpt_ma,
+                "eval/best_ckpt_ma":     best_ckpt_ma,
                 "train/fps":             fps,
                 "train/buffer_size":     len(buffer),
+                "train/target_entropy":  agent.target_entropy,
             }
             _key_map = {"alpha": "ent_coef", "alpha_loss": "ent_coef_loss"}
             log_dict.update({f"train/{_key_map.get(k, k)}": v for k, v in avg_train.items()})
@@ -417,6 +535,12 @@ def _train_inner(args, exp_dir):
                 f"    ep_len: {ep_len_mean:.1f} steps"
                 f"    buffer: {len(buffer):,}"
             )
+            if args.best_ckpt_metric != "pocket_rate":
+                print(
+                    f"    ckpt     : {args.best_ckpt_metric}"
+                    f"    ma({args.best_ckpt_window}): {ckpt_ma:+.3f}"
+                    f"    best_ma: {best_ckpt_ma:+.3f}"
+                )
             if avg_train:
                 print(f"  {'TRAIN':}")
                 critic = avg_train.get("critic_loss", float("nan"))
@@ -428,7 +552,7 @@ def _train_inner(args, exp_dir):
                     f"    actor: {actor:+.4f}"
                     f"    alpha: {alpha:.4f}"
                 )
-                print(f"    log_pi   : {log_pi:+8.4f}    fps:   {fps:.0f}")
+                print(f"    log_pi   : {log_pi:+8.4f}    tgt_ent: {agent.target_entropy:+.2f}    fps:   {fps:.0f}")
             else:
                 print(f"  fps: {fps:.0f}  (warming up — no updates yet)")
             print(f"{'─' * W}")
@@ -478,16 +602,28 @@ def _train_inner(args, exp_dir):
 
     n_final = 500
     total_pocketed_final, clears_final = 0, 0
+    final_lens, final_pocketed, final_pocketed_at5, final_rewards = [], [], [], []
     for _ in range(n_final):
         obs_f, _ = final_eval_env.reset()
         done = False
+        ep_len_f, ep_r_f, pocketed_at5 = 0, 0.0, 0
         while not done:
             action = best_agent.act(obs_f, deterministic=True)
-            obs_f, _, term, trunc, info = final_eval_env.step(action)
+            obs_f, r_f, term, trunc, info = final_eval_env.step(action)
             done = term or trunc
-        total_pocketed_final += info.get("total_pocketed", 0) if args.n_balls > 1 else int(info.get("pocketed", False))
-        clears_final += int(info.get("total_pocketed", 0) == args.n_balls) if args.n_balls > 1 else int(info.get("pocketed", False))
+            ep_len_f += 1
+            ep_r_f   += r_f
+            n_pocketed = info.get("total_pocketed", 0) if args.n_balls > 1 else int(info.get("pocketed", False))
+            if ep_len_f <= 5:
+                pocketed_at5 = n_pocketed
+        total_pocketed_final += n_pocketed
+        clears_final += int(n_pocketed == args.n_balls)
+        final_lens.append(ep_len_f)
+        final_pocketed.append(n_pocketed)
+        final_pocketed_at5.append(pocketed_at5)
+        final_rewards.append(ep_r_f)
     final_eval_env.close()
+    speed = summarize_final_eval(final_lens, final_pocketed, final_pocketed_at5, args.n_balls)
 
     trained_rate = total_pocketed_final / n_final / args.n_balls * 100
     clear_rate   = clears_final / n_final * 100
@@ -496,6 +632,11 @@ def _train_inner(args, exp_dir):
     print(f"\n  {'─' * (W - 2)}")
     print(f"  pocket rate : {trained_rate:.1f}%   (random: {random_rate:.1f}%   improvement: {improvement:+.1f}pp)")
     print(f"  clear  rate : {clear_rate:.1f}%")
+    _cleared_str = (f"{speed['mean_shots_cleared']:.2f}"
+                    if speed["mean_shots_cleared"] is not None else "n/a")
+    print(f"  shots/game  : {speed['mean_shots']:.2f}   (cleared games only: {_cleared_str})")
+    print(f"  pocket@5    : {speed['pocket_rate_at5']*100:.1f}%   (balls in within first 5 shots, reference)")
+    print(f"  mean reward : {float(np.mean(final_rewards)):+.3f}")
     print(f"  training time: {elapsed_total/60:.1f} min   fps: {total_steps/elapsed_total:.0f}")
     print(f"  saved → {exp_dir}")
 
@@ -512,6 +653,15 @@ def _train_inner(args, exp_dir):
         "clear_rate":          round(clear_rate,    2),
         "improvement_pp":      round(improvement,   2),
         "best_mean_reward":    round(best_mean_reward, 4),
+        "best_ckpt_metric":    args.best_ckpt_metric,
+        "target_entropy":      args.target_entropy,
+        "target_entropy_end":  args.target_entropy_end,
+        "target_entropy_steps": args.target_entropy_steps,
+        "final_mean_reward":   round(float(np.mean(final_rewards)), 4),
+        "mean_shots":          round(speed["mean_shots"], 3),
+        "mean_shots_cleared":  (round(speed["mean_shots_cleared"], 3)
+                                if speed["mean_shots_cleared"] is not None else None),
+        "pocket_rate_at5":     round(speed["pocket_rate_at5"] * 100, 2),
         "training_time_sec":   round(elapsed_total, 1),
         "avg_fps":             round(total_steps / elapsed_total, 0),
         "exp_dir":             exp_dir,
@@ -525,6 +675,8 @@ def _train_inner(args, exp_dir):
             "final/clear_rate":          clear_rate,
             "final/random_pocket_rate":  random_rate,
             "final/improvement_pp":      improvement,
+            "final/mean_shots":          speed["mean_shots"],
+            "final/pocket_rate_at5":     speed["pocket_rate_at5"] * 100,
         })
         wandb.finish()
 
