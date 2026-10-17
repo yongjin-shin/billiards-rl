@@ -689,6 +689,9 @@ def parse_args():
     p.add_argument("--made2-aim-from", type=str, nargs="+", default=None,
                    help="cascade (with --made2-geom): the made2 head's aim comes from these frozen aux-only aim models (run dir globs, "
                         "{seed} is filled in; several are averaged on the circle) instead of the ghost-ball formula")
+    p.add_argument("--made2-self-aim", type=str, default=None, choices=["grad", "detach"],
+                   help="end-to-end (with --made2-geom --geom-aux-set aim/scan --geom-aux-weight > 0): the made2 head's aim is this network's "
+                        "own aux head, trained together; 'detach' stops the made loss at the aim (roadmap EE1 / EE2)")
     p.add_argument("--sims", type=str, nargs="+", default=["logs/teacher_data/relabel_s1000/sims/*.npz"])
     p.add_argument("--sims-batch", type=int, default=1024)
     p.add_argument("--no-wta-fallback", action="store_true",
@@ -756,6 +759,8 @@ def main():
         extra_paths = sorted({p for pat in args.train_only_data for p in glob.glob(pat)})
         data, train, val = append_train_only(data, train, val, load_teacher_data(extra_paths))
         extra_tag = "_plus-" + os.path.basename(os.path.dirname(os.path.dirname(extra_paths[0])))
+    if args.made2_self_aim and (not args.made2_geom or args.made2_aim_from or args.geom_aux_weight <= 0 or args.geom_aux_set not in ("aim", "scan")):
+        raise SystemExit("--made2-self-aim needs --made2-geom, --geom-aux-weight > 0, --geom-aux-set aim or scan, and no --made2-aim-from")
     if args.made_only and not (args.made2_head and args.made2_geom):
         raise SystemExit("--made-only needs --made2-head --made2-geom (it chooses among candidates around the aim)")
     if args.init_from and args.model != "gnn":
@@ -795,7 +800,7 @@ def main():
             ("" if args.gnn_hidden == 128 or args.model != "gnn" else f"_H{args.gnn_hidden}") + \
             ("" if args.gnn_layers == 2 or args.model != "gnn" else f"_L{args.gnn_layers}") + \
             ("_sl1" if args.speed_loss == "l1" else "") + (f"_sb{args.speed_bins}" if args.speed_bins else "") + ("_kw" if args.uncertainty_weights else "") + (f"_ga{args.geom_aux_weight:g}" if args.geom_aux_weight > 0 else "") + ("_aim" if args.geom_aux_weight > 0 and args.geom_aux_set == "aim" else "") + ("_scan" if args.geom_aux_weight > 0 and args.geom_aux_set == "scan" else "") + ("_auxonly" if args.aux_only else "") + ("_madeonly" if args.made_only else "") + ("_noprop" if args.made2_no_proposal else "") + (f"_i{args.init_seed}" if args.init_seed is not None else "") + ("_init" if args.init_from else "") + (f"_ff{args.input_fourier}" if args.input_fourier else "") + \
-            ("_geoang" if args.geom_angle else "") + extra_tag + (f"_m2w{args.made2_weight:g}" if args.made2_head else "") + ("geo" if args.made2_geom else "") + ("L" if args.made2_aim_from else "") + ("_wrap" if args.angle_wrap else "_nowrap")
+            ("_geoang" if args.geom_angle else "") + extra_tag + (f"_m2w{args.made2_weight:g}" if args.made2_head else "") + ("geo" if args.made2_geom else "") + ("L" if args.made2_aim_from else "") + (f"S{args.made2_self_aim[0]}" if args.made2_self_aim else "") + ("_wrap" if args.angle_wrap else "_nowrap")
     name = (f"exp16_bc_{teacher}_{args.loss}{h_tag}_a{args.angle_scale_deg:g}_v{args.speed_scale:g}"
             f"_s{args.seed}_{time.strftime('%Y-%m-%d@%H%M')}")
     out_dir = os.path.join(args.out_root, name)
@@ -813,7 +818,10 @@ def main():
                               geom_angle=args.geom_angle, made2_geom=args.made2_geom,
                               enc_layers=args.gnn_layers, speed_loss=args.speed_loss, speed_bins=args.speed_bins,
                               uncertainty_weights=args.uncertainty_weights, aux_dim=(1 if args.geom_aux_set in ("aim", "scan") else N_AUX) if args.geom_aux_weight > 0 else 0,
-                              aim_encoder=aim_enc, fourier=args.input_fourier, made2_no_proposal=args.made2_no_proposal)
+                              aim_encoder=aim_enc, fourier=args.input_fourier, made2_no_proposal=args.made2_no_proposal,
+                              self_aim=args.made2_self_aim or "")
+        if args.made2_self_aim:                                      # the own aim head regresses the standardised target
+            agent.set_aim_stats(float(aux_mean[0]), float(aux_std[0]))
         if aim_enc is not None:
             agent.set_aim_stats(*aim_stats)
             with torch.no_grad():                                    # how good is the learned aim on the val rows (all live pairs)

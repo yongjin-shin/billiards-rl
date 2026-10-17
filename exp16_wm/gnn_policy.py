@@ -89,11 +89,19 @@ class PairGNNPolicy(nn.Module):
                  factorized: bool = False, scratch_head: bool = False, made_head: bool = False,
                  made2_head: bool = False, geom_angle: bool = False, made2_geom: bool = False,
                  enc_layers: int = 2, speed_loss: str = "mse", speed_bins: int = 0, uncertainty_weights: bool = False, aux_dim: int = 0,
-                 aim_encoder: "PairGNNPolicy | list[PairGNNPolicy] | None" = None, fourier: int = 0, made2_no_proposal: bool = False):
+                 aim_encoder: "PairGNNPolicy | list[PairGNNPolicy] | None" = None, fourier: int = 0, made2_no_proposal: bool = False,
+                 self_aim: str = ""):
         super().__init__()
         if fourier < 0:
             raise ValueError(f"fourier must be ≥ 0, got {fourier}")
         aim_list = list(aim_encoder) if isinstance(aim_encoder, (list, tuple)) else ([aim_encoder] if aim_encoder is not None else [])
+        # end-to-end (roadmap EE1/EE2): the made2 head's aim is this network's own aux head (aim target), trained together;
+        # 'grad' lets the made loss reach the aim head and encoder through the aim, 'detach' stops it there
+        if self_aim not in ("", "grad", "detach"):
+            raise ValueError(f"self_aim must be '', 'grad' or 'detach', got {self_aim!r}")
+        if self_aim and (not made2_geom or aux_dim != 1 or aim_list):
+            raise ValueError("self_aim needs made2_geom, aux_dim 1 (an aim target) and no frozen aim encoder")
+        self.self_aim = self_aim
         if aim_list and not made2_geom:
             raise ValueError("aim_encoder replaces the exact aim of made2_geom: it needs made2_geom=True")
         if any(getattr(a, "aux_dim", 0) != 1 for a in aim_list):
@@ -176,7 +184,7 @@ class PairGNNPolicy(nn.Module):
             for prm in enc.parameters():
                 prm.requires_grad_(False)
             enc.eval()
-        if aim_list:
+        if aim_list or self_aim:
             self.register_buffer("aim_mean", torch.zeros(1))            # degrees; the aim encoders' target standardisation (same train split)
             self.register_buffer("aim_std", torch.ones(1))
 
@@ -270,7 +278,11 @@ class PairGNNPolicy(nn.Module):
         if self.speed_bins:
             out["speed_logits"] = sp_logits
         if self.made2_geom:
-            out["aim"] = self._learned_aim(rel) if self._aim_encoders() else self._geometric_aim(rel)
+            if getattr(self, "self_aim", ""):
+                z = self.aux_head(e)[..., 0]
+                out["aim"] = torch.deg2rad((z.detach() if self.self_aim == "detach" else z) * self.aim_std + self.aim_mean)
+            else:
+                out["aim"] = self._learned_aim(rel) if self._aim_encoders() else self._geometric_aim(rel)
         pocket = self.head_s(e).squeeze(-1)
         if self.has_scratch:
             out["scratch_logit"] = self.head_scratch(e).squeeze(-1)
