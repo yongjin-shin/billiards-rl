@@ -23,7 +23,8 @@ python --version
 
 echo "[3/4] packages (torch CPU wheel first, then the pinned rest)"
 uv pip install --index-url https://download.pytorch.org/whl/cpu "torch==2.10.0"
-uv pip install -r requirements-cloud.txt
+# pooltool 0.5.0 pins panda3d==1.11.0.dev3702 on Linux, a dev build that is not on PyPI (pooltool install docs).
+uv pip install --extra-index-url https://archive.panda3d.org/ -r requirements-cloud.txt
 python - <<'PY'
 import numba, numpy, pooltool, torch
 print("torch", torch.__version__, "| threads", torch.get_num_threads(), "| numpy", numpy.__version__, "| numba", numba.__version__)

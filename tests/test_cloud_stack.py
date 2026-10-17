@@ -112,3 +112,12 @@ def test_requirements_cloud_pins_every_package() -> None:
     assert reqs, "requirements-cloud.txt is empty"
     assert all("==" in ln for ln in reqs), [ln for ln in reqs if "==" not in ln]
     assert any(ln.startswith("torch==") for ln in reqs) and any(ln.startswith("pooltool-billiards==") for ln in reqs)
+
+
+def test_setup_script_installs_torch_cpu_first_and_provides_panda3d_dev_index() -> None:
+    """pooltool 0.5.0 pins panda3d==1.11.0.dev3702 on Linux (not on PyPI); the first cloud smoke job failed without the index."""
+    lines = (ROOT / "cloud" / "setup_cloud.sh").read_text().splitlines()
+    install = [ln for ln in lines if ln.lstrip().startswith("uv pip install")]
+    assert len(install) == 2
+    assert "download.pytorch.org/whl/cpu" in install[0] and "torch==2.10.0" in install[0]  # CPU wheel before everything else
+    assert "--extra-index-url https://archive.panda3d.org/" in install[1] and "-r requirements-cloud.txt" in install[1]
