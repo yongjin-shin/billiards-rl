@@ -38,7 +38,7 @@ from exp16_wm.two_ball_states import make_states
 
 EVENT_CODES = {e: i for i, e in enumerate(pt.EventType)}
 INPUT_KEYS = ("obs", "state_idx", "action", "group")
-RESULT_KEYS = ("mask", "scratch", "n_events", "ev_crc", "final_xy", "t_end")
+RESULT_KEYS = ("mask", "scratch", "n_events", "ev_crc", "final_xy", "t_end", "error")
 POS_IDENTICAL_M = 1e-9      # final positions within this → bitwise-level identical for our purposes
 POS_CLOSE_M = 1e-6          # 1 micrometre; far below the 0.02° window resolution (~0.3 mm at 1 m)
 MAX_EVENTS = 2000
@@ -77,16 +77,24 @@ def make_cases(n_states: int, n_random: int, n_scan_states: int, scan_half_deg: 
 
 
 def simulate_case(env: BilliardsEnv, pocket_map: dict[str, int], obs: np.ndarray, action: np.ndarray) -> dict[str, Any]:
-    """Play one (obs, action) from rest; returns outcome bitmask, scratch, event count/checksum, final xy of every ball, end time."""
+    """
+    Play one (obs, action) from rest; returns outcome bitmask, scratch, event count/checksum, final xy of every ball, end time.
+    A shot that makes pooltool raise (seen once in 18k cases: numba quartic solver, deterministic) is recorded as error=1 with
+    zeroed results instead of aborting the run, so compare can check that both machines fail on the same cases.
+    """
     restore_state(env, obs)
     sys_c = env.system.copy()
     sys_c.strike(phi=strike_phi_deg(aim_reference(env), action), V0=float(action[1]), cue_ball_id="cue")
-    pt.simulate(sys_c, inplace=True, max_events=MAX_EVENTS)
+    try:
+        pt.simulate(sys_c, inplace=True, max_events=MAX_EVENTS)
+    except Exception as e:  # noqa: BLE001 — diagnostic tool: any simulator failure is a result to compare
+        return {"mask": 0, "scratch": False, "n_events": 0, "ev_crc": 0, "final_xy": np.zeros((4, 2)), "t_end": 0.0, "error": 1,
+                "message": f"{type(e).__name__}: {e}"}
     made, scratch = slots_from_system(env, sys_c, pocket_map)
     codes = np.array([EVENT_CODES[e.event_type] for e in sys_c.events], np.int16)
     xy = np.array([sys_c.balls[b].state.rvw[0, :2] for b in ["cue", *env._ball_ids]], np.float64)
     return {"mask": int(to_bitmask(made)), "scratch": bool(scratch), "n_events": len(codes), "ev_crc": zlib.crc32(codes.tobytes()),
-            "final_xy": xy, "t_end": float(sys_c.events[-1].time) if len(sys_c.events) else 0.0}
+            "final_xy": xy, "t_end": float(sys_c.events[-1].time) if len(sys_c.events) else 0.0, "error": 0}
 
 
 def machine_info() -> dict[str, str]:
@@ -101,12 +109,15 @@ def run(cases: dict[str, np.ndarray], out: str, log_every: int = 2000) -> dict[s
     pmap = pocket_index_map(env)
     n = len(cases["action"])
     res = {"mask": np.zeros(n, np.int32), "scratch": np.zeros(n, bool), "n_events": np.zeros(n, np.int32),
-           "ev_crc": np.zeros(n, np.uint32), "final_xy": np.zeros((n, 4, 2), np.float64), "t_end": np.zeros(n, np.float64)}
+           "ev_crc": np.zeros(n, np.uint32), "final_xy": np.zeros((n, 4, 2), np.float64), "t_end": np.zeros(n, np.float64),
+           "error": np.zeros(n, np.int8)}
     t0 = time.time()
     for i in range(n):
         r = simulate_case(env, pmap, cases["obs"][cases["state_idx"][i]], cases["action"][i])
         for k in RESULT_KEYS:
             res[k][i] = r[k]
+        if r["error"] and res["error"][:i].sum() == 0:
+            print(f"  case {i} raised {r['message']} (further errors are only counted)", flush=True)
         if log_every and (i + 1) % log_every == 0:
             print(f"  {i + 1}/{n}  {time.time() - t0:.0f}s", flush=True)
     env.close()
@@ -121,11 +132,12 @@ def compare(a: dict[str, np.ndarray], b: dict[str, np.ndarray], max_listed: int 
         if a[key].shape != b[key].shape or not np.array_equal(a[key], b[key]):
             raise ValueError(f"dumps played different cases ({key} differs); regenerate both with the same arguments")
     n = len(a["mask"])
-    outcome_eq = (a["mask"] == b["mask"]) & (a["scratch"] == b["scratch"])
+    outcome_eq = (a["mask"] == b["mask"]) & (a["scratch"] == b["scratch"]) & (a["error"] == b["error"])
     seq_eq = (a["n_events"] == b["n_events"]) & (a["ev_crc"] == b["ev_crc"])
     pos = np.abs(a["final_xy"] - b["final_xy"]).max(axis=(1, 2)) if n else np.zeros(0)
     tim = np.abs(a["t_end"] - b["t_end"])
-    pos_s, tim_s = pos[seq_eq], tim[seq_eq]  # positions are only comparable when both played the same event sequence
+    ok = seq_eq & (a["error"] == 0) & (b["error"] == 0)
+    pos_s, tim_s = pos[ok], tim[ok]  # positions are only comparable when both played the same event sequence without error
     scan = a["group"] >= 0
     scan_diff = scan & ((a["mask"] != 0) != (b["mask"] != 0))
     bad = np.where(~outcome_eq | ~seq_eq)[0]
@@ -139,6 +151,7 @@ def compare(a: dict[str, np.ndarray], b: dict[str, np.ndarray], max_listed: int 
     return {
         "verdict": verdict, "n_cases": n, "n_scan_cases": int(scan.sum()),
         "n_outcome_differs": int((~outcome_eq).sum()), "n_event_sequence_differs": int((~seq_eq).sum()),
+        "n_errors": [int(a["error"].sum()), int(b["error"].sum())],
         "n_scan_made_flips": int(scan_diff.sum()), "n_scan_groups_with_flip": int(len(np.unique(a["group"][scan_diff]))),
         "final_pos_diff_m": {"max": pos_max, "median": float(np.median(pos_s)) if len(pos_s) else 0.0,
                              "p99": float(np.percentile(pos_s, 99)) if len(pos_s) else 0.0},

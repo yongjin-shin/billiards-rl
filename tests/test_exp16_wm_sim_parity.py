@@ -6,10 +6,15 @@ import sys
 from pathlib import Path
 
 import numpy as np
+import pooltool as pt
 import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from exp16_wm.sim_parity import POS_CLOSE_M, compare, load, make_cases, run
+from simulator import BilliardsEnv
+from exp16_wm.outcomes import pocket_index_map
+from exp16_wm.sim_parity import POS_CLOSE_M, compare, load, make_cases, run, simulate_case
+from exp16_wm.teacher_data import CLEAR_ENV
+from exp16_wm.two_ball_states import make_states
 
 TINY = dict(n_states=2, n_random=3, n_scan_states=1, scan_half_deg=0.1, scan_step_deg=0.05, scan_speeds=(1.0,), seed=0)
 
@@ -81,3 +86,27 @@ def test_compare_rejects_dumps_of_different_cases(dump: dict[str, np.ndarray]) -
     shorter = {k: (v[:-1] if k in ("state_idx", "action", "group") else v) for k, v in dump.items()}
     with pytest.raises(ValueError, match="different cases"):
         compare(dump, shorter)
+
+
+def test_simulate_case_records_a_pooltool_exception_instead_of_raising(monkeypatch: pytest.MonkeyPatch) -> None:
+    def boom(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+        raise ValueError("quartic solver failed")
+
+    monkeypatch.setattr(pt, "simulate", boom)
+    env = BilliardsEnv(**CLEAR_ENV)
+    env.reset(seed=0)
+    r = simulate_case(env, pocket_index_map(env), make_states(1, 0, "env")[0], np.array([0.0, 1.0], np.float32))
+    assert r["error"] == 1 and "ValueError" in r["message"] and r["n_events"] == 0 and r["mask"] == 0
+
+
+def test_compare_treats_matching_errors_as_equal_and_one_sided_errors_as_different(dump: dict[str, np.ndarray]) -> None:
+    both = copy.deepcopy(dump), copy.deepcopy(dump)
+    for d in both:
+        d["error"][3], d["mask"][3], d["n_events"][3], d["ev_crc"][3] = 1, 0, 0, 0
+        d["final_xy"][3] = 0.0
+    r = compare(*both)
+    assert r["verdict"] == "IDENTICAL" and r["n_errors"] == [1, 1]
+    one_sided = copy.deepcopy(dump)
+    one_sided["error"][3] = 1
+    r = compare(dump, one_sided)
+    assert r["verdict"] == "DIFFERENT" and r["n_errors"] == [0, 1] and r["n_outcome_differs"] == 1
