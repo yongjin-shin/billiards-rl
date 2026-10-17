@@ -118,7 +118,11 @@ def make_bundle(repo_dir: Path, out_path: Path, extras: Sequence[str] = ()) -> P
 
 
 def run_aws(args: Sequence[str], region: str, check: bool = True) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(["aws", *args, "--region", region], capture_output=True, text=True, check=check)
+    """Run the aws CLI; on failure (check=True) raise with AWS's own error text instead of a bare exit status."""
+    res = subprocess.run(["aws", *args, "--region", region], capture_output=True, text=True, check=False)
+    if check and res.returncode != 0:
+        raise RuntimeError(f"aws {' '.join(args[:2])} failed (exit {res.returncode}): {res.stderr.strip()}")
+    return res
 
 
 def stack_outputs(stack: str, region: str) -> dict[str, str]:

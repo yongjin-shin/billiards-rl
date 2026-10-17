@@ -9,7 +9,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from cloud.launch import CMD_DELIMITER, MAX_HOURS_CAP, build_user_data, is_dirty, make_bundle  # noqa: E402
+from cloud.launch import CMD_DELIMITER, MAX_HOURS_CAP, build_user_data, is_dirty, make_bundle, run_aws  # noqa: E402
 
 ARGS = dict(bucket="my-results-bucket", job="smoke-1", command="python -c 'print(1)'", max_hours=2.0, region="us-east-1")
 
@@ -51,6 +51,25 @@ def test_user_data_rejects_bad_command(command: str) -> None:
 def test_user_data_rejects_bad_bucket_or_region(field: str, value: str) -> None:
     with pytest.raises(ValueError):
         build_user_data(**{**ARGS, field: value})
+
+
+def _fake_run(returncode: int, stderr: str):  # noqa: ANN202
+    def run(cmd, **kwargs):  # noqa: ANN001, ANN003, ANN202
+        return subprocess.CompletedProcess(cmd, returncode, stdout="", stderr=stderr)
+
+    return run
+
+
+def test_run_aws_failure_surfaces_aws_error_text(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(subprocess, "run", _fake_run(254, "An error occurred (InsufficientInstanceCapacity): no capacity"))
+    with pytest.raises(RuntimeError, match="InsufficientInstanceCapacity"):
+        run_aws(["ec2", "run-instances"], "us-east-1")
+
+
+def test_run_aws_check_false_returns_failure_without_raising(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(subprocess, "run", _fake_run(254, "DryRunOperation"))
+    res = run_aws(["ec2", "run-instances"], "us-east-1", check=False)
+    assert res.returncode == 254 and "DryRunOperation" in res.stderr
 
 
 def _git(repo: Path, *args: str) -> None:
