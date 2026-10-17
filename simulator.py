@@ -12,10 +12,69 @@ Usage (sanity test):
     python simulator.py
 """
 
+import sys
+
 import numpy as np
 import gymnasium as gym
 from gymnasium import spaces
 import pooltool as pt
+
+
+# =============================================================================
+# Shot simulation with a guard for a pooltool 0.5.0 solver bug
+# =============================================================================
+
+# pooltool 0.5.0's quartic solver raises ValueError("cannot assign slice of shape (2,) from input of shape (4,)") when a ball-ball
+# collision polynomial degenerates to a lower degree (leading coefficients exactly 0). Seen when two balls end up with exactly equal
+# accelerations, e.g. after an exactly head-on shot (delta_angle == 0.0 to the nearest ball); roadmap.md "pooltool 0.5.0 quartic
+# solver 예외 조사". The shot is retried from the pre-strike state with the aim nudged by these angles (rad, escalating); even the
+# largest is ~6e-6 degrees, far below the 0.02 degree scan step, so the outcome is the same physically.
+QUARTIC_RETRY_NUDGES_RAD = (1e-9, 1e-8, 1e-7)
+QUARTIC_RETRIES = {"retried": 0, "recovered": 0}   # per process (multiprocessing workers keep their own)
+
+
+def _is_degenerate_quartic_error(err: BaseException) -> bool:
+    return isinstance(err, ValueError) and "cannot assign slice of shape" in str(err)
+
+
+def play_shot(system: pt.System, phi_deg: float, V0: float, *, inplace: bool = False, cue_ball_id: str = "cue",
+              max_events: int = 2000) -> pt.System:
+    """
+    Strike `system` (balls at rest, not yet struck) with direction phi_deg / speed V0 and simulate it; returns the simulated system.
+
+    inplace=False: `system` is left untouched and a simulated copy is returned.
+    inplace=True : `system` itself is simulated (what BilliardsEnv.step does). Use the RETURN value afterwards: in the rare
+                   guarded case it is a different System object than the one passed in.
+
+    Without the solver bug this is exactly strike + pt.simulate (same numbers, bit for bit). On the bug's ValueError the shot is
+    retried from the pre-strike state with the aim nudged (QUARTIC_RETRY_NUDGES_RAD); every retry is counted and logged to stderr.
+    Any other exception, or the bug persisting through every nudge, is raised unchanged.
+    """
+    pristine = system.copy() if inplace else system   # a state that was never struck, to retry from
+    work = system if inplace else system.copy()
+    work.strike(phi=phi_deg, V0=V0, cue_ball_id=cue_ball_id)
+    try:
+        pt.simulate(work, inplace=True, max_events=max_events)
+        return work
+    except ValueError as err:
+        if not _is_degenerate_quartic_error(err):
+            raise
+        first_error = err
+    QUARTIC_RETRIES["retried"] += 1
+    for nudge in QUARTIC_RETRY_NUDGES_RAD:
+        trial = pristine.copy()
+        trial.strike(phi=phi_deg + float(np.degrees(nudge)), V0=V0, cue_ball_id=cue_ball_id)
+        try:
+            pt.simulate(trial, inplace=True, max_events=max_events)
+        except ValueError as err:
+            if not _is_degenerate_quartic_error(err):
+                raise
+            continue
+        QUARTIC_RETRIES["recovered"] += 1
+        print(f"[play_shot] pooltool quartic ValueError at phi={phi_deg:.9f} deg, V0={V0:.4f}; recovered with aim +{nudge:g} rad",
+              file=sys.stderr, flush=True)
+        return trial
+    raise first_error
 
 
 # =============================================================================
@@ -309,8 +368,7 @@ class BilliardsEnv(gym.Env):
             phi_direct = np.arctan2(ref_pos[1] - cue_pos[1], ref_pos[0] - cue_pos[0])
             phi_deg    = np.degrees(phi_direct + delta_angle)
 
-        self.system.strike(phi=phi_deg, V0=speed, cue_ball_id="cue")
-        pt.simulate(self.system, inplace=True, max_events=2000)
+        self.system = play_shot(self.system, phi_deg, speed, inplace=True)
         self._step_count += 1
 
         # ── Scratch (cue ball pocketed) ───────────────────────────────────────

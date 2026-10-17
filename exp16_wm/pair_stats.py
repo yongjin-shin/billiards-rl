@@ -26,10 +26,9 @@ import os
 import sys
 
 import numpy as np
-import pooltool as pt
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from simulator import BilliardsEnv
+from simulator import BilliardsEnv, play_shot
 from exp16_wm.outcomes import slots_from_system, pocket_index_map, N_POCKETS, N_SLOTS
 from exp16_wm.planner import aim_reference, ghost_aims, action_from_phi, strike_phi_deg
 from exp16_wm.relabel import restore_state
@@ -50,9 +49,7 @@ def pair_stats_for_state(env: BilliardsEnv, raw_obs: np.ndarray, pocket_map: dic
         for off in plan["offsets_deg"]:
             for v in plan["speeds"]:
                 a = action_from_phi(phi + np.radians(off), phi_ref, v)
-                sys_c = env.system.copy()
-                sys_c.strike(phi=strike_phi_deg(phi_ref, a), V0=float(a[1]), cue_ball_id="cue")
-                pt.simulate(sys_c, inplace=True, max_events=2000)
+                sys_c = play_shot(env.system, strike_phi_deg(phi_ref, a), float(a[1]))
                 made, scratch = slots_from_system(env, sys_c, pocket_map)
                 out["pair_n"][slot] += 1
                 out["pair_scratch"][slot] += int(scratch)

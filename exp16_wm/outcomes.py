@@ -27,7 +27,7 @@ import numpy as np
 import pooltool as pt
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from simulator import BilliardsEnv
+from simulator import BilliardsEnv, play_shot
 from exp16_wm.planner import aim_reference, strike_phi_deg
 from exp16_wm.relabel import restore_state
 from exp16_wm.teacher_data import CLEAR_ENV
@@ -65,9 +65,7 @@ def made_slots(env: BilliardsEnv, raw_obs: np.ndarray, action: np.ndarray,
     """
     pocket_map = pocket_map or pocket_index_map(env)
     restore_state(env, raw_obs)
-    sys_c = env.system.copy()
-    sys_c.strike(phi=strike_phi_deg(aim_reference(env), action), V0=float(action[1]), cue_ball_id="cue")
-    pt.simulate(sys_c, inplace=True, max_events=2000)
+    sys_c = play_shot(env.system, strike_phi_deg(aim_reference(env), action), float(action[1]))
     return slots_from_system(env, sys_c, pocket_map)
 
 

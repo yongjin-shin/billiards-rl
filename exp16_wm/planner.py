@@ -29,7 +29,7 @@ import numpy as np
 import pooltool as pt
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from simulator import BilliardsEnv
+from simulator import BilliardsEnv, play_shot
 from exp16_wm.train import summarize_final_eval
 
 SCRATCH_COST = 0.5   # BilliardsEnv's multi-ball scratch penalty
@@ -99,9 +99,7 @@ def strike_phi_deg(phi_ref: float, action: np.ndarray) -> float:
 
 def simulate_candidate(env: BilliardsEnv, phi_ref: float, action: np.ndarray) -> ShotResult:
     """Play `action` on a copy of the env's system; the env itself is untouched."""
-    sys_c = env.system.copy()
-    sys_c.strike(phi=strike_phi_deg(phi_ref, action), V0=float(action[1]), cue_ball_id="cue")
-    pt.simulate(sys_c, inplace=True, max_events=2000)
+    sys_c = play_shot(env.system, strike_phi_deg(phi_ref, action), float(action[1]))
 
     scratch = bool(sys_c.balls["cue"].state.s == pt.constants.pocketed)
     n_pocketed, remaining = 0, []
