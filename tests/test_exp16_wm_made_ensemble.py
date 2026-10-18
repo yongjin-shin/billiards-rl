@@ -80,3 +80,39 @@ def test_members_must_share_candidates_and_aim():
     d.refine_deg, d.refine_speed_abs = a.refine_deg, a.refine_speed_abs
     with pytest.raises(ValueError):
         MadeEnsemble([a, d])                                                               # no aim → no all_pairs candidates
+
+
+def _shifted(seed: int, shift_rad: float) -> PairGNNPolicy:
+    m = _model(seed)
+    base = m._geometric_aim
+    m._geometric_aim = lambda rel: base(rel) + shift_rad                                       # a member with its own aim
+    return m
+
+
+def test_mean_aim_builds_candidates_around_the_circular_mean_and_keeps_each_members_own_aim():
+    a, b, rel = _shifted(0, +0.001), _shifted(1, -0.003), _rel(4)
+    with pytest.raises(ValueError):
+        MadeEnsemble([a, b]).scores(rel)                                                    # shared mode refuses different aims
+    z, c = MadeEnsemble([a, b], aim="mean").scores(rel)
+    ref = _model(0)
+    centre = ref._geometric_aim(rel) - 0.001                                                # circular mean of +0.001 and −0.003
+    d = centre - ref.act_bias[0]
+    centre_u = torch.atan2(torch.sin(d), torch.cos(d)) / ref.act_scale[0]
+    torch.testing.assert_close(c[:, :, 0, 0], (centre_u + (-0.1) / 180.0).clamp(-1, 1), atol=1e-5, rtol=0)
+    with torch.no_grad():                                                                   # member a scores those candidates with its own aim
+        oa = a.forward_full(rel); j = 0; C = c.shape[2]
+        za = a.head_made2(a._made2_features(oa["e"][:, j][:, None].expand(-1, C, -1), c[:, j], oa["means"][:, j][:, None].expand(-1, C, -1),
+                                            oa["aim"][:, j][:, None].expand(-1, C))).squeeze(-1)
+        ob = b.forward_full(rel)
+        zb = b.head_made2(b._made2_features(ob["e"][:, j][:, None].expand(-1, C, -1), c[:, j], ob["means"][:, j][:, None].expand(-1, C, -1),
+                                            ob["aim"][:, j][:, None].expand(-1, C))).squeeze(-1)
+    torch.testing.assert_close(z[:, j], (za + zb) / 2)
+
+
+def test_mean_aim_with_one_member_is_the_model_itself():
+    m, rel = _model(3), _rel(5)
+    with torch.no_grad():
+        np.testing.assert_allclose(MadeEnsemble([m], aim="mean").predict_unit(rel).numpy(), m.predict_unit(rel).numpy(), atol=1e-6)
+    with pytest.raises(ValueError):
+        MadeEnsemble([m], aim="median")
+
