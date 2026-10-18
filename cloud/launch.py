@@ -53,6 +53,8 @@ def build_user_data(bucket: str, job: str, command: str, max_hours: float, regio
     Bash script run by cloud-init as root on the instance. It always uploads the log and shuts the instance down. While the command
     runs it also uploads $OUT_DIR and the log every sync_seconds, and right away on a Spot interruption notice (STATUS
     'spot-interrupted'): a reclaimed Spot instance never reaches finish(), and the first P3 run lost everything that way.
+    Relaunching the same job name resumes it: the earlier runs/<job>/out is restored into $OUT_DIR before the command (training
+    with --ckpt-every continues from its checkpoint), and STATUS reads 'running' until this instance finishes.
     """
     validate_job(job)
     validate_max_hours(max_hours)
@@ -116,6 +118,8 @@ trap finish EXIT
 mkdir -p "$WORK" "$OUT" && cd "$WORK"
 watch_progress &
 WATCH_PID=$!
+echo running > /tmp/status_run && aws s3 cp /tmp/status_run "s3://$BUCKET/runs/$JOB/STATUS" --only-show-errors || true
+aws s3 sync "s3://$BUCKET/runs/$JOB/out" "$OUT" --only-show-errors || true    # resume: outputs of an earlier, interrupted instance
 aws s3 cp "s3://$BUCKET/code/$JOB.tar.gz" code.tar.gz && tar xzf code.tar.gz && rm code.tar.gz
 cat > cloud_cmd.sh <<'{CMD_DELIMITER}'
 {command}

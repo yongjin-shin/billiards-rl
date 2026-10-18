@@ -135,3 +135,10 @@ def test_user_data_is_valid_bash() -> None:
     res = subprocess.run(["bash", "-n"], input=build_user_data(**ARGS), text=True, capture_output=True)
     assert res.returncode == 0, res.stderr
 
+
+
+def test_user_data_restores_earlier_outputs_and_marks_running_before_the_command() -> None:
+    script = build_user_data(**ARGS)
+    restore = script.index('aws s3 sync "s3://$BUCKET/runs/$JOB/out" "$OUT"')
+    assert script.index("echo running > /tmp/status_run") < restore < script.index("bash cloud_cmd.sh")
+    assert restore < script.index('aws s3 cp "s3://$BUCKET/code/')                  # before the code and the command

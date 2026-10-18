@@ -295,7 +295,8 @@ def train_bc(agent: VanillaSAC, data: dict[str, np.ndarray], train: np.ndarray, 
              selection: str = "global", use_extras: bool = False,
              sims: dict[str, np.ndarray] | None = None, made2_weight: float = 1.0, sims_batch: int = 1024,
              aux: np.ndarray | None = None, aux_weight: float = 0.0, aux_only: bool = False,
-             train_plateau: int = 0, train_plateau_tol: float = 0.01, made_only: bool = False, made_val_sims: int = 20000) -> dict:
+             train_plateau: int = 0, train_plateau_tol: float = 0.01, made_only: bool = False, made_val_sims: int = 20000,
+             ckpt_path: str | None = None, ckpt_every: int = 0, stop_after: int | None = None) -> dict:
     """select: 'loss' keeps the lowest val loss; 'within' the highest val within-threshold rate
     (the val loss is dominated by a few far-off predictions and can disagree with it).
     aux_only: train the encoder + aux head on the geometry look-ahead alone (no action / selection / made loss);
@@ -303,7 +304,11 @@ def train_bc(agent: VanillaSAC, data: dict[str, np.ndarray], train: np.ndarray, 
     made_only: train on the made2 BCE of `sims` alone (no action / selection loss, teacher-free when the sims come from a search);
     the 'val loss' is then the made2 BCE of up to made_val_sims simulations of val states and the checkpoint is the lowest of it.
     train_plateau = W > 0: also stop when the training loss has converged — the lowest training loss of the last W epochs is not
-    more than train_plateau_tol (relative) below the lowest before them."""
+    more than train_plateau_tol (relative) below the lowest before them.
+    ckpt_path + ckpt_every = K > 0: every K epochs the whole training state (weights, optimiser, lr schedule, RNG states, best
+    checkpoint, histories) is written to ckpt_path, and an existing ckpt_path is resumed from — a run interrupted (e.g. a reclaimed
+    Spot instance) continues where it stopped and ends with the same weights as an uninterrupted run.
+    stop_after = E: leave the loop after epoch E − 1 (testing resumption; the checkpoint is written there)."""
     if select not in ("loss", "within"):
         raise ValueError(f"unknown select: {select}")
     if lr_schedule not in ("const", "cosine"):
@@ -361,7 +366,26 @@ def train_bc(agent: VanillaSAC, data: dict[str, np.ndarray], train: np.ndarray, 
     stop_reason = None
     use_aux = aux_t is not None and aux_weight > 0
     aux_history: list[tuple[int, float, float]] = []             # (epoch, train aux MSE, val aux MSE), standardised targets
-    for ep in range(epochs):
+    start_ep = 0
+    if ckpt_path and ckpt_every > 0 and os.path.exists(ckpt_path):
+        ck = torch.load(ckpt_path, weights_only=False)
+        model.module.load_state_dict(ck["model"]); opt.load_state_dict(ck["opt"])
+        if sched is not None:
+            sched.load_state_dict(ck["sched"])
+        rng.bit_generator.state = ck["np_rng"]; torch.set_rng_state(ck["torch_rng"])
+        best_score, best_val, best_state, best_epoch = ck["best_score"], ck["best_val"], ck["best_state"], ck["best_epoch"]
+        history, aux_history, start_ep = ck["history"], ck["aux_history"], ck["epoch"]
+        print(f"  resumed from {ckpt_path} at epoch {start_ep}", flush=True)
+
+    def save_ckpt(next_ep: int) -> None:
+        tmp = ckpt_path + ".tmp"
+        torch.save({"model": model.module.state_dict(), "opt": opt.state_dict(), "sched": None if sched is None else sched.state_dict(),
+                    "np_rng": rng.bit_generator.state, "torch_rng": torch.get_rng_state(), "best_score": best_score, "best_val": best_val,
+                    "best_state": best_state, "best_epoch": best_epoch, "history": history, "aux_history": aux_history,
+                    "epoch": next_ep}, tmp)
+        os.replace(tmp, ckpt_path)                                   # never a half-written checkpoint
+
+    for ep in range(start_ep, epochs):
         model.module.train()
         perm = rng.permutation(tr_idx)
         tr_loss = tr_aux = 0.0
@@ -417,10 +441,15 @@ def train_bc(agent: VanillaSAC, data: dict[str, np.ndarray], train: np.ndarray, 
             ax = f"  aux train {tr_aux:.4f} val {va_aux:.4f}" if use_aux else ""
             print(f"  epoch {ep:>4}  train {tr_loss:.6f}  val {va_loss:.6f}  within{select_thresh_deg:g} "
                   f"{va_within:.4f}  best@{best_epoch}{ax}{kw}", flush=True)
+        if ckpt_path and ckpt_every > 0 and ((ep + 1) % ckpt_every == 0 or ep + 1 == stop_after):
+            save_ckpt(ep + 1)
         if ep - best_epoch >= patience:
             break
         if train_plateau and train_plateau_converged([h[1] for h in history], train_plateau, train_plateau_tol):
             stop_reason = f"training loss converged at epoch {ep}"
+            break
+        if stop_after is not None and ep + 1 >= stop_after:
+            stop_reason = f"stop_after {stop_after}"
             break
     last_state = {k: v.clone() for k, v in model.module.state_dict().items()}      # the weights after the last epoch run
     model.module.load_state_dict(best_state)
@@ -645,6 +674,9 @@ def parse_args():
     p.add_argument("--train-plateau", type=int, default=0,
                    help="> 0: also stop when the training loss has converged over this many epochs (see --train-plateau-tol)")
     p.add_argument("--train-plateau-tol", type=float, default=0.01)
+    p.add_argument("--ckpt-every", type=int, default=0,
+                   help="> 0: save the whole training state every this many epochs under <out-root>/_ckpt/ and resume from it if present "
+                        "(the run dir name is kept), so an interrupted run continues")
     p.add_argument("--save-last", action="store_true", help="also save the last epoch's weights (bc_model_last.pt) next to the selected best")
     p.add_argument("--geom-aux-set", type=str, default="four", choices=["four", "aim", "scan"],
                    help="auxiliary geometry targets: 'four' = entry deviation, cushion, two blockers; 'aim' = the exact ghost-ball aim of every pair; "
@@ -803,6 +835,17 @@ def main():
             ("_geoang" if args.geom_angle else "") + extra_tag + (f"_m2w{args.made2_weight:g}" if args.made2_head else "") + ("geo" if args.made2_geom else "") + ("L" if args.made2_aim_from else "") + (f"S{args.made2_self_aim[0]}" if args.made2_self_aim else "") + ("_wrap" if args.angle_wrap else "_nowrap")
     name = (f"exp16_bc_{teacher}_{args.loss}{h_tag}_a{args.angle_scale_deg:g}_v{args.speed_scale:g}"
             f"_s{args.seed}_{time.strftime('%Y-%m-%d@%H%M')}")
+    ckpt_path = None
+    if args.ckpt_every > 0:                                          # key without the timestamp; a resumed run keeps its first name
+        ckpt_dir = os.path.join(args.out_root, "_ckpt")
+        os.makedirs(ckpt_dir, exist_ok=True)
+        key = name.rsplit("_", 1)[0]
+        ckpt_path = os.path.join(ckpt_dir, key + ".pt")
+        name_file = os.path.join(ckpt_dir, key + ".name")
+        if os.path.exists(name_file):
+            name = open(name_file).read().strip()
+        else:
+            open(name_file, "w").write(name)
     out_dir = os.path.join(args.out_root, name)
     os.makedirs(out_dir, exist_ok=True)
     print(f"{name}: {len(paths)} files, {len(data['shot'])} shots "
@@ -848,7 +891,8 @@ def main():
                    use_pairs=args.pair_supervision or modular, selection=args.selection, use_extras=modular,
                    sims=sims, made2_weight=args.made2_weight, sims_batch=args.sims_batch,
                    aux=aux, aux_weight=args.geom_aux_weight, aux_only=args.aux_only,
-                   train_plateau=args.train_plateau, train_plateau_tol=args.train_plateau_tol, made_only=args.made_only)
+                   train_plateau=args.train_plateau, train_plateau_tol=args.train_plateau_tol, made_only=args.made_only,
+                   ckpt_path=ckpt_path, ckpt_every=args.ckpt_every)
     if fit["stop_reason"]:
         print(f"  stopped: {fit['stop_reason']}", flush=True)
     if args.save_last and isinstance(agent, PairGNNPolicy):
