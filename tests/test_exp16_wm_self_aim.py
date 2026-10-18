@@ -78,3 +78,31 @@ def test_self_aim_checkpoint_roundtrip(tmp_path):
     rel = torch.as_tensor(_rel(3))
     with torch.no_grad():
         torch.testing.assert_close(n.forward_full(rel)["aim"], m.forward_full(rel)["aim"])
+
+
+def test_lambda_zero_trains_the_aim_head_through_the_made_loss_alone():
+    from exp16_wm.bc import SELF_AIM_NO_TARGET_STATS
+    data, tr, sims = _made_only_setup()
+    m = _model("grad"); m.set_aim_stats(*SELF_AIM_NO_TARGET_STATS)
+    before = {k: v.clone() for k, v in m.state_dict().items()}
+    fit = train_bc(m, data, tr, ~tr, "nearest_good", epochs=3, batch=8, lr=3e-3, patience=10, seed=0, log_every=0, select="within",
+                   w=dim_weights(0.2, 0.5), sims=sims, sims_batch=64, made_only=True)            # no aux targets, no aux weight
+    changed = lambda pre: any(not torch.equal(before[k], m.state_dict()[k]) for k in before if k.startswith(pre))
+    assert changed("aux_head") and changed("head_made2")
+    assert fit["aux_history"] == []
+
+
+def test_load_run_rebuilds_a_lambda_zero_self_aim_model(tmp_path):
+    import json
+    from exp16_wm.eval_by_balls import load_run
+    m = PairGNNPolicy(hidden=16, made2_head=True, made2_geom=True, made2_no_proposal=True, aux_dim=1, self_aim="grad", enc_layers=2).eval()
+    m.set_aim_stats(0.0, 180.0)
+    torch.save({"gnn": m.state_dict()}, tmp_path / "bc_model.pt")
+    args = {"gnn_hidden": 16, "made2_head": True, "made2_geom": True, "made2_no_proposal": True, "made2_self_aim": "grad",
+            "geom_aux_weight": 0.0, "geom_aux_set": "aim", "gnn_layers": 2}
+    (tmp_path / "results.json").write_text(json.dumps({"args": args}))
+    n = load_run(str(tmp_path))
+    rel = torch.as_tensor(_rel(3))
+    with torch.no_grad():
+        torch.testing.assert_close(n.forward_full(rel)["aim"], m.forward_full(rel)["aim"])
+

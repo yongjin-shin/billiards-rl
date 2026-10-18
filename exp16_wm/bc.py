@@ -459,6 +459,7 @@ def train_bc(agent: VanillaSAC, data: dict[str, np.ndarray], train: np.ndarray, 
             "aux_history": aux_history, "last_state": last_state, "stop_reason": stop_reason}
 
 
+SELF_AIM_NO_TARGET_STATS = (0.0, 180.0)                           # --made2-self-aim with --geom-aux-weight 0: aim (deg) = 180 · head output
 ANG31 = tuple(np.round(np.arange(-0.3, 0.3 + 1e-9, 0.02), 4))     # refine grid used in the evaluations (deg around the centre)
 ABS7 = (0.75, 1.0, 1.25, 1.5, 2.0, 3.0, 5.0)                        # absolute refine speeds (m/s)
 
@@ -791,8 +792,8 @@ def main():
         extra_paths = sorted({p for pat in args.train_only_data for p in glob.glob(pat)})
         data, train, val = append_train_only(data, train, val, load_teacher_data(extra_paths))
         extra_tag = "_plus-" + os.path.basename(os.path.dirname(os.path.dirname(extra_paths[0])))
-    if args.made2_self_aim and (not args.made2_geom or args.made2_aim_from or args.geom_aux_weight <= 0 or args.geom_aux_set not in ("aim", "scan")):
-        raise SystemExit("--made2-self-aim needs --made2-geom, --geom-aux-weight > 0, --geom-aux-set aim or scan, and no --made2-aim-from")
+    if args.made2_self_aim and (not args.made2_geom or args.made2_aim_from or args.geom_aux_set not in ("aim", "scan")):
+        raise SystemExit("--made2-self-aim needs --made2-geom, --geom-aux-set aim or scan, and no --made2-aim-from")
     if args.made_only and not (args.made2_head and args.made2_geom):
         raise SystemExit("--made-only needs --made2-head --made2-geom (it chooses among candidates around the aim)")
     if args.init_from and args.model != "gnn":
@@ -860,11 +861,14 @@ def main():
                               made_head=args.made_head, made2_head=args.made2_head,
                               geom_angle=args.geom_angle, made2_geom=args.made2_geom,
                               enc_layers=args.gnn_layers, speed_loss=args.speed_loss, speed_bins=args.speed_bins,
-                              uncertainty_weights=args.uncertainty_weights, aux_dim=(1 if args.geom_aux_set in ("aim", "scan") else N_AUX) if args.geom_aux_weight > 0 else 0,
+                              uncertainty_weights=args.uncertainty_weights, aux_dim=1 if args.made2_self_aim else ((1 if args.geom_aux_set in ("aim", "scan") else N_AUX) if args.geom_aux_weight > 0 else 0),
                               aim_encoder=aim_enc, fourier=args.input_fourier, made2_no_proposal=args.made2_no_proposal,
                               self_aim=args.made2_self_aim or "")
         if args.made2_self_aim:                                      # the own aim head regresses the standardised target
-            agent.set_aim_stats(float(aux_mean[0]), float(aux_std[0]))
+            if args.geom_aux_weight > 0:
+                agent.set_aim_stats(float(aux_mean[0]), float(aux_std[0]))
+            else:                                                    # λ = 0: no aim target at all, a fixed scale (head output 1 = 180°)
+                agent.set_aim_stats(*SELF_AIM_NO_TARGET_STATS)
         if aim_enc is not None:
             agent.set_aim_stats(*aim_stats)
             with torch.no_grad():                                    # how good is the learned aim on the val rows (all live pairs)
