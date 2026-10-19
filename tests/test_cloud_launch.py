@@ -142,3 +142,22 @@ def test_user_data_restores_earlier_outputs_and_marks_running_before_the_command
     restore = script.index('aws s3 sync "s3://$BUCKET/runs/$JOB/out" "$OUT"')
     assert script.index("echo running > /tmp/status_run") < restore < script.index("bash cloud_cmd.sh")
     assert restore < script.index('aws s3 cp "s3://$BUCKET/code/')                  # before the code and the command
+
+
+def test_rank_placements_keeps_the_latest_price_per_pool_and_orders_cheapest_first() -> None:
+    from cloud.launch import rank_placements
+    hist = [
+        {"InstanceType": "c7a.16xlarge", "AvailabilityZone": "us-east-1a", "SpotPrice": "0.90", "Timestamp": "2026-10-19T10:00:00Z"},
+        {"InstanceType": "c7a.16xlarge", "AvailabilityZone": "us-east-1a", "SpotPrice": "1.20", "Timestamp": "2026-10-19T11:00:00Z"},
+        {"InstanceType": "m7a.16xlarge", "AvailabilityZone": "us-east-1f", "SpotPrice": "0.70", "Timestamp": "2026-10-19T09:00:00Z"},
+        {"InstanceType": "m7i.16xlarge", "AvailabilityZone": "us-east-1b", "SpotPrice": "0.10", "Timestamp": "2026-10-19T11:00:00Z"},
+    ]
+    r = rank_placements(hist, ["c7a.16xlarge", "m7a.16xlarge"])
+    assert r == [("m7a.16xlarge", "us-east-1f", 0.70), ("c7a.16xlarge", "us-east-1a", 1.20)]   # latest c7a price; m7i not allowed
+    assert rank_placements([], ["c7a.16xlarge"]) == []
+
+
+def test_placement_overrides_set_type_and_subnet() -> None:
+    from cloud.launch import placement_overrides
+    assert placement_overrides("m7a.16xlarge", "subnet-1") == ["--instance-type", "m7a.16xlarge", "--subnet-id", "subnet-1"]
+    assert placement_overrides("c7a.16xlarge", None) == ["--instance-type", "c7a.16xlarge"]

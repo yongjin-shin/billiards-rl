@@ -85,7 +85,8 @@ def test_agent_policy_has_no_wildcard_actions_or_resources(stack: dict[str, Any]
 
 def test_agent_policy_pins_instance_type_and_scopes_terminate_to_project_tag(stack: dict[str, Any]) -> None:
     by_sid = {s["Sid"]: s for s in _agent_statements(stack)}
-    assert by_sid["RunOnlyC7a16xlarge"]["Condition"]["StringEquals"]["ec2:InstanceType"] == "c7a.16xlarge"
+    # only 64-core AMD Zen4 types (same CPU as c7a, so results stay comparable); launch.py picks the cheapest Spot pool among them
+    assert by_sid["RunOnlyZen4Sixteenxlarge"]["Condition"]["StringEquals"]["ec2:InstanceType"] == ["c7a.16xlarge", "m7a.16xlarge", "r7a.16xlarge"]
     assert "ec2:ResourceTag/project" in by_sid["TerminateProjectInstances"]["Condition"]["StringEquals"]
     assert "ssm:resourceTag/project" in by_sid["SsmTargetProjectInstancesOnly"]["Condition"]["StringEquals"]
     assert by_sid["PassOnlyTheInstanceRole"]["Condition"]["StringEquals"]["iam:PassedToService"] == "ec2.amazonaws.com"

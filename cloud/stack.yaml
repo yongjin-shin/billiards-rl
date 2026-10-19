@@ -209,7 +209,7 @@ Resources:
   AgentWritePolicy:
     Type: AWS::IAM::ManagedPolicy
     Properties:
-      Description: Lets the Agent group start/stop only this project's c7a.16xlarge Spot job and use its bucket (reads come from ReadOnlyAccess).
+      Description: Lets the Agent group start/stop only this project's Spot job (c7a, m7a or r7a .16xlarge - same AMD Zen4 64-core CPU) and use its bucket (reads come from ReadOnlyAccess).
       Groups:
         - !Ref AgentGroupName
       PolicyDocument:
@@ -219,13 +219,13 @@ Resources:
             Effect: Allow
             Action: "ec2:RunInstances"
             Resource: !Sub "arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:launch-template/${TrainingLaunchTemplate}"
-          - Sid: RunOnlyC7a16xlarge
+          - Sid: RunOnlyZen4Sixteenxlarge
             Effect: Allow
             Action: "ec2:RunInstances"
             Resource: !Sub "arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:instance/*"
             Condition:
               StringEquals:
-                "ec2:InstanceType": c7a.16xlarge
+                "ec2:InstanceType": [c7a.16xlarge, m7a.16xlarge, r7a.16xlarge]
           - Sid: RunSupportingResources
             Effect: Allow
             Action: "ec2:RunInstances"
