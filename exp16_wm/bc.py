@@ -125,23 +125,27 @@ def build_split(data: dict[str, np.ndarray], val_frac: float, seed: int, data_fr
 def load_sims(sims_paths: list[str], label_paths: list[str]) -> dict[str, np.ndarray]:
     """
     Teacher simulations with made-slot identity (exp16_wm.sim_identity) aligned to load_teacher_data(label_paths):
-    row = global row of the state in that concatenation. Sims files pair with label files by base name.
+    row = global row of the state in that concatenation. Sims files pair with label files by base name; several sims files with the
+    same base name (e.g. scan-centred candidates and a loop's own-aim candidates in two directories) are all used.
     """
-    by_name = {os.path.basename(p): p for p in sims_paths}
+    by_name: dict[str, list[str]] = {}
+    for p in sorted(sims_paths):
+        by_name.setdefault(os.path.basename(p), []).append(p)
     rows, act, made, scr, offset = [], [], [], [], 0
     for lp in sorted(label_paths):
         z_obs = np.load(lp)["obs"]
-        sp = by_name.get(os.path.basename(lp))
-        if sp is None:
+        sps = by_name.get(os.path.basename(lp))
+        if not sps:
             raise FileNotFoundError(f"no sims file for {lp}")
-        z = np.load(sp)
-        if "sim_made" not in z.files:
-            raise ValueError(f"{sp} has no sim_made (run exp16_wm.sim_identity)")
-        if not np.array_equal(z["obs"], z_obs):
-            raise ValueError(f"{sp}: states differ from {lp}")
-        rows.append(z["sim_state"].astype(np.int64) + offset)
-        act.append(to_unit(z["sim_action"]).astype(np.float32))
-        made.append(z["sim_made"]); scr.append(z["sim_scratch_replay"])
+        for sp in sps:
+            z = np.load(sp)
+            if "sim_made" not in z.files:
+                raise ValueError(f"{sp} has no sim_made (run exp16_wm.sim_identity)")
+            if not np.array_equal(z["obs"], z_obs):
+                raise ValueError(f"{sp}: states differ from {lp}")
+            rows.append(z["sim_state"].astype(np.int64) + offset)
+            act.append(to_unit(z["sim_action"]).astype(np.float32))
+            made.append(z["sim_made"]); scr.append(z["sim_scratch_replay"])
         offset += len(z_obs)
     return {"row": np.concatenate(rows), "a_unit": np.concatenate(act),
             "made": np.concatenate(made), "scratch": np.concatenate(scr)}

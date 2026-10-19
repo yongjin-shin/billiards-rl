@@ -212,3 +212,15 @@ def test_random_layouts_are_valid_non_overlapping_and_load_as_data(tmp_path):
     assert np.allclose(obs[:, 11:23], pockets)
     d = load_teacher_data(write_shards(rec, str(tmp_path), 2, {"teacher": "random_layouts"}))
     assert len(d["obs"]) == 300 and len(np.unique(d["game"])) == 300
+
+
+def test_load_sims_uses_every_sims_file_with_the_label_files_name(tmp_path):
+    from exp16_wm.bc import load_sims
+    obs = np.zeros((3, 23), np.float32)
+    (tmp_path / "labels").mkdir(); (tmp_path / "a").mkdir(); (tmp_path / "b").mkdir()
+    np.savez(tmp_path / "labels" / "s0.npz", obs=obs)
+    for d, n in (("a", 2), ("b", 3)):
+        np.savez(tmp_path / d / "s0.npz", obs=obs, sim_state=np.arange(n) % 3, sim_action=np.zeros((n, 2), np.float32),
+                 sim_made=np.zeros(n, np.int32), sim_scratch_replay=np.zeros(n, bool))
+    s = load_sims([str(tmp_path / "a" / "s0.npz"), str(tmp_path / "b" / "s0.npz")], [str(tmp_path / "labels" / "s0.npz")])
+    assert len(s["row"]) == 5                                         # both directories, not only the last one
