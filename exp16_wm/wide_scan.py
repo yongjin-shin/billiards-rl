@@ -140,6 +140,7 @@ def main() -> None:
     p.add_argument("--speed", type=float, default=1.0); p.add_argument("--coarse-step", type=float, default=0.05)
     p.add_argument("--fine-step", type=float, default=0.01); p.add_argument("--max-states", type=int, default=0)
     p.add_argument("--robust-speeds", type=float, nargs="*", default=[], help="coarse hits must also hold at these speeds (S1b)")
+    p.add_argument("--chunk", type=int, default=256, help="states per saved partial result (resume granularity)")
     p.add_argument("--fine-pad", type=float, default=None, help="fine scan reaches this far (deg) beyond the coarse window (default one coarse step)")
     args = p.parse_args()
     ref = PairGNNPolicy(hidden=8)
@@ -154,7 +155,16 @@ def main() -> None:
                 continue
             z = np.load(path)
             obs = z["obs"][:args.max_states] if args.max_states else z["obs"]
-            res = pool.map(_scan_task, [(o, args.speed, args.coarse_step, args.fine_step, sc, bi, tuple(args.robust_speeds), args.fine_pad) for o in obs], chunksize=1)
+            res = []
+            for c0 in range(0, len(obs), args.chunk):                    # partial results per chunk: a reclaimed instance loses minutes
+                part = f"{target}.part{c0 // args.chunk:04d}.npy"
+                if os.path.exists(part):
+                    res.extend(np.load(part, allow_pickle=True).tolist())
+                    continue
+                r = pool.map(_scan_task, [(o, args.speed, args.coarse_step, args.fine_step, sc, bi, tuple(args.robust_speeds), args.fine_pad)
+                                          for o in obs[c0:c0 + args.chunk]], chunksize=1)
+                np.save(part + ".tmp.npy", np.array(r, dtype=object), allow_pickle=True); os.replace(part + ".tmp.npy", part)
+                res.extend(r)
             N = len(z["obs"])
             out = {k: np.full((N, N_PAIRS), np.nan if k == "centre" else 0, dtype) for k, dtype in
                    (("centre", np.float32), ("width", np.float32), ("n_windows", np.int16))}
@@ -170,6 +180,8 @@ def main() -> None:
                      scan_coarse_step=args.coarse_step, scan_fine_step=args.fine_step, n_scanned=len(obs),
                      scan_robust_speeds=np.asarray(args.robust_speeds, np.float32), scan_fine_pad=np.float32(args.fine_pad or args.coarse_step))
             os.replace(tmp, target)                                      # never a half-written shard
+            for part in glob.glob(target + ".part*.npy"):
+                os.remove(part)
             exact, live = aim_targets(relative_obs(obs))
             v = valid[:len(obs)] & live
             err = np.abs(wrap_deg(out["centre"][:len(obs)][v] - exact[..., 0][v]))
