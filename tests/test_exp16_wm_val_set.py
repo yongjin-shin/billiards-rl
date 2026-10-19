@@ -68,3 +68,16 @@ def test_env_actions_runs_without_grad_and_matches_act():
     a = env_actions(m, obs)
     np.testing.assert_allclose(a, m.act(relative_obs(obs)), atol=1e-6)
 
+
+
+def test_top1_serial_plays_the_policy_choice():
+    from exp16_wm.val_set import top1_serial
+
+    class Fixed:                                                        # always shoots straight along the relative frame's +x
+        act_scale, act_bias = REF.act_scale, REF.act_bias
+        def predict_unit(self, rel):
+            return torch.zeros(len(rel), 2)
+    obs = np.zeros((2, 23), np.float32); obs[:, :11] = [0.5, 0.2, 0.3, 0.6, 0, 0.6, 0.3, 0, 0.7, 0.7, 0]
+    obs[:, 11:] = [0, 0, 0, 0.5, 0, 1, 1, 0, 1, 0.5, 1, 1]
+    r = top1_serial(Fixed(), {"obs": obs})
+    assert r in (0.0, 0.5, 1.0)

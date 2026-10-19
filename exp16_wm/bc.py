@@ -297,7 +297,8 @@ def train_bc(agent: VanillaSAC, data: dict[str, np.ndarray], train: np.ndarray, 
              sims: dict[str, np.ndarray] | None = None, made2_weight: float = 1.0, sims_batch: int = 1024,
              aux: np.ndarray | None = None, aux_weight: float = 0.0, aux_only: bool = False,
              train_plateau: int = 0, train_plateau_tol: float = 0.01, made_only: bool = False, made_val_sims: int = 20000,
-             ckpt_path: str | None = None, ckpt_every: int = 0, stop_after: int | None = None) -> dict:
+             ckpt_path: str | None = None, ckpt_every: int = 0, stop_after: int | None = None,
+             select_fn=None, select_every: int = 25) -> dict:
     """select: 'loss' keeps the lowest val loss; 'within' the highest val within-threshold rate
     (the val loss is dominated by a few far-off predictions and can disagree with it).
     aux_only: train the encoder + aux head on the geometry look-ahead alone (no action / selection / made loss);
@@ -309,7 +310,9 @@ def train_bc(agent: VanillaSAC, data: dict[str, np.ndarray], train: np.ndarray, 
     ckpt_path + ckpt_every = K > 0: every K epochs the whole training state (weights, optimiser, lr schedule, RNG states, best
     checkpoint, histories) is written to ckpt_path, and an existing ckpt_path is resumed from — a run interrupted (e.g. a reclaimed
     Spot instance) continues where it stopped and ends with the same weights as an uninterrupted run.
-    stop_after = E: leave the loop after epoch E − 1 (testing resumption; the checkpoint is written there)."""
+    stop_after = E: leave the loop after epoch E − 1 (testing resumption; the checkpoint is written there).
+    select_fn(module) → score (higher is better), e.g. the fixed val set V0's top-1 success: evaluated every select_every epochs and at
+    the last epoch, and the best of those epochs is the returned model instead of the lowest val loss (exp16_wm.val_set)."""
     if select not in ("loss", "within"):
         raise ValueError(f"unknown select: {select}")
     if lr_schedule not in ("const", "cosine"):
@@ -368,6 +371,7 @@ def train_bc(agent: VanillaSAC, data: dict[str, np.ndarray], train: np.ndarray, 
     use_aux = aux_t is not None and aux_weight > 0
     aux_history: list[tuple[int, float, float]] = []             # (epoch, train aux MSE, val aux MSE), standardised targets
     start_ep = 0
+    select_history: list[tuple[int, float]] = []
     if ckpt_path and ckpt_every > 0 and os.path.exists(ckpt_path):
         ck = torch.load(ckpt_path, weights_only=False)
         model.module.load_state_dict(ck["model"]); opt.load_state_dict(ck["opt"])
@@ -376,6 +380,7 @@ def train_bc(agent: VanillaSAC, data: dict[str, np.ndarray], train: np.ndarray, 
         rng.bit_generator.state = ck["np_rng"]; torch.set_rng_state(ck["torch_rng"])
         best_score, best_val, best_state, best_epoch = ck["best_score"], ck["best_val"], ck["best_state"], ck["best_epoch"]
         history, aux_history, start_ep = ck["history"], ck["aux_history"], ck["epoch"]
+        select_history = ck.get("select_history", [])
         print(f"  resumed from {ckpt_path} at epoch {start_ep}", flush=True)
 
     def save_ckpt(next_ep: int) -> None:
@@ -383,7 +388,7 @@ def train_bc(agent: VanillaSAC, data: dict[str, np.ndarray], train: np.ndarray, 
         torch.save({"model": model.module.state_dict(), "opt": opt.state_dict(), "sched": None if sched is None else sched.state_dict(),
                     "np_rng": rng.bit_generator.state, "torch_rng": torch.get_rng_state(), "best_score": best_score, "best_val": best_val,
                     "best_state": best_state, "best_epoch": best_epoch, "history": history, "aux_history": aux_history,
-                    "epoch": next_ep}, tmp)
+                    "select_history": select_history, "epoch": next_ep}, tmp)
         os.replace(tmp, ckpt_path)                                   # never a half-written checkpoint
 
     for ep in range(start_ep, epochs):
@@ -432,7 +437,15 @@ def train_bc(agent: VanillaSAC, data: dict[str, np.ndarray], train: np.ndarray, 
             aux_history.append((ep, tr_aux, va_aux))
         if sched is not None:
             sched.step()
-        score = -va_loss if select == "loss" else (va_within if va_within == va_within else -float("inf"))
+        if select_fn is not None:                                    # e.g. V0 top-1: only on its epochs, the rest never become best
+            if (ep + 1) % select_every == 0 or ep + 1 == epochs:
+                model.module.eval()
+                score = float(select_fn(model.module)); select_history.append((ep, score))
+                print(f"  epoch {ep:>4}  select {score:.4f}  (best {max(best_score, score):.4f})", flush=True)
+            else:
+                score = -float("inf")
+        else:
+            score = -va_loss if select == "loss" else (va_within if va_within == va_within else -float("inf"))
         if score > best_score:
             best_score, best_val, best_epoch = score, va_loss, ep
             best_state = {k: v.clone() for k, v in model.module.state_dict().items()}
@@ -457,7 +470,7 @@ def train_bc(agent: VanillaSAC, data: dict[str, np.ndarray], train: np.ndarray, 
     model.module.eval()
     return {"best_val_loss": best_val, "best_epoch": best_epoch, "epochs_run": len(history),
             "select": select, "best_score": best_score, "final_lr": opt.param_groups[0]["lr"], "history": history,
-            "aux_history": aux_history, "last_state": last_state, "stop_reason": stop_reason}
+            "aux_history": aux_history, "last_state": last_state, "stop_reason": stop_reason, "select_history": select_history}
 
 
 SELF_AIM_NO_TARGET_STATS = (0.0, 180.0)                           # --made2-self-aim with --geom-aux-weight 0: aim (deg) = 180 · head output
@@ -676,6 +689,10 @@ def parse_args():
     p.add_argument("--train-plateau", type=int, default=0,
                    help="> 0: also stop when the training loss has converged over this many epochs (see --train-plateau-tol)")
     p.add_argument("--train-plateau-tol", type=float, default=0.01)
+    p.add_argument("--val-v0", type=str, default=None,
+                   help="--made-only: choose the final model by top-1 success on this fixed val set (exp16_wm.val_set) every --v0-every epochs "
+                        "instead of the lowest made BCE on the training data's own val split")
+    p.add_argument("--v0-every", type=int, default=25)
     p.add_argument("--ckpt-every", type=int, default=0,
                    help="> 0: save the whole training state every this many epochs under <out-root>/_ckpt/ and resume from it if present "
                         "(the run dir name is kept), so an interrupted run continues")
@@ -889,6 +906,20 @@ def main():
     else:
         agent = make_agent(CLEAR_ENV["n_balls"], args.hidden, OBS_DIMS[args.obs_transform])
 
+    v0_select = None
+    if args.val_v0:
+        if not args.made_only:
+            raise SystemExit("--val-v0 needs --made-only (it scores the all_pairs choice)")
+        from exp16_wm.val_set import load as load_v0, top1_serial
+        v0 = load_v0(args.val_v0)
+
+        def v0_select(module: PairGNNPolicy) -> float:
+            saved = (module.infer, module.refine_deg, module.refine_speed_abs)
+            module.infer, module.refine_deg, module.refine_speed_abs = "all_pairs", ANG31, ABS7
+            try:
+                return top1_serial(module, v0)
+            finally:
+                module.infer, module.refine_deg, module.refine_speed_abs = saved
     t0 = time.time()
     fit = train_bc(agent, data, train, val, args.loss, args.epochs, args.batch, args.lr,
                    args.patience, train_seed(args.seed, args.init_seed), w=dim_weights(args.angle_scale_deg, args.speed_scale),
@@ -897,7 +928,7 @@ def main():
                    sims=sims, made2_weight=args.made2_weight, sims_batch=args.sims_batch,
                    aux=aux, aux_weight=args.geom_aux_weight, aux_only=args.aux_only,
                    train_plateau=args.train_plateau, train_plateau_tol=args.train_plateau_tol, made_only=args.made_only,
-                   ckpt_path=ckpt_path, ckpt_every=args.ckpt_every)
+                   ckpt_path=ckpt_path, ckpt_every=args.ckpt_every, select_fn=v0_select, select_every=args.v0_every)
     if fit["stop_reason"]:
         print(f"  stopped: {fit['stop_reason']}", flush=True)
     if args.save_last and isinstance(agent, PairGNNPolicy):

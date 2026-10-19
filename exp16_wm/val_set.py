@@ -131,6 +131,15 @@ def env_actions(policy, obs: np.ndarray, chunk: int = 256) -> np.ndarray:
                            for lo in range(0, len(rel), chunk)])
 
 
+def top1_serial(policy, v0: dict[str, np.ndarray]) -> float:
+    """top1 in this process (no worker pool) — for model selection inside a training run that shares the machine with others."""
+    import exp16_wm.frozen_verifier as F
+    if getattr(F, "_ENV", None) is None:
+        F._init_worker()
+    acts = env_actions(policy, v0["obs"])
+    return float(np.mean([F._simulate_state((o, a[None]))[0] for o, a in zip(v0["obs"], acts)]))
+
+
 def load(path: str) -> dict[str, np.ndarray]:
     z = np.load(path)
     return {k: z[k] for k in z.files if k != "meta"}
