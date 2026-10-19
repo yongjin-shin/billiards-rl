@@ -80,3 +80,32 @@ def test_scan_state_keeps_the_widest_of_several_windows():
         return made, scr
     r = scan_state(two, np.zeros(23, np.float32), 1.0, 0.05, 0.01, SC, BI)
     assert r["n_windows"][3] == 2 and r["centre"][3] == pytest.approx(-39.75, abs=0.006)
+
+
+def test_robust_speeds_keep_only_directions_that_work_at_every_speed():
+    def sim(task):
+        _, acts = task
+        d, v = _deg(acts), float(acts[0, 1])
+        made = np.zeros((len(d), 18), bool)
+        made[:, 2] = (d >= 30.0) & (d <= 31.0) if v == 1.0 else (d >= -60.0) & (d <= -59.0)    # a wide window at one speed only
+        made[:, 2] |= (d >= 5.0) & (d <= 5.2)                                                  # the direct window, both speeds
+        return made, np.zeros(len(d), bool)
+    plain = scan_state(sim, np.zeros(23, np.float32), 1.0, 0.05, 0.01, SC, BI)
+    robust = scan_state(sim, np.zeros(23, np.float32), 1.0, 0.05, 0.01, SC, BI, robust_speeds=(2.0,))
+    assert plain["centre"][2] == pytest.approx(30.5, abs=0.006)                                   # widest at 1 m/s alone
+    assert robust["centre"][2] == pytest.approx(5.1, abs=0.006) and robust["n_windows"][2] == 1
+    assert robust["n_sims"] >= 2 * 7200
+
+
+def test_fine_pad_recovers_the_full_window_at_the_scan_speed():
+    def sim(task):
+        _, acts = task
+        d, v = _deg(acts), float(acts[0, 1])
+        made = np.zeros((len(d), 18), bool)
+        made[:, 4] = (d >= 10.0) & (d <= 10.6) if v == 1.0 else (d >= 10.0) & (d <= 10.2)    # wide at 1 m/s, narrow at 2 m/s
+        return made, np.zeros(len(d), bool)
+    narrow = scan_state(sim, np.zeros(23, np.float32), 1.0, 0.1, 0.01, SC, BI, robust_speeds=(2.0,))
+    padded = scan_state(sim, np.zeros(23, np.float32), 1.0, 0.1, 0.01, SC, BI, robust_speeds=(2.0,), fine_pad_deg=0.5)
+    assert padded["centre"][4] == pytest.approx(10.3, abs=0.006) and padded["width"][4] == pytest.approx(0.61, abs=0.011)
+    assert narrow["centre"][4] < padded["centre"][4]                                         # without the pad the centre is pulled
+
