@@ -56,3 +56,15 @@ def test_grid_scores_are_the_made_logits_the_policy_uses():
             a = (torch.as_tensor(v0["grid_action"][g, 10]) - m.act_bias) / m.act_scale
             z = m.made2_logits({k: v[st:st + 1] for k, v in o.items()}, a[None])[0, j]
             assert s[g, 10] == pytest.approx(float(z), abs=1e-5)
+
+
+def test_env_actions_runs_without_grad_and_matches_act():
+    from exp16_wm.val_set import env_actions
+    torch.manual_seed(0)
+    m = PairGNNPolicy(hidden=16, made2_head=True, made2_geom=True, made2_no_proposal=True)          # train mode: params require grad
+    m.infer, m.refine_deg, m.refine_speed, m.refine_speed_abs = "all_pairs", (-0.1, 0.0, 0.1), (1.0,), (1.0, 2.0)
+    obs = np.zeros((2, 23), np.float32); obs[:, :11] = [0.5, 0.2, 0.3, 0.6, 0, 0.6, 0.3, 0, 0.7, 0.7, 0]
+    obs[:, 11:] = [0, 0, 0, 0.5, 0, 1, 1, 0, 1, 0.5, 1, 1]
+    a = env_actions(m, obs)
+    np.testing.assert_allclose(a, m.act(relative_obs(obs)), atol=1e-6)
+

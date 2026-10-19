@@ -122,6 +122,15 @@ def top1(act_fn, v0: dict[str, np.ndarray], workers: int = 8) -> float:
     return float(np.mean([r[0] for r in res]))
 
 
+@torch.no_grad()
+def env_actions(policy, obs: np.ndarray, chunk: int = 256) -> np.ndarray:
+    """The policy's own choice (predict_unit: model or MadeEnsemble) for raw observations (N, 23) → env actions (N, 2)."""
+    from exp16_wm.obs_transform import relative_obs
+    rel = torch.as_tensor(relative_obs(obs))
+    return np.concatenate([(policy.predict_unit(rel[lo:lo + chunk]) * policy.act_scale + policy.act_bias).numpy()
+                           for lo in range(0, len(rel), chunk)])
+
+
 def load(path: str) -> dict[str, np.ndarray]:
     z = np.load(path)
     return {k: z[k] for k in z.files if k != "meta"}
@@ -148,13 +157,13 @@ def main() -> None:
     runs = [find_run(g) for g in args.runs]
     if args.ensemble:
         ens = load_ensemble(runs, args.ensemble)
-        act = lambda obs: (ens.predict_unit(torch.as_tensor(relative_obs(obs))) * ens.act_scale + ens.act_bias).numpy()
+        act = lambda obs: env_actions(ens, obs)
         print(f"ensemble of {len(runs)} ({args.ensemble}): top1 {top1(act, v0, args.workers):.1%}", flush=True)
         return
     for d in runs:
         m = E.load_run(d)
         m.infer, m.refine_deg, m.refine_speed, m.refine_speed_abs = "all_pairs", E.ANG31, (1.0,), E.ABS_SPEEDS
-        act = lambda obs, m=m: (m.predict_unit(torch.as_tensor(relative_obs(obs))) * m.act_scale + m.act_bias).numpy()
+        act = lambda obs, m=m: env_actions(m, obs)
         mm = made_metrics(grid_scores(m, v0), v0["grid_ok"])
         print(f"{os.path.basename(d)[-60:]}: top1 {top1(act, v0, args.workers):.1%}  group_top1 {mm['group_top1']:.1%} ({mm['n_groups']})  "
               f"ece {mm['ece']:.3f}", flush=True)
