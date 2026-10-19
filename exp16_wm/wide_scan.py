@@ -11,7 +11,8 @@ of them — direct shots survive a change of speed, cushion and combination path
 without asking the formula (200 states: widest window at 1 m/s alone is > 5° from the formula aim for 36% of pairs).
 
 Output: one file per label shard (same basename) with scan_center_deg (N, 18), scan_valid (N, 18), scan_width_deg (N, 18),
-scan_n_windows (N, 18) — readable by bc --geom-aux-set scan --aux-target-dir (load_scan_targets).
+scan_n_windows (N, 18), scan_any_center_deg (N, 18: widest window at the scan speed alone, any path, NaN if none); shards already
+written are skipped (resume) — readable by bc --geom-aux-set scan --aux-target-dir (load_scan_targets).
 
 Usage:
     python -m exp16_wm.wide_scan --data "logs/teacher_data/policy_t2_s0/*.npz" --out logs/teacher_data/policy_t2_s0_widescan --workers 8
@@ -84,6 +85,12 @@ def scan_state(sim, obs: np.ndarray, speed: float, coarse_step: float, fine_step
     ang = coarse_angles(coarse_step)
     made, scr = sim((obs, to_env_actions(ang, speed, act_scale, act_bias)))
     ok = made & ~scr[:, None]
+    any_centre = np.full(N_PAIRS, np.nan, np.float32)                # widest window at `speed` alone (coarse middle), any path
+    for j in range(N_PAIRS):
+        w = find_windows(ok[:, j])
+        if w:
+            st, ln = max(w, key=lambda x: x[1])
+            any_centre[j] = float(wrap_deg(ang[st] + (ln - 1) * coarse_step / 2))
     for v in robust_speeds:
         mv, sv = sim((obs, to_env_actions(ang, v, act_scale, act_bias)))
         ok &= mv & ~sv[:, None]
@@ -113,7 +120,7 @@ def scan_state(sim, obs: np.ndarray, speed: float, coarse_step: float, fine_step
             holding = [r for r in runs if fa[r[0]] - fine_step / 2 <= mid <= fa[r[1] - 1] + fine_step / 2]
             a0, a1 = holding[0] if holding else max(runs, key=lambda r: r[1] - r[0])
             centre[j] = float(wrap_deg(fa[a0:a1].mean())); width[j] = float((a1 - a0) * fine_step)
-    return {"centre": centre, "valid": np.isfinite(centre), "width": width, "n_windows": n_win, "n_sims": n_sims}
+    return {"centre": centre, "valid": np.isfinite(centre), "width": width, "n_windows": n_win, "n_sims": n_sims, "any_centre": any_centre}
 
 
 def _scan_task(task: tuple) -> dict[str, np.ndarray]:
@@ -141,6 +148,10 @@ def main() -> None:
     t0, total, states = time.time(), 0, 0
     with mp.get_context("spawn").Pool(args.workers, initializer=_init_worker) as pool:
         for path in sorted(glob.glob(args.data)):
+            target = os.path.join(args.out, os.path.basename(path))
+            if os.path.exists(target):                                   # resume: shards already scanned (a reclaimed instance)
+                print(f"  {os.path.basename(path)}: already scanned, skipped", flush=True)
+                continue
             z = np.load(path)
             obs = z["obs"][:args.max_states] if args.max_states else z["obs"]
             res = pool.map(_scan_task, [(o, args.speed, args.coarse_step, args.fine_step, sc, bi, tuple(args.robust_speeds), args.fine_pad) for o in obs], chunksize=1)
@@ -148,13 +159,17 @@ def main() -> None:
             out = {k: np.full((N, N_PAIRS), np.nan if k == "centre" else 0, dtype) for k, dtype in
                    (("centre", np.float32), ("width", np.float32), ("n_windows", np.int16))}
             valid = np.zeros((N, N_PAIRS), bool)
+            any_c = np.full((N, N_PAIRS), np.nan, np.float32)
             for i, r in enumerate(res):
                 out["centre"][i], out["width"][i], out["n_windows"][i], valid[i] = r["centre"], r["width"], r["n_windows"], r["valid"]
+                any_c[i] = r["any_centre"]
             n = sum(r["n_sims"] for r in res); total += n; states += len(obs)
-            np.savez(os.path.join(args.out, os.path.basename(path)), scan_center_deg=out["centre"], scan_valid=valid,
+            tmp = target + ".tmp.npz"
+            np.savez(tmp, scan_center_deg=out["centre"], scan_valid=valid, scan_any_center_deg=any_c,
                      scan_width_deg=out["width"], scan_n_windows=out["n_windows"], scan_speed=args.speed,
                      scan_coarse_step=args.coarse_step, scan_fine_step=args.fine_step, n_scanned=len(obs),
                      scan_robust_speeds=np.asarray(args.robust_speeds, np.float32), scan_fine_pad=np.float32(args.fine_pad or args.coarse_step))
+            os.replace(tmp, target)                                      # never a half-written shard
             exact, live = aim_targets(relative_obs(obs))
             v = valid[:len(obs)] & live
             err = np.abs(wrap_deg(out["centre"][:len(obs)][v] - exact[..., 0][v]))

@@ -109,3 +109,28 @@ def test_fine_pad_recovers_the_full_window_at_the_scan_speed():
     assert padded["centre"][4] == pytest.approx(10.3, abs=0.006) and padded["width"][4] == pytest.approx(0.61, abs=0.011)
     assert narrow["centre"][4] < padded["centre"][4]                                         # without the pad the centre is pulled
 
+
+
+def test_any_centre_is_the_widest_window_at_the_scan_speed_even_when_not_robust():
+    def sim(task):
+        _, acts = task
+        d, v = _deg(acts), float(acts[0, 1])
+        made = np.zeros((len(d), 18), bool)
+        made[:, 1] = (d >= 30.0) & (d <= 31.0) if v == 1.0 else np.zeros(len(d), bool)      # only at 1 m/s
+        return made, np.zeros(len(d), bool)
+    r = scan_state(sim, np.zeros(23, np.float32), 1.0, 0.1, 0.01, SC, BI, robust_speeds=(2.0,))
+    assert not r["valid"][1] and r["any_centre"][1] == pytest.approx(30.5, abs=0.06)
+    assert np.isnan(r["any_centre"][0])
+
+
+def test_scan_centres_prefer_robust_then_any_window_then_random(tmp_path):
+    from exp16_wm.aim_sims import scan_centres
+    rob = np.full((2, 18), np.nan, np.float32); rob[0, 0] = 10.0
+    ok = np.zeros((2, 18), bool); ok[0, 0] = True
+    anyc = np.full((2, 18), np.nan, np.float32); anyc[0, 0] = 99.0; anyc[1, 3] = -20.0
+    np.savez(tmp_path / "shard0.npz", scan_center_deg=rob, scan_valid=ok, scan_any_center_deg=anyc)
+    c, src = scan_centres(str(tmp_path / "labels" / "shard0.npz"), str(tmp_path), 2, np.random.default_rng(0))
+    assert src[0, 0] == 2 and np.degrees(c[0, 0]) == pytest.approx(10.0)
+    assert src[1, 3] == 1 and np.degrees(c[1, 3]) == pytest.approx(-20.0)
+    assert (src[1, :3] == 0).all() and np.all(np.abs(np.degrees(c[src == 0])) <= 180.0)
+    assert len(np.unique(np.round(c[src == 0], 6))) == (src == 0).sum()                  # random, not one fixed direction
