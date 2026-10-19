@@ -27,6 +27,9 @@ import time
 from importlib.metadata import PackageNotFoundError, version
 from typing import Any, Protocol
 
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from exp16_wm.code_version import code_version  # noqa: E402
+
 import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -89,7 +92,8 @@ def _version(pkg: str) -> str:
 def machine_info() -> dict[str, Any]:
     """Where a result was produced: OS / CPU and the versions that can change simulation or inference numbers."""
     return {"node": platform.node(), "system": platform.system(), "machine": platform.machine(), "python": platform.python_version(),
-            "cpus": os.cpu_count(), **{p: _version(p) for p in ("pooltool-billiards", "panda3d", "numba", "numpy", "torch")}}
+            "cpus": os.cpu_count(), **{p: _version(p) for p in ("pooltool-billiards", "panda3d", "numba", "numpy", "torch")},
+            "git_commit": code_version()}
 
 
 def find_run(pattern: str) -> str:

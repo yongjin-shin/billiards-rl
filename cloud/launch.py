@@ -14,6 +14,7 @@ Usage:
 """
 
 import argparse
+import io
 import json
 import math
 import re
@@ -150,6 +151,11 @@ def make_bundle(repo_dir: Path, out_path: Path, extras: Sequence[str] = ()) -> P
             dst.addfile(member, src.extractfile(member) if member.isfile() else None)
         for extra in extras:
             dst.add(repo_dir / extra, arcname=extra)
+        commit = subprocess.run(["git", "-C", str(repo_dir), "rev-parse", "HEAD"], capture_output=True, text=True, check=True).stdout.strip()
+        info = tarfile.TarInfo("GIT_COMMIT")                      # the bundle has no .git: results record this (exp16_wm.code_version)
+        data = (commit + "\n").encode()
+        info.size = len(data)
+        dst.addfile(info, io.BytesIO(data))
     if proc.wait() != 0:
         raise RuntimeError("git archive failed")
     return out_path

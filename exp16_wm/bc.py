@@ -31,6 +31,7 @@ import torch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from simulator import BilliardsEnv
+from exp16_wm.code_version import code_version
 from exp16_wm.sac import VanillaSAC
 from exp16_wm.train import ACTION_DIM, ACT_LOW, ACT_HIGH, get_obs_dim, summarize_final_eval
 from exp16_wm.planner import wrap_angle
@@ -906,7 +907,7 @@ def main():
         print(f"  aux-only: {fit['epochs_run']} epochs ({time.time()-t0:.0f}s), best val aux MSE {fit['best_val_loss']:.4f} @{fit['best_epoch']}", flush=True)
         with open(os.path.join(out_dir, "results.json"), "w") as f:
             json.dump({"name": name, "train": {k: v for k, v in fit.items() if k not in ("history", "aux_history", "last_state")},
-                       "val": None, "eval": None, "args": vars(args),
+                       "val": None, "eval": None, "args": vars(args), "git_commit": code_version(),
                        "aux_mean": [float(x) for x in aux_mean], "aux_std": [float(x) for x in aux_std]}, f, indent=2)
         np.save(os.path.join(out_dir, "history.npy"), np.array(fit["history"]))
         np.save(os.path.join(out_dir, "aux_history.npy"), np.array(fit["aux_history"]))
@@ -945,7 +946,7 @@ def main():
                "train_only_data": extra_paths if args.train_only_data else None, "eval_scratch_penalty": ev_pen,
                "n_shots": int(len(data["shot"])), "n_train": int(train.sum()), "n_val": int(val.sum()),
                "train": {k: v for k, v in fit.items() if k not in ("history", "aux_history", "last_state")}, "val": vm, "eval": ev,
-               "args": vars(args)}
+               "args": vars(args), "git_commit": code_version()}
     if getattr(agent, "uncertainty_weights", False):      # log σ² of (angle, speed, selection) at the saved (best) epoch
         results["log_var"] = agent.log_var.detach().clamp(-3, 3).tolist()
         print(f"  learned log σ² (angle, speed, selection) at the best epoch: {results['log_var']}", flush=True)
