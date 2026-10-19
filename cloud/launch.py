@@ -14,6 +14,7 @@ Usage:
 """
 
 import argparse
+import io
 import json
 import math
 import re
@@ -44,8 +45,18 @@ def validate_max_hours(max_hours: float) -> float:
     return max_hours
 
 
-def build_user_data(bucket: str, job: str, command: str, max_hours: float, region: str) -> str:
-    """Bash script run by cloud-init as root on the instance. It always uploads the log and shuts the instance down."""
+SYNC_SECONDS = 300          # progress upload interval of $OUT_DIR and the log
+SPOT_POLL_SECONDS = 15     # Spot interruption notice check (AWS gives about 2 minutes of warning)
+
+
+def build_user_data(bucket: str, job: str, command: str, max_hours: float, region: str, sync_seconds: int = SYNC_SECONDS) -> str:
+    """
+    Bash script run by cloud-init as root on the instance. It always uploads the log and shuts the instance down. While the command
+    runs it also uploads $OUT_DIR and the log every sync_seconds, and right away on a Spot interruption notice (STATUS
+    'spot-interrupted'): a reclaimed Spot instance never reaches finish(), and the first P3 run lost everything that way.
+    Relaunching the same job name resumes it: the earlier runs/<job>/out is restored into $OUT_DIR before the command (training
+    with --ckpt-every continues from its checkpoint), and STATUS reads 'running' until this instance finishes.
+    """
     validate_job(job)
     validate_max_hours(max_hours)
     if not BUCKET_PATTERN.fullmatch(bucket):
@@ -56,6 +67,8 @@ def build_user_data(bucket: str, job: str, command: str, max_hours: float, regio
         raise ValueError("command is empty")
     if CMD_DELIMITER in command:
         raise ValueError(f"command must not contain {CMD_DELIMITER}")
+    if not SPOT_POLL_SECONDS <= sync_seconds <= 3600:
+        raise ValueError(f"sync_seconds must be in [{SPOT_POLL_SECONDS}, 3600], got {sync_seconds}")
     minutes = math.ceil(max_hours * 60)
     return f"""#!/bin/bash
 set -uo pipefail
@@ -70,11 +83,33 @@ STATUS=1
 # Hard deadline: ends the instance (shutdown behavior = terminate) even if everything below hangs.
 shutdown -h +{minutes}
 
+sync_out() {{
+  mkdir -p "$OUT"
+  aws s3 cp /var/log/job.log "s3://$BUCKET/runs/$JOB/job.log" --only-show-errors || true
+  aws s3 sync "$OUT" "s3://$BUCKET/runs/$JOB/out" --only-show-errors || true
+}}
+
+# Progress uploads every {sync_seconds} s, and at once on a Spot interruption notice (IMDSv2 spot/instance-action).
+watch_progress() {{
+  local n=0 token
+  while true; do
+    sleep {SPOT_POLL_SECONDS}; n=$((n + {SPOT_POLL_SECONDS}))
+    token=$(curl -s -m 2 -X PUT http://169.254.169.254/latest/api/token -H "X-aws-ec2-metadata-token-ttl-seconds: 300")
+    if curl -s -f -m 2 -H "X-aws-ec2-metadata-token: $token" http://169.254.169.254/latest/meta-data/spot/instance-action >/dev/null; then
+      echo "[job] spot interruption notice at $(date -u +%FT%TZ)"
+      sync_out
+      echo spot-interrupted > /tmp/status_spot
+      aws s3 cp /tmp/status_spot "s3://$BUCKET/runs/$JOB/STATUS" || true
+      return
+    fi
+    if [ "$n" -ge {sync_seconds} ]; then sync_out; n=0; fi
+  done
+}}
+
 finish() {{
   echo "[job] exit status $STATUS at $(date -u +%FT%TZ)"
-  mkdir -p "$OUT"
-  aws s3 cp /var/log/job.log "s3://$BUCKET/runs/$JOB/job.log" || true
-  aws s3 sync "$OUT" "s3://$BUCKET/runs/$JOB/out" --only-show-errors || true
+  [ -n "${{WATCH_PID:-}}" ] && kill "$WATCH_PID" 2>/dev/null
+  sync_out
   echo "$STATUS" > /tmp/status
   aws s3 cp /tmp/status "s3://$BUCKET/runs/$JOB/STATUS" || true
   shutdown -h now
@@ -82,6 +117,10 @@ finish() {{
 trap finish EXIT
 
 mkdir -p "$WORK" "$OUT" && cd "$WORK"
+watch_progress &
+WATCH_PID=$!
+echo running > /tmp/status_run && aws s3 cp /tmp/status_run "s3://$BUCKET/runs/$JOB/STATUS" --only-show-errors || true
+aws s3 sync "s3://$BUCKET/runs/$JOB/out" "$OUT" --only-show-errors || true    # resume: outputs of an earlier, interrupted instance
 aws s3 cp "s3://$BUCKET/code/$JOB.tar.gz" code.tar.gz && tar xzf code.tar.gz && rm code.tar.gz
 cat > cloud_cmd.sh <<'{CMD_DELIMITER}'
 {command}
@@ -112,6 +151,11 @@ def make_bundle(repo_dir: Path, out_path: Path, extras: Sequence[str] = ()) -> P
             dst.addfile(member, src.extractfile(member) if member.isfile() else None)
         for extra in extras:
             dst.add(repo_dir / extra, arcname=extra)
+        commit = subprocess.run(["git", "-C", str(repo_dir), "rev-parse", "HEAD"], capture_output=True, text=True, check=True).stdout.strip()
+        info = tarfile.TarInfo("GIT_COMMIT")                      # the bundle has no .git: results record this (exp16_wm.code_version)
+        data = (commit + "\n").encode()
+        info.size = len(data)
+        dst.addfile(info, io.BytesIO(data))
     if proc.wait() != 0:
         raise RuntimeError("git archive failed")
     return out_path

@@ -9,7 +9,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from cloud.launch import CMD_DELIMITER, MAX_HOURS_CAP, build_user_data, is_dirty, make_bundle, run_aws  # noqa: E402
+from cloud.launch import CMD_DELIMITER, MAX_HOURS_CAP, SPOT_POLL_SECONDS, build_user_data, is_dirty, make_bundle, run_aws  # noqa: E402
 
 ARGS = dict(bucket="my-results-bucket", job="smoke-1", command="python -c 'print(1)'", max_hours=2.0, region="us-east-1")
 
@@ -112,3 +112,33 @@ def test_is_dirty_detects_tracked_changes_only(repo: Path) -> None:
     assert not is_dirty(repo)  # untracked files do not count
     (repo / "tracked.txt").write_text("changed")
     assert is_dirty(repo)
+
+
+def test_user_data_uploads_progress_and_handles_spot_notice() -> None:
+    script = build_user_data(**ARGS, sync_seconds=120)
+    assert "watch_progress &" in script and "WATCH_PID=$!" in script          # runs in the background from the start
+    assert script.index("watch_progress &") < script.index("aws s3 cp \"s3://$BUCKET/code/")
+    assert '[ "$n" -ge 120 ]' in script                                         # periodic upload interval
+    assert "meta-data/spot/instance-action" in script and "api/token" in script  # IMDSv2 interruption notice
+    assert "spot-interrupted" in script
+    assert 'kill "$WATCH_PID"' in script                                        # finish() stops the watcher before the final upload
+    assert script.count("sync_out") >= 4                                        # definition + periodic + notice + finish
+
+
+@pytest.mark.parametrize("seconds", [SPOT_POLL_SECONDS - 1, 3601])
+def test_user_data_rejects_bad_sync_interval(seconds: int) -> None:
+    with pytest.raises(ValueError):
+        build_user_data(**ARGS, sync_seconds=seconds)
+
+
+def test_user_data_is_valid_bash() -> None:
+    res = subprocess.run(["bash", "-n"], input=build_user_data(**ARGS), text=True, capture_output=True)
+    assert res.returncode == 0, res.stderr
+
+
+
+def test_user_data_restores_earlier_outputs_and_marks_running_before_the_command() -> None:
+    script = build_user_data(**ARGS)
+    restore = script.index('aws s3 sync "s3://$BUCKET/runs/$JOB/out" "$OUT"')
+    assert script.index("echo running > /tmp/status_run") < restore < script.index("bash cloud_cmd.sh")
+    assert restore < script.index('aws s3 cp "s3://$BUCKET/code/')                  # before the code and the command
