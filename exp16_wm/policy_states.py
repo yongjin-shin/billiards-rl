@@ -119,6 +119,7 @@ def main() -> None:
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--games", type=int, default=5200); p.add_argument("--eval-seed", type=int, default=100)
     p.add_argument("--shards", type=int, default=8); p.add_argument("--out", required=True)
+    p.add_argument("--n-balls", type=int, default=3)
     args = p.parse_args()
     torch.set_num_threads(2)
     if args.random_layouts:
@@ -138,9 +139,10 @@ def main() -> None:
     pol = TransformedPolicy(m, "relative")
     if args.explore > 0:
         pol = ExplorePolicy(pol, m, args.explore, seed=args.seed)
-    rec = play(pol, args.games, args.eval_seed, CLEAR_ENV)
+    from exp16_wm.teacher_data import clear_env_kw
+    rec = play(pol, args.games, args.eval_seed, clear_env_kw(args.n_balls))
     meta = {"teacher": "policy_" + os.path.basename(found[0])[:40].replace(":", "_"), "run": found[0], "infer": args.infer,
-            "games": args.games, "eval_seed": args.eval_seed, "explore": args.explore}
+            "games": args.games, "eval_seed": args.eval_seed, "explore": args.explore, "n_balls": args.n_balls}
     paths = write_shards(rec, args.out, args.shards, meta)
     print(f"saved {len(rec['obs'])} states of {args.games} games in {len(paths)} shards → {args.out}; "
           f"shot success {np.mean(rec['pocketed'] > 0):.1%}, shots/game {len(rec['obs']) / args.games:.3f}", flush=True)

@@ -134,17 +134,18 @@ def scan(args) -> None:
                     continue
                 acts = np.stack([ang[s, js].reshape(-1), np.full(len(js) * len(ANG31), v_u)], -1) * scale + bias
                 tasks.append((obs[s], acts.astype(np.float32))); keys.append((s, js))
-            flags = np.zeros((len(obs), N_PAIRS, len(ANG31)), bool)
+            P = aim.shape[1]
+            flags = np.zeros((len(obs), P, len(ANG31)), bool)
             for (s, js), (mm, ss) in zip(keys, pool.imap(_simulate_full, tasks, chunksize=4)):
-                ok = mm.reshape(len(js), len(ANG31), N_PAIRS)[np.arange(len(js)), :, js] & ~ss.reshape(len(js), len(ANG31))
+                ok = mm.reshape(len(js), len(ANG31), P)[np.arange(len(js)), :, js] & ~ss.reshape(len(js), len(ANG31))
                 flags[s, js] = ok
             off, valid = window_centers(flags, ANG31)
             center = np.degrees(aim) + np.nan_to_num(off)
             center = np.where(valid, (center + 180) % 360 - 180, np.nan).astype(np.float32)
             N = len(z["obs"])                                                                  # pad unprocessed rows (--max-states)
-            full_c = np.full((N, N_PAIRS), np.nan, np.float32); full_c[:len(obs)] = center
-            full_v = np.zeros((N, N_PAIRS), bool); full_v[:len(obs)] = valid
-            full_f = np.zeros((N, N_PAIRS, len(ANG31)), bool); full_f[:len(obs)] = flags
+            full_c = np.full((N, P), np.nan, np.float32); full_c[:len(obs)] = center
+            full_v = np.zeros((N, P), bool); full_v[:len(obs)] = valid
+            full_f = np.zeros((N, P, len(ANG31)), bool); full_f[:len(obs)] = flags
             np.savez(os.path.join(args.out, os.path.basename(path)), scan_center_deg=full_c, scan_valid=full_v, scan_flags=full_f,
                      scan_speed=args.speed, scan_offsets_deg=np.asarray(ANG31), sim_aim_runs=np.array(dirs), seed=args.seed)
             n = int(live.sum()) * len(ANG31); total += n
@@ -204,7 +205,7 @@ def gen(args) -> None:
             for s in np.unique(pick[:, 0]):
                 rows = np.flatnonzero(pick[:, 0] == s)
                 tasks.append((obs[s], env_a[rows])); order.append(rows)
-            made, scr = np.zeros((len(pick), N_PAIRS), bool), np.zeros(len(pick), bool)
+            made, scr = np.zeros((len(pick), aim.shape[1]), bool), np.zeros(len(pick), bool)
             for rows, (mm, ss) in zip(order, pool.imap(_simulate_full, tasks, chunksize=8)):
                 made[rows], scr[rows] = mm, ss
             tmp = out + ".tmp.npz"

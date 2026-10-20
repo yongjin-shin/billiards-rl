@@ -51,6 +51,11 @@ TEACHERS["margin"] = {**TEACHERS["ghost"], "speeds": [0.75, 1.5, 3.0, 5.0], "top
 CLEAR_ENV = {"n_balls": 3, "max_steps": 30, "step_penalty": 1.0, "trunc_penalty": 0.0}
 
 
+def clear_env_kw(n_balls: int = 3) -> dict:
+    """CLEAR_ENV for n_balls (G1: 3, 6, 9 balls); the shot limit grows with the rack (10 per ball, at least 30)."""
+    return {**CLEAR_ENV, "n_balls": int(n_balls), "max_steps": max(30, 10 * int(n_balls))}
+
+
 def best_margin_cell(hits: np.ndarray, angle_step_deg: float, ln_speed_step: float,
                      angle_scale_deg: float, speed_scale_ln: float,
                      pad: int = 12) -> tuple[float, tuple[int, int]]:

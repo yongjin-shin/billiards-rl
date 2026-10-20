@@ -30,6 +30,12 @@ from exp16_wm.train import ACT_LOW, ACT_HIGH
 from exp16_wm.obs_transform import N_BALLS, N_POCKETS, REL_DIM
 
 N_PAIRS = N_BALLS * N_POCKETS
+
+
+def n_balls_of(rel: torch.Tensor) -> int:
+    """Object balls of a relative observation batch (B, 3n + 12): the weights are shared per ball and per pair, so one model
+    plays any number of balls (G1); 3 balls = 18 pairs as before."""
+    return (rel.shape[-1] - 2 * N_POCKETS) // 3
 FOURIER_SCALE = 4.0             # m; the lowest Fourier frequency has period 2·FOURIER_SCALE, longer than any distance on the table
 BALL_RADIUS = 0.028575          # m (pooltool default; test_exp16_wm_gnn_policy checks it against the env)
 SIDE_POCKETS = (1, 4)            # obs pocket order: (0,0) (0,½) (0,1) (1,0) (1,½) (1,1)
@@ -229,36 +235,36 @@ class PairGNNPolicy(nn.Module):
 
     def _encode_full(self, rel: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None]:
         """(h, e, valid, e_geo): e_geo = pair embedding with the ball-ball message zeroed (None unless geom_angle)."""
-        B = rel.shape[0]
-        balls = rel[:, :3 * N_BALLS].reshape(B, N_BALLS, 3)
+        B, NB = rel.shape[0], n_balls_of(rel)
+        balls = rel[:, :3 * NB].reshape(B, NB, 3)
         pos, pocketed = balls[..., :2], balls[..., 2]
         live = pocketed < 0.5
         dist = pos.norm(dim=-1)
         ref = torch.where(live, dist, torch.full_like(dist, float("inf"))).argmin(dim=1)
-        is_ref = F.one_hot(ref, N_BALLS).float() * live.any(dim=1, keepdim=True).float()
+        is_ref = F.one_hot(ref, NB).float() * live.any(dim=1, keepdim=True).float()
         ball_f = torch.cat([self._ff(pos), dist[..., None], pocketed[..., None], is_ref[..., None]], dim=-1)
 
         diff = pos[:, None, :, :] - pos[:, :, None, :]                    # (B, i, k, 2): k relative to i
-        bb_in = torch.cat([ball_f[:, :, None, :].expand(B, N_BALLS, N_BALLS, ball_f.shape[-1]), self._ff(diff),
+        bb_in = torch.cat([ball_f[:, :, None, :].expand(B, NB, NB, ball_f.shape[-1]), self._ff(diff),
                            diff.norm(dim=-1, keepdim=True),
-                           pocketed[:, None, :, None].expand(B, N_BALLS, N_BALLS, 1)], dim=-1)
-        not_self = ~torch.eye(N_BALLS, dtype=torch.bool, device=rel.device)
+                           pocketed[:, None, :, None].expand(B, NB, NB, 1)], dim=-1)
+        not_self = ~torch.eye(NB, dtype=torch.bool, device=rel.device)
         nb = (live[:, None, :] & not_self[None]).float()[..., None]
         h = self.ball(torch.cat([ball_f, (self.bb(bb_in) * nb).sum(dim=2)], dim=-1))   # (B, 3, H)
 
-        pockets = rel[:, 3 * N_BALLS:].reshape(B, N_POCKETS, 2)
-        pr = pockets[:, None, :, :] - pos[:, :, None, :]                   # (B, 3, 6, 2)
+        pockets = rel[:, 3 * NB:].reshape(B, N_POCKETS, 2)
+        pr = pockets[:, None, :, :] - pos[:, :, None, :]                   # (B, NB, 6, 2)
         H = h.shape[-1]
         def pair_embed(hb: torch.Tensor) -> torch.Tensor:
-            pair_in = torch.cat([hb[:, :, None, :].expand(B, N_BALLS, N_POCKETS, H),
-                                 self._ff(pockets)[:, None].expand(B, N_BALLS, N_POCKETS, 2 + 4 * self.fourier), self._ff(pr),
+            pair_in = torch.cat([hb[:, :, None, :].expand(B, NB, N_POCKETS, H),
+                                 self._ff(pockets)[:, None].expand(B, NB, N_POCKETS, 2 + 4 * self.fourier), self._ff(pr),
                                  pr.norm(dim=-1, keepdim=True),
-                                 self.side.view(1, 1, N_POCKETS, 1).expand(B, N_BALLS, N_POCKETS, 1)], dim=-1)
-            return self.pair(pair_in).reshape(B, N_PAIRS, H)
+                                 self.side.view(1, 1, N_POCKETS, 1).expand(B, NB, N_POCKETS, 1)], dim=-1)
+            return self.pair(pair_in).reshape(B, NB * N_POCKETS, H)
 
         e = pair_embed(h)
         e_geo = pair_embed(self.ball(torch.cat([ball_f, torch.zeros_like(h)], dim=-1))) if self.geom_angle else None
-        valid = live[:, :, None].expand(B, N_BALLS, N_POCKETS).reshape(B, N_PAIRS)
+        valid = live[:, :, None].expand(B, NB, N_POCKETS).reshape(B, NB * N_POCKETS)
         return h, e, valid, e_geo
 
     def forward_full(self, rel: torch.Tensor) -> dict[str, torch.Tensor]:
@@ -291,13 +297,14 @@ class PairGNNPolicy(nn.Module):
         if not self.factorized:
             out["logits"] = pocket.masked_fill(~valid, _NEG)
             return out
-        live = valid.view(B, N_BALLS, N_POCKETS)[:, :, 0]
-        e3 = e.view(B, N_BALLS, N_POCKETS, H)
+        NB = n_balls_of(rel)
+        live = valid.view(B, NB, N_POCKETS)[:, :, 0]
+        e3 = e.view(B, NB, N_POCKETS, H)
         ball = self.head_ball(torch.cat([h, e3.max(dim=2).values], dim=-1)).squeeze(-1).masked_fill(~live, _NEG)
-        pocket = pocket.view(B, N_BALLS, N_POCKETS)
+        pocket = pocket.view(B, NB, N_POCKETS)
         joint = F.log_softmax(ball, dim=1)[:, :, None] + F.log_softmax(pocket, dim=2)
         out.update(ball_logits=ball, pocket_logits=pocket, live=live,
-                   logits=joint.reshape(B, N_PAIRS).masked_fill(~valid, _NEG))
+                   logits=joint.reshape(B, NB * N_POCKETS).masked_fill(~valid, _NEG))
         return out
 
     def forward(self, rel: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -311,12 +318,12 @@ class PairGNNPolicy(nn.Module):
     @staticmethod
     def _geometric_aim(rel: torch.Tensor) -> torch.Tensor:
         """(B, 18) direction (rad, in the relative frame = delta_angle) from the cue to the ghost-ball point of each pair."""
-        B = rel.shape[0]
-        b = rel[:, :3 * N_BALLS].reshape(B, N_BALLS, 3)[..., :2]
-        p = rel[:, 3 * N_BALLS:].reshape(B, N_POCKETS, 2)
+        B, NB = rel.shape[0], n_balls_of(rel)
+        b = rel[:, :3 * NB].reshape(B, NB, 3)[..., :2]
+        p = rel[:, 3 * NB:].reshape(B, N_POCKETS, 2)
         d = p[:, None, :, :] - b[:, :, None, :]                                       # (B, 3, 6, 2) ball → pocket
         ghost = b[:, :, None, :] - 2 * BALL_RADIUS * d / d.norm(dim=-1, keepdim=True).clamp(min=1e-9)
-        return torch.atan2(ghost[..., 1], ghost[..., 0]).reshape(B, N_PAIRS)
+        return torch.atan2(ghost[..., 1], ghost[..., 0]).reshape(B, NB * N_POCKETS)
 
     def _made2_features(self, e: torch.Tensor, a: torch.Tensor, prop: torch.Tensor, aim: torch.Tensor | None) -> torch.Tensor:
         """The made2 head input for actions a (…, 2) of pairs with embeddings e (…, H), proposals prop (…, 2), aims (…) (rad)."""

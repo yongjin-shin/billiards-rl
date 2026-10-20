@@ -101,14 +101,16 @@ def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--runs", nargs="+", required=True, help="run dir globs, each matching exactly one run")
     p.add_argument("--out", required=True); p.add_argument("--threads", type=int, default=4)
+    p.add_argument("--n-balls", type=int, default=3)
     p.add_argument("--aim", default="shared", choices=["shared", "mean"], help="mean: members with their own aims (end-to-end runs)")
     p.add_argument("--seeds", type=int, nargs="+", default=list(EVAL_SEEDS)); p.add_argument("--games-per-seed", type=int, default=GAMES_PER_SEED)
     args = p.parse_args()
     torch.set_num_threads(args.threads)
     runs = [find_run(g) for g in args.runs]
     t0 = time.time()
-    res = play_paired(TransformedPolicy(load_ensemble(runs, args.aim), "relative"), tuple(args.seeds), args.games_per_seed)
-    meta = {"runs": runs, "infer": "made_ensemble", "aim": args.aim, "eval_seeds": args.seeds, "games_per_seed": args.games_per_seed,
+    from exp16_wm.teacher_data import clear_env_kw
+    res = play_paired(TransformedPolicy(load_ensemble(runs, args.aim), "relative"), tuple(args.seeds), args.games_per_seed, clear_env_kw(args.n_balls))
+    meta = {"runs": runs, "infer": "made_ensemble", "aim": args.aim, "n_balls": args.n_balls, "eval_seeds": args.seeds, "games_per_seed": args.games_per_seed,
             "threads": args.threads, "seconds": round(time.time() - t0, 1), "machine": machine_info()}
     save(args.out, res, meta)
     print(_line(os.path.basename(args.out), summarize(res)), f"  ({meta['seconds']:.0f}s, {len(runs)} members) → {args.out}", flush=True)

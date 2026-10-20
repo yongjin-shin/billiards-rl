@@ -76,7 +76,8 @@ def aim_targets(rel: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     from exp16_wm.gnn_policy import PairGNNPolicy
     rel = np.asarray(rel, dtype=np.float32)
     aim = np.degrees(PairGNNPolicy._geometric_aim(torch.as_tensor(rel)).numpy())
-    on_table = rel[:, [2, 5, 8]] == 0
+    from exp16_wm.obs_transform import n_balls_rel
+    on_table = rel[:, 2:3 * n_balls_rel(rel.shape[1]):3] == 0
     return aim[..., None].astype(np.float32), np.repeat(on_table, N_POCKETS, axis=1)
 
 

@@ -84,9 +84,10 @@ def scan_state(sim, obs: np.ndarray, speed: float, coarse_step: float, fine_step
     number of simulations used. robust_speeds: coarse successes must hold at speed and at every one of these speeds."""
     ang = coarse_angles(coarse_step)
     made, scr = sim((obs, to_env_actions(ang, speed, act_scale, act_bias)))
+    P = made.shape[1]                                                # pairs = balls × 6 (18 for 3 balls)
     ok = made & ~scr[:, None]
-    any_centre = np.full(N_PAIRS, np.nan, np.float32)                # widest window at `speed` alone (coarse middle), any path
-    for j in range(N_PAIRS):
+    any_centre = np.full(P, np.nan, np.float32)                # widest window at `speed` alone (coarse middle), any path
+    for j in range(P):
         w = find_windows(ok[:, j])
         if w:
             st, ln = max(w, key=lambda x: x[1])
@@ -94,9 +95,9 @@ def scan_state(sim, obs: np.ndarray, speed: float, coarse_step: float, fine_step
     for v in robust_speeds:
         mv, sv = sim((obs, to_env_actions(ang, v, act_scale, act_bias)))
         ok &= mv & ~sv[:, None]
-    centre, width = np.full(N_PAIRS, np.nan, np.float32), np.zeros(N_PAIRS, np.float32)
-    n_win, n_sims = np.zeros(N_PAIRS, np.int16), len(ang) * (1 + len(robust_speeds))
-    for j in range(N_PAIRS):
+    centre, width = np.full(P, np.nan, np.float32), np.zeros(P, np.float32)
+    n_win, n_sims = np.zeros(P, np.int16), len(ang) * (1 + len(robust_speeds))
+    for j in range(P):
         wins = find_windows(ok[:, j])
         n_win[j] = len(wins)
         if not wins:
@@ -133,7 +134,7 @@ def main() -> None:
     from exp16_wm.frozen_verifier import _init_worker
     from exp16_wm.geometry_aux import aim_targets
     from exp16_wm.gnn_policy import PairGNNPolicy
-    from exp16_wm.obs_transform import relative_obs
+    from exp16_wm.obs_transform import n_balls_raw, relative_obs
     p = argparse.ArgumentParser()
     p.add_argument("--data", required=True, help="label files (only their states are used)")
     p.add_argument("--out", required=True); p.add_argument("--workers", type=int, default=8)
@@ -166,10 +167,11 @@ def main() -> None:
                 np.save(part + ".tmp.npy", np.array(r, dtype=object), allow_pickle=True); os.replace(part + ".tmp.npy", part)
                 res.extend(r)
             N = len(z["obs"])
-            out = {k: np.full((N, N_PAIRS), np.nan if k == "centre" else 0, dtype) for k, dtype in
+            P = n_balls_raw(z["obs"].shape[1]) * 6
+            out = {k: np.full((N, P), np.nan if k == "centre" else 0, dtype) for k, dtype in
                    (("centre", np.float32), ("width", np.float32), ("n_windows", np.int16))}
-            valid = np.zeros((N, N_PAIRS), bool)
-            any_c = np.full((N, N_PAIRS), np.nan, np.float32)
+            valid = np.zeros((N, P), bool)
+            any_c = np.full((N, P), np.nan, np.float32)
             for i, r in enumerate(res):
                 out["centre"][i], out["width"][i], out["n_windows"][i], valid[i] = r["centre"], r["width"], r["n_windows"], r["valid"]
                 any_c[i] = r["any_centre"]

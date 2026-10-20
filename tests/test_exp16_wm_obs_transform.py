@@ -57,7 +57,7 @@ class TestRelativeObs:
         np.testing.assert_allclose(r[9:11], [-0.5 * TABLE_W, -0.5 * TABLE_L], rtol=1e-5)
 
     def test_wrong_dim_rejected(self):
-        with pytest.raises(AssertionError):
+        with pytest.raises(ValueError):                 # a length that is 2 + 3n + 12 for no n (G1: any n is accepted)
             relative_obs(np.zeros(RAW_DIM + 1))
 
 

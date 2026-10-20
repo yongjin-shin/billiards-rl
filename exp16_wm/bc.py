@@ -362,6 +362,7 @@ def train_bc(agent: VanillaSAC, data: dict[str, np.ndarray], train: np.ndarray, 
     tr_idx, va_idx = np.where(train)[0], np.where(val)[0]
     if sims is not None:
         from exp16_wm.sim_identity import from_bitmask
+        n_slots = (obs.shape[1] - 12) // 3 * 6                      # 18 for 3 balls, 54 for 9 (G1)
         sims_tr = np.where(train[sims["row"]])[0]
         s_row = torch.as_tensor(sims["row"]); s_a = torch.as_tensor(sims["a_unit"])
         s_mask = sims["made"]; s_scr = torch.as_tensor(sims["scratch"])   # made bitmask decoded per batch
@@ -405,7 +406,7 @@ def train_bc(agent: VanillaSAC, data: dict[str, np.ndarray], train: np.ndarray, 
                                                       extras=None if ex is None else {k: v[b] for k, v in ex.items()})
             if sims is not None:
                 sb = rng.choice(sims_tr, size=min(sims_batch, len(sims_tr)), replace=False)
-                made_b = torch.as_tensor(from_bitmask(s_mask[sb]))
+                made_b = torch.as_tensor(from_bitmask(s_mask[sb], n_slots))
                 lm = made2_weight * model.module.made2_loss(obs[s_row[sb]], s_a[sb], made_b, s_scr[sb])
                 l = lm if l is None else l + lm
             if use_aux:
@@ -427,7 +428,7 @@ def train_bc(agent: VanillaSAC, data: dict[str, np.ndarray], train: np.ndarray, 
                 tot, cnt = 0.0, 0
                 for lo in range(0, len(sims_va), 4096):
                     sv = sims_va[lo:lo + 4096]
-                    tot += float(model.module.made2_loss(obs[s_row[sv]], s_a[sv], torch.as_tensor(from_bitmask(s_mask[sv])), s_scr[sv])) * len(sv)
+                    tot += float(model.module.made2_loss(obs[s_row[sv]], s_a[sv], torch.as_tensor(from_bitmask(s_mask[sv], n_slots)), s_scr[sv])) * len(sv)
                     cnt += len(sv)
                 va_loss, va_within = tot / cnt, float("nan")
             else:
@@ -608,7 +609,7 @@ def made2_metrics(agent: PairGNNPolicy, data: dict[str, np.ndarray], val: np.nda
     with torch.no_grad():
         o = agent.forward_full(torch.as_tensor(data["obs"][rows]))
         z = agent.made2_logits(o, torch.as_tensor(sims["a_unit"][idx])).numpy()
-    target = from_bitmask(sims["made"][idx]) & ~sims["scratch"][idx][:, None]
+    target = from_bitmask(sims["made"][idx], z.shape[1]) & ~sims["scratch"][idx][:, None]
     v = o["valid"].numpy()
     out = {"made2_auc": float(roc_auc_score(target[v], z[v])), "made2_pos_rate": float(target[v].mean())}
     if "pair_made" in data:

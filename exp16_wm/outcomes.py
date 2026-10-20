@@ -43,7 +43,7 @@ def pocket_index_map(env: BilliardsEnv) -> dict[str, int]:
 
 def slots_from_system(env: BilliardsEnv, sys_c, pocket_map: dict[str, int]) -> tuple[np.ndarray, bool]:
     """(made (18,) bool, scratch) read from the BALL_POCKET events of an already simulated system."""
-    made, scratch = np.zeros(N_SLOTS, dtype=bool), False
+    made, scratch = np.zeros(len(env._ball_ids) * N_POCKETS, dtype=bool), False      # 18 for 3 balls
     for e in sys_c.events:
         if e.event_type != pt.EventType.BALL_POCKET:
             continue

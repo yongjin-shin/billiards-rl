@@ -259,6 +259,22 @@ def state_groups(ctrl: PairGNNPolicy, rel: torch.Tensor, label_pair: np.ndarray,
 _ENV = None
 
 
+_ENVS: dict[int, tuple] = {}
+
+
+def _env_for(obs: np.ndarray) -> tuple:
+    """(env, pocket map) for the number of balls of this raw observation (created once per worker)."""
+    from simulator import BilliardsEnv
+    from exp16_wm.obs_transform import n_balls_raw
+    from exp16_wm.outcomes import pocket_index_map
+    from exp16_wm.teacher_data import clear_env_kw
+    n = n_balls_raw(len(obs))
+    if n not in _ENVS:
+        env = BilliardsEnv(**clear_env_kw(n)); env.reset(seed=0)
+        _ENVS[n] = (env, pocket_index_map(env))
+    return _ENVS[n]
+
+
 def _init_worker() -> None:
     global _ENV
     from simulator import BilliardsEnv
@@ -266,13 +282,14 @@ def _init_worker() -> None:
     from exp16_wm.teacher_data import CLEAR_ENV
     env = BilliardsEnv(**CLEAR_ENV); env.reset(seed=0)
     _ENV = (env, pocket_index_map(env))
+    _ENVS[CLEAR_ENV["n_balls"]] = _ENV
 
 
 def _simulate_state(task: tuple[np.ndarray, np.ndarray]) -> np.ndarray:
     """(obs (23,), env actions (C, 2)) → (C,) bool: some ball pocketed and no scratch."""
     from exp16_wm.outcomes import made_slots
     obs, acts = task
-    env, pm = _ENV
+    env, pm = _env_for(obs)
     out = np.zeros(len(acts), bool)
     for c, a in enumerate(acts):
         made, scr = made_slots(env, obs, np.asarray(a, np.float32), pm)
@@ -284,8 +301,8 @@ def _simulate_full(task: tuple[np.ndarray, np.ndarray]) -> tuple[np.ndarray, np.
     """(obs (23,), env actions (C, 2)) → (made (C, 18) bool, scratch (C,) bool)."""
     from exp16_wm.outcomes import made_slots
     obs, acts = task
-    env, pm = _ENV
-    made, scr = np.zeros((len(acts), 18), bool), np.zeros(len(acts), bool)
+    env, pm = _env_for(obs)
+    made, scr = np.zeros((len(acts), len(env._ball_ids) * 6), bool), np.zeros(len(acts), bool)
     for c, a in enumerate(acts):
         mm, sc = made_slots(env, obs, np.asarray(a, np.float32), pm)
         made[c], scr[c] = mm, bool(sc)

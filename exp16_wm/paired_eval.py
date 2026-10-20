@@ -169,6 +169,7 @@ def main() -> None:
     g.add_argument("--run", required=True, help="run dir glob (must match exactly one)"); g.add_argument("--infer", default="all_pairs")
     g.add_argument("--out", required=True); g.add_argument("--threads", type=int, default=2)
     g.add_argument("--seeds", type=int, nargs="+", default=list(EVAL_SEEDS)); g.add_argument("--games-per-seed", type=int, default=GAMES_PER_SEED)
+    g.add_argument("--n-balls", type=int, default=3, help="balls in the rack (G1: 3, 6, 9); the model's weights are per ball/pair")
     c = sub.add_parser("compare", help="summaries and per-game paired differences against the first file")
     c.add_argument("files", nargs="+")
     v = sub.add_parser("clean", help="made head val clean rate on the teacher's labelled val states")
@@ -180,8 +181,9 @@ def main() -> None:
         torch.set_num_threads(args.threads)
         run = find_run(args.run)
         t0 = time.time()
-        res = play_paired(load_policy(run, args.infer), tuple(args.seeds), args.games_per_seed)
-        meta = {"run": run, "infer": args.infer, "eval_seeds": args.seeds, "games_per_seed": args.games_per_seed,
+        from exp16_wm.teacher_data import clear_env_kw
+        res = play_paired(load_policy(run, args.infer), tuple(args.seeds), args.games_per_seed, clear_env_kw(args.n_balls))
+        meta = {"run": run, "infer": args.infer, "n_balls": args.n_balls, "eval_seeds": args.seeds, "games_per_seed": args.games_per_seed,
                 "threads": args.threads, "seconds": round(time.time() - t0, 1), "machine": machine_info()}
         save(args.out, res, meta)
         print(_line(os.path.basename(args.out), summarize(res)), f"  ({meta['seconds']:.0f}s) → {args.out}", flush=True)

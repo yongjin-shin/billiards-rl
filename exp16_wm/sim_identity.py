@@ -31,13 +31,17 @@ N_SLOTS = 18
 
 
 def to_bitmask(made: np.ndarray) -> np.ndarray:
-    """(..., 18) bool → (...) int32 bitmask."""
-    return (made.astype(np.int64) << np.arange(N_SLOTS)).sum(-1).astype(np.int32)
+    """(..., S) bool → (...) bitmask: int32 for up to 31 slots (3 balls: 18), int64 up to 63 (9 balls: 54)."""
+    s = made.shape[-1]
+    if s > 63:
+        raise ValueError(f"{s} slots do not fit a 64-bit mask")
+    m = (made.astype(np.int64) << np.arange(s)).sum(-1)
+    return m.astype(np.int32) if s <= 31 else m
 
 
-def from_bitmask(mask: np.ndarray) -> np.ndarray:
-    """(...) int bitmask → (..., 18) bool."""
-    return ((np.asarray(mask, np.int64)[..., None] >> np.arange(N_SLOTS)) & 1).astype(bool)
+def from_bitmask(mask: np.ndarray, n_slots: int = N_SLOTS) -> np.ndarray:
+    """(...) int bitmask → (..., n_slots) bool."""
+    return ((np.asarray(mask, np.int64)[..., None] >> np.arange(n_slots)) & 1).astype(bool)
 
 
 def replay(obs: np.ndarray, sim_state: np.ndarray, sim_action: np.ndarray,
