@@ -184,6 +184,12 @@ def rank_placements(history: list[dict], types: Sequence[str]) -> list[tuple[str
     return sorted(((t, az, p) for (t, az), (_, p) in latest.items()), key=lambda x: (x[2], x[0], x[1]))
 
 
+def avoid_placements(places: list[tuple[str, str, float]], avoid: Sequence[str]) -> list[tuple[str, str, float]]:
+    """Move pools given as 'type@az' (e.g. ones that were just reclaimed) to the end, keeping the price order otherwise."""
+    bad = set(avoid)
+    return [p for p in places if f"{p[0]}@{p[1]}" not in bad] + [p for p in places if f"{p[0]}@{p[1]}" in bad]
+
+
 def placement_overrides(instance_type: str, subnet_id: str | None) -> list[str]:
     """run-instances arguments that override the launch template's instance type and pick the AZ through its default subnet."""
     return ["--instance-type", instance_type] + (["--subnet-id", subnet_id] if subnet_id else [])
@@ -204,6 +210,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     ap.add_argument("--stack", default="billiards-rl-cloud")
     ap.add_argument("--go", action="store_true", help="really upload and launch (default is a dry run)")
     ap.add_argument("--allow-dirty", action="store_true", help="bundle HEAD even though tracked files have uncommitted changes")
+    ap.add_argument("--avoid", action="append", default=[], help="type@az pool to try last (e.g. just reclaimed); repeatable")
     ap.add_argument("--instance-types", nargs="+", default=["c7a.16xlarge"],
                     help="allowed types (same CPU family, e.g. c7a/m7a/r7a.16xlarge); the cheapest (type, AZ) Spot pool is tried first, "
                          "then the next on a capacity error. Every type must be allowed by the stack's AgentWritePolicy")
@@ -234,6 +241,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             ["ec2", "describe-subnets", "--filters", "Name=default-for-az,Values=true", "--query", "Subnets", "--output", "json"], args.region).stdout)}
         places = [(t, az, p) for t, az, p in rank_placements(hist, args.instance_types) if az in subnets] or \
                  [(args.instance_types[0], None, float("nan"))]
+        places = avoid_placements(places, args.avoid)
         print("placements (cheapest first):", ", ".join(f"{t}@{az} ${p:.3f}" for t, az, p in places[:5]))
         if not args.go:
             t, az, _ = places[0]

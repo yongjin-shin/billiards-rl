@@ -161,3 +161,10 @@ def test_placement_overrides_set_type_and_subnet() -> None:
     from cloud.launch import placement_overrides
     assert placement_overrides("m7a.16xlarge", "subnet-1") == ["--instance-type", "m7a.16xlarge", "--subnet-id", "subnet-1"]
     assert placement_overrides("c7a.16xlarge", None) == ["--instance-type", "c7a.16xlarge"]
+
+
+def test_avoid_placements_moves_reclaimed_pools_last() -> None:
+    from cloud.launch import avoid_placements
+    places = [("m7a.16xlarge", "us-east-1f", 0.7), ("c7a.16xlarge", "us-east-1b", 0.94), ("c7a.16xlarge", "us-east-1c", 0.99)]
+    assert avoid_placements(places, ["c7a.16xlarge@us-east-1b"]) == [places[0], places[2], places[1]]
+    assert avoid_placements(places, []) == places
