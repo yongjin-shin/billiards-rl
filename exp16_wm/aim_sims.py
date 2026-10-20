@@ -66,6 +66,30 @@ def window_centers(flags: np.ndarray, offsets_deg) -> tuple[np.ndarray, np.ndarr
     return np.where(n > 0, c, np.nan), n > 0
 
 
+def scan_centres(label_path: str, centre_dir: str, n: int, rng: np.random.Generator) -> tuple[np.ndarray, np.ndarray]:
+    """S2 candidate centres without the formula or a learned aim, from exp16_wm.wide_scan: the robust window centre, else the widest
+    window at the scan speed (any path), else a uniformly random direction (those pairs teach "not makeable here").
+    → (centre (n, 18) rad in the relative frame, source (n, 18) int8: 2 robust, 1 any window, 0 random)."""
+    z = np.load(os.path.join(centre_dir, os.path.basename(label_path)))
+    rob, ok = z["scan_center_deg"][:n].astype(np.float64), z["scan_valid"][:n]
+    anyc = z["scan_any_center_deg"][:n].astype(np.float64)
+    rnd = rng.uniform(-180.0, 180.0, size=rob.shape)
+    centre = np.where(ok, rob, np.where(np.isfinite(anyc), anyc, rnd))
+    source = np.where(ok, 2, np.where(np.isfinite(anyc), 1, 0)).astype(np.int8)
+    return np.radians(centre), source
+
+
+@torch.no_grad()
+def model_aims(models: list, rel: torch.Tensor, chunk: int = 1000) -> np.ndarray:
+    """(N, 18) aims (rad, relative frame) the trained policies themselves use (forward_full 'aim', e.g. --made2-self-aim models),
+    circular mean over the models — the loop's candidate centres (no formula, no separate aim encoder)."""
+    out = []
+    for lo in range(0, len(rel), chunk):
+        a = torch.stack([m.forward_full(rel[lo:lo + chunk])["aim"] for m in models])
+        out.append(torch.atan2(torch.sin(a).mean(0), torch.cos(a).mean(0)))
+    return torch.cat(out).numpy()
+
+
 def _aims(args):
     """Resolve --aim-runs for the seed → (encoders, their target mean / std, run dirs)."""
     from exp16_wm.bc import aim_encoder_stats, load_aim_encoder
@@ -136,8 +160,20 @@ def gen(args) -> None:
     from exp16_wm.obs_transform import relative_obs
     from exp16_wm.sim_identity import to_bitmask
     paths = sorted(glob.glob(args.data))
-    encs, (m_, s_), dirs = _aims(args)                              # standardisation of the aim encoders' own training data
-    mean, std = np.array([m_]), np.array([s_])
+    if args.centre_runs:                                            # loop: centres = the policies' own aims
+        from exp16_wm import eval_by_balls as E
+        dirs = []
+        for pat in args.centre_runs:
+            found = glob.glob(pat)
+            if len(found) != 1:
+                raise SystemExit(f"{pat}: expected one run dir, found {found}")
+            dirs.append(found[0])
+        encs, cmodels = None, [E.load_run(d) for d in dirs]
+    elif args.centre_dir:                                           # S2: centres from the wide scan, no aim encoders at all
+        encs, dirs = None, [args.centre_dir]
+    else:
+        encs, (m_, s_), dirs = _aims(args)                          # standardisation of the aim encoders' own training data
+        mean, std = np.array([m_]), np.array([s_])
     ref = PairGNNPolicy(hidden=8)
     scale, bias = ref.act_scale.numpy().astype(np.float64), ref.act_bias.numpy().astype(np.float64)
     os.makedirs(args.out, exist_ok=True)
@@ -145,10 +181,19 @@ def gen(args) -> None:
     t0, total = time.time(), 0
     with mp.get_context("spawn").Pool(args.workers, initializer=_init_worker) as pool:
         for path in paths:
+            out = os.path.join(args.out, os.path.basename(path))
+            if (args.centre_dir or args.centre_runs) and os.path.exists(out):   # resume
+                print(f"  {os.path.basename(path)}: already done, skipped", flush=True)
+                continue
             z = np.load(path)
             obs = z["obs"][:args.max_states] if args.max_states else z["obs"]
             rel = relative_obs(obs)
-            aim = ensemble_aim(encs, torch.as_tensor(rel), float(mean[0]), float(std[0]))
+            if args.centre_runs:
+                aim = model_aims(cmodels, torch.as_tensor(rel))
+            elif args.centre_dir:
+                aim, source = scan_centres(path, args.centre_dir, len(obs), rng)
+            else:
+                aim = ensemble_aim(encs, torch.as_tensor(rel), float(mean[0]), float(std[0]))
             d = aim - bias[0]
             aim_u = np.arctan2(np.sin(d), np.cos(d)) / scale[0]
             grid = grid_units(aim_u, scale, bias)                                             # (N, 18, 217, 2)
@@ -162,10 +207,12 @@ def gen(args) -> None:
             made, scr = np.zeros((len(pick), N_PAIRS), bool), np.zeros(len(pick), bool)
             for rows, (mm, ss) in zip(order, pool.imap(_simulate_full, tasks, chunksize=8)):
                 made[rows], scr[rows] = mm, ss
-            out = os.path.join(args.out, os.path.basename(path))
-            np.savez(out, meta=z["meta"], obs=z["obs"], game=z["game"], sim_state=pick[:, 0].astype(np.int32), sim_action=env_a,
+            tmp = out + ".tmp.npz"
+            np.savez(tmp, meta=z["meta"], obs=z["obs"], game=z["game"], sim_state=pick[:, 0].astype(np.int32), sim_action=env_a,
                      sim_made=to_bitmask(made).astype(np.int32), sim_scratch_replay=scr, sim_pair=pick[:, 1].astype(np.int8),
-                     sim_aim_runs=np.array(dirs), seed=args.seed)
+                     sim_aim_runs=np.array(dirs), seed=args.seed,
+                     **({"sim_centre_source": source[pick[:, 0], pick[:, 1]]} if args.centre_dir and not args.centre_runs else {}))
+            os.replace(tmp, out)
             total += len(pick)
             print(f"  {os.path.basename(path)}: {len(obs)} states, {len(pick)} simulations "
                   f"(target pair made & no scratch {np.mean(made[np.arange(len(pick)), pick[:, 1]] & ~scr):.1%}), {time.time() - t0:.0f}s", flush=True)
@@ -177,12 +224,16 @@ def main() -> None:
     p.add_argument("cmd", nargs="?", default="gen", choices=["gen", "scan"])
     p.add_argument("--speed", type=float, default=1.0, help="scan: the speed (m/s) the angle offsets are played at")
     p.add_argument("--data", default="logs/teacher_data/relabel_s1000/robust/*.npz", help="label files (only their states are used)")
-    p.add_argument("--aim-runs", nargs="+", required=True, help="aux-only aim run dir globs with {seed}")
+    p.add_argument("--aim-runs", nargs="+", default=None, help="aux-only aim run dir globs with {seed}")
+    p.add_argument("--centre-runs", nargs="+", default=None, help="gen (loop): candidate centres = circular mean of these trained runs' own aims")
+    p.add_argument("--centre-dir", default=None, help="gen (S2): candidate centres from this exp16_wm.wide_scan output instead of --aim-runs")
     p.add_argument("--seed", type=int, default=0); p.add_argument("--val-frac", type=float, default=0.1)
     p.add_argument("--k", type=int, default=8, help="candidates per live pair")
     p.add_argument("--workers", type=int, default=8); p.add_argument("--max-states", type=int, default=0)
     p.add_argument("--out", required=True)
     args = p.parse_args()
+    if not args.aim_runs and not (args.cmd == "gen" and (args.centre_dir or args.centre_runs)):
+        p.error("--aim-runs is required (unless gen --centre-dir)")
     torch.set_num_threads(2)
     {"gen": gen, "scan": scan}[args.cmd](args)
 

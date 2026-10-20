@@ -56,3 +56,31 @@ def test_no_checkpoint_without_every_and_a_finished_checkpoint_skips_training(tm
     assert fb["epochs_run"] == 3
     for k, v in a.state_dict().items():
         torch.testing.assert_close(b.state_dict()[k], v)
+
+
+def test_select_fn_picks_the_best_scored_epoch_only_among_scored_epochs(tmp_path):
+    calls = []
+
+    def sel(module):                                                    # pretend epoch 3 (index 3) is the best decision quality
+        calls.append(len(calls)); return [0.2, 0.9, 0.5][len(calls) - 1]
+    data, tr, sims = _made_only_setup()
+    torch.manual_seed(5)
+    m = PairGNNPolicy(hidden=16, made2_head=True, made2_geom=True, made2_no_proposal=True)
+    fit = train_bc(m, data, tr, ~tr, "nearest_good", epochs=6, sims=sims, select_fn=sel, select_every=2, **KW)
+    assert [e for e, _ in fit["select_history"]] == [1, 3, 5] and fit["best_epoch"] == 3
+    assert fit["best_score"] == pytest.approx(0.9)
+
+
+def test_select_fn_survives_resume(tmp_path):
+    ck = str(tmp_path / "c.pt")
+    scores = iter([0.3, 0.8, 0.1, 0.4])
+    data, tr, sims = _made_only_setup()
+    torch.manual_seed(5)
+    m = PairGNNPolicy(hidden=16, made2_head=True, made2_geom=True, made2_no_proposal=True)
+    train_bc(m, data, tr, ~tr, "nearest_good", epochs=8, sims=sims, select_fn=lambda _: next(scores), select_every=2,
+             ckpt_path=ck, ckpt_every=2, stop_after=4, **KW)
+    torch.manual_seed(5)
+    m2 = PairGNNPolicy(hidden=16, made2_head=True, made2_geom=True, made2_no_proposal=True)
+    fit = train_bc(m2, data, tr, ~tr, "nearest_good", epochs=8, sims=sims, select_fn=lambda _: next(scores), select_every=2,
+                   ckpt_path=ck, ckpt_every=2, **KW)
+    assert [e for e, _ in fit["select_history"]] == [1, 3, 5, 7] and fit["best_epoch"] == 3   # the pre-interruption best is kept
