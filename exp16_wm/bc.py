@@ -842,6 +842,9 @@ def main():
         if max(abs(s_[0] - stats[0][0]) + abs(s_[1] - stats[0][1]) for s_ in stats) > 1e-4:
             raise SystemExit(f"--made2-aim-from encoders were standardised differently: {stats}")
         aim_stats = stats[0]
+    from exp16_wm.obs_transform import n_balls_raw
+    from exp16_wm.teacher_data import clear_env_kw
+    game_env = clear_env_kw(n_balls_raw(data["obs"].shape[1]))        # the rack the data came from (G1: 3, 6, 9 balls)
     data["obs"] = TRANSFORMS[args.obs_transform](data["obs"])
 
     h_tag = ("_gnn" if args.model == "gnn" else "") + \
@@ -960,13 +963,13 @@ def main():
 
     if args.made_only:                                       # no trained pair / selection head: choose with the made head over all pairs
         agent.infer, agent.refine_deg, agent.refine_speed_abs = "all_pairs", ANG31, ABS7
-    ev = evaluate_policy(TransformedPolicy(agent, args.obs_transform), args.eval_seed, args.eval_games, CLEAR_ENV)
+    ev = evaluate_policy(TransformedPolicy(agent, args.obs_transform), args.eval_seed, args.eval_games, game_env)
     print(f"  policy alone ({args.eval_games} games): {json.dumps({k: (round(v, 3) if v is not None else None) for k, v in ev.items()})}",
           flush=True)
     ev_pen = None
     if isinstance(agent, PairGNNPolicy) and agent.has_scratch:   # the scratch head's effect, same model, penalty at inference only
         agent.scratch_lambda = args.scratch_penalty
-        ev_pen = evaluate_policy(TransformedPolicy(agent, args.obs_transform), args.eval_seed, args.eval_games, CLEAR_ENV)
+        ev_pen = evaluate_policy(TransformedPolicy(agent, args.obs_transform), args.eval_seed, args.eval_games, game_env)
         agent.scratch_lambda = 0.0
         print(f"  policy alone with scratch penalty {args.scratch_penalty}: "
               f"{json.dumps({k: (round(v, 3) if v is not None else None) for k, v in ev_pen.items()})}", flush=True)
@@ -975,7 +978,7 @@ def main():
         ev_modes = {}
         for mode in ("verify", "refine", "verify_refine"):
             agent.infer = mode
-            ev_modes[mode] = evaluate_policy(TransformedPolicy(agent, args.obs_transform), args.eval_seed, args.eval_games, CLEAR_ENV)
+            ev_modes[mode] = evaluate_policy(TransformedPolicy(agent, args.obs_transform), args.eval_seed, args.eval_games, game_env)
             print(f"  policy alone, infer={mode}: {json.dumps({k: (round(v, 3) if v is not None else None) for k, v in ev_modes[mode].items()})}", flush=True)
         agent.infer = "select"
     results = {"name": name, "teacher": teacher, "loss": args.loss, "data": paths, "eval_infer_modes": ev_modes,
