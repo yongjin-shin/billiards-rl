@@ -65,10 +65,20 @@ def play_paired(policy: Policy, eval_seeds: tuple[int, ...] = EVAL_SEEDS, games_
             "game": np.array(game, np.int64)}
 
 
+def runout_flags(shots: np.ndarray, succ: np.ndarray) -> np.ndarray:
+    """(G,) True where every shot of the game pocketed a ball — the rack was cleared without a miss (G1: a miss ends the turn)."""
+    ends = np.cumsum(np.asarray(shots, int)); ok = np.asarray(succ, bool)
+    if len(ok) != (ends[-1] if len(ends) else 0):
+        raise ValueError(f"shots add up to {ends[-1] if len(ends) else 0}, but there are {len(ok)} shot results")
+    return np.array([ok[e - n:e].all() for e, n in zip(ends, np.asarray(shots, int))], bool)
+
+
 def summarize(res: dict[str, np.ndarray]) -> dict[str, float]:
-    """games, shots/game with its SE, shot success, balls per successful shot (NaN without a successful shot)."""
+    """games, shots/game with its SE, shot success, balls per successful shot (NaN without a successful shot), run-out rate."""
     s, ok, b = np.asarray(res["shots"], float), np.asarray(res["succ"], bool), np.asarray(res["balls"], float)
+    ro = runout_flags(res["shots"], ok)
     return {"games": int(len(s)), "shots": float(s.mean()), "shots_se": float(s.std() / np.sqrt(len(s))),
+            "runout": float(ro.mean()), "runout_se": float(ro.std() / np.sqrt(len(ro))),
             "shot_success": float(ok.mean()) if len(ok) else float("nan"),
             "balls_per_success": float(b[ok].mean()) if ok.any() else float("nan")}
 
@@ -149,7 +159,7 @@ def val_clean(run_dir: str, infer: str) -> tuple[float, int]:
 
 def _line(name: str, s: dict[str, float]) -> str:
     return (f"{name:28s} games {s['games']}  shots/game {s['shots']:.3f} ± {s['shots_se']:.3f} (SE)  "
-            f"shot success {s['shot_success']:.1%}  balls per successful shot {s['balls_per_success']:.3f}")
+            f"shot success {s['shot_success']:.1%}  balls per successful shot {s['balls_per_success']:.3f}  run-out {s['runout']:.1%}")
 
 
 def main() -> None:

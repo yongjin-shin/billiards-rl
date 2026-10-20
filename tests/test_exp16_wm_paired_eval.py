@@ -105,3 +105,15 @@ def test_machine_info_names_the_versions_that_matter():
     for k in ("system", "machine", "python", "cpus", "pooltool-billiards", "panda3d", "numba", "numpy", "torch"):
         assert k in info
     json.dumps(info)                                                         # stored in the npz meta
+
+
+def test_runout_counts_games_without_a_miss():
+    from exp16_wm.paired_eval import runout_flags
+    shots = np.array([3, 4, 2])
+    succ = np.array([1, 1, 1,  1, 0, 1, 1,  1, 1], bool)
+    np.testing.assert_array_equal(runout_flags(shots, succ), [True, False, True])
+    s = summarize({"shots": shots, "succ": succ, "balls": succ.astype(int)})
+    assert s["runout"] == pytest.approx(2 / 3)
+    with pytest.raises(ValueError):
+        runout_flags(np.array([3]), np.ones(2, bool))
+
