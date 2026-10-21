@@ -58,3 +58,31 @@ def test_k_limits_which_shots_are_simulated():
     assert pol.act(OBS)[0] in (pytest.approx(0.0), pytest.approx(0.1))         # the third shot is never looked at
     with pytest.raises(ValueError):
         LookaheadPolicy(Scorer({}), lambda r, a: None, mode="greedy")
+
+
+def test_two_levels_see_a_trap_one_level_misses():
+    """Shot A leaves an easy next shot that leads nowhere (its own next position is hopeless); shot B leaves a slightly harder next
+    shot whose follow-up is easy. One level prefers A, two levels prefer B."""
+    import torch as _t
+
+    class S:
+        act_scale, act_bias = _t.ones(2), _t.zeros(2)
+        table = {0.5: [1.0, 1.0], 0.1: [3.0, -9.0], 0.2: [1.5, -9.0], 0.3: [-9.0, -9.0], 0.4: [4.0, 4.0]}
+        def scores(self, rel):
+            z = _t.tensor(self.table[round(self.cue, 2)], dtype=_t.float32)[None, None]
+            return z, _t.tensor([[[0.0, 1.0], [0.1, 1.0]]])[None]
+    sc = S()
+    nxt_of = {(0.5, 0): 0.1, (0.5, 1): 0.2, (0.1, 0): 0.3, (0.2, 0): 0.4}       # (position, shot index) → next position
+
+    def sim(raw, a):
+        j = int(round(float(a[0]) * 10)); key = (round(float(raw[0]), 2), j)
+        out = raw.copy(); out[0] = nxt_of.get(key, 0.3)
+        return out, True, False, False
+    one = LookaheadPolicy(sc, sim, widths=(2,))
+    two = LookaheadPolicy(sc, sim, widths=(2, 1))
+    for pol in (one, two):
+        orig = pol._candidates
+        pol._candidates = (lambda o: (lambda raw: (setattr(sc, "cue", float(raw[0])), o(raw))[1]))(orig)
+    assert one.act(OBS)[0] == pytest.approx(0.0) and two.act(OBS)[0] == pytest.approx(0.1)
+    with pytest.raises(ValueError):
+        LookaheadPolicy(sc, sim, widths=(2, 0))
