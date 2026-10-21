@@ -69,10 +69,8 @@ class LookaheadPolicy:
                 score = 0.0
             elif cleared:
                 score = now
-            elif self.mode == "sim" or ok or len(widths) == 1:
-                score = now * self._best(nxt, widths[1:])[0]
-            else:                                                     # model mode, deeper levels: only made shots are followed
-                score = now * self._best(nxt, ())[0]
+            else:                                                     # the same depth for every shot (a shallower value for some
+                score = now * self._best(nxt, widths[1:])[0]          # shots would favour them: fewer probabilities multiplied)
             if score > best:
                 best, best_a = score, acts[i]
         return best, best_a

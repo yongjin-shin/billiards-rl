@@ -86,3 +86,28 @@ def test_two_levels_see_a_trap_one_level_misses():
     assert one.act(OBS)[0] == pytest.approx(0.0) and two.act(OBS)[0] == pytest.approx(0.1)
     with pytest.raises(ValueError):
         LookaheadPolicy(sc, sim, widths=(2, 0))
+
+
+def test_model_mode_values_every_shot_at_the_same_depth():
+    """A missed shot (simulated) must not be scored one level shallower than a made one (that would favour misses)."""
+    import torch as _t
+
+    class S:
+        act_scale, act_bias = _t.ones(2), _t.zeros(2)
+        table = {0.5: [2.0, 2.0], 0.1: [1.0, 1.0], 0.2: [1.0, 1.0], 0.3: [1.0, 1.0]}
+        def scores(self, rel):
+            z = _t.tensor(self.table[round(self.cue, 2)], dtype=_t.float32)[None, None]
+            return z, _t.tensor([[[0.0, 1.0], [0.1, 1.0]]])[None]
+    sc = S()
+    calls = []
+
+    def sim(raw, a):
+        j = int(round(float(a[0]) * 10)); out = raw.copy(); out[0] = 0.1 if round(float(raw[0]), 2) == 0.5 and j == 0 else (0.2 if j == 1 else 0.3)
+        calls.append((round(float(raw[0]), 2), j))
+        return out, j == 1, False, False                                       # shot 0 misses, shot 1 goes in
+    pol = LookaheadPolicy(sc, sim, widths=(2, 1))
+    orig = pol._candidates
+    pol._candidates = lambda raw: (setattr(sc, "cue", float(raw[0])), orig(raw))[1]
+    pol.act(OBS)
+    assert (0.1, 0) in calls or (0.1, 1) in calls                               # the missed shot's position is also looked into
+
