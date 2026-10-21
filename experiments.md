@@ -6952,3 +6952,5 @@ job `sl2-loop-1`: Spot 회수 7번(c7a 연속 회수 → 권한을 c7a·m7a·r7a
 | G-small | 0~10%p | 효과 작음 — 막힘·뭉침을 다루려면 다른 것(value, 후보 범위) |
 | W-same | warm이 scratch와 run-out ±5%p | 이어서 학습 가능 — 이후 epoch를 줄여 비용 절감 시험 |
 | W-better / W-worse | warm이 5%p 넘게 좋음 / 나쁨 | 3공 지식이 도움 / 방해 |
+
+**G6 중간 기록 (2026-10-21 10:00)**: warm 4 run을 epoch 약 840에서 **중단**(계획 변경). V1 top-1 최고가 epoch 449 → 824 동안 0.459~0.530에서 전혀 오르지 않았다(같은 시점 scratch 0.733~0.779, 계속 상승). CPU 절반을 쓰며 scratch를 늦춰서 SSM으로 warm 프로세스만 종료하고, 재시작 시에도 scratch만 돌도록 job 스크립트를 바꿨다. 판단표상 **W-worse**(중간 결과 기준). 추정 원인: 조준각 head는 3공 모델 것인데 조준각 표준화(aim_mean/std)는 새 6공 scan 정답으로 다시 정해져 head 출력과 맞지 않음, made head는 새로 시작 — 확인은 별도. Spot 회수 6번(c7a×3, r7a, m7a×2), 매번 자동 재시작.
