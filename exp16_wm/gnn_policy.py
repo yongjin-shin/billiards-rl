@@ -777,7 +777,7 @@ class PairGNNPolicy(nn.Module):
         state_dict = {k: v for k, v in state_dict.items() if k != "made2_scale"}
         return super().load_state_dict(state_dict, strict=strict, assign=assign)
 
-    def load_encoder(self, state_dict) -> list[str]:
+    def load_encoder(self, state_dict, include_heads: bool = False) -> list[str]:
         """
         Initialise the encoder (ball message / ball / pair MLPs) and the aux head from another checkpoint; the
         action, selection and made heads (`head_*`) keep their fresh initialisation. Returns the loaded keys.
@@ -786,8 +786,10 @@ class PairGNNPolicy(nn.Module):
         own = self.state_dict()
         take = {}
         for k, v in state_dict.items():
-            if k == "made2_scale" or k.startswith("head_"):
+            if k == "made2_scale" or (k.startswith("head_") and not include_heads):
                 continue
+            if include_heads and (k.startswith("head_") or k in ("aim_mean", "aim_std")) and k not in own:
+                continue                                              # a head this model does not have
             if k not in own:
                 raise ValueError(f"checkpoint key {k} is not in this model")
             if own[k].shape != v.shape:

@@ -45,7 +45,7 @@ LOSSES = ("teacher", "nearest_good")
 
 # optional per-state arrays carried through load/split when every shard has them
 EXTRA_KEYS = ["good_pairs", "good_made", "good_scratch", "pair_n", "pair_made", "pair_any", "pair_scratch",
-              "aux_scan_center", "aux_scan_valid"]                 # the last two: simulator aim targets (--geom-aux-set scan), not in label files
+              "aux_scan_center", "aux_scan_valid", "v_target"]       # v_target: expert iteration V head (exp16_wm.search_data)                 # the last two: simulator aim targets (--geom-aux-set scan), not in label files
 FACT_KEYS = ("good_made", "good_scratch", "pair_n", "pair_made", "pair_scratch")
 
 
@@ -73,6 +73,10 @@ def load_teacher_data(paths: list[str]) -> dict[str, np.ndarray]:
     keys = ["obs", "action", "good_actions", "n_good", "pocketed", "shot"]
     keys += [k for k in EXTRA_KEYS if all(k in d for d in parts)]
     out = {k: np.concatenate([d[k] for d in parts]) for k in keys}
+    # search label files (exp16_wm.search_data) mixed with ordinary ones: the others get no V target and count as game states
+    for k, fill in (("v_target", np.nan), ("is_game_state", True)):
+        if k not in out and any(k in d for d in parts):
+            out[k] = np.concatenate([d[k] if k in d else np.full(len(d["obs"]), fill) for d in parts])
     offset, games = 0, []
     for d in parts:
         games.append(d["game"].astype(np.int64) + offset)
@@ -149,6 +153,22 @@ def load_sims(sims_paths: list[str], label_paths: list[str]) -> dict[str, np.nda
         offset += len(z_obs)
     return {"row": np.concatenate(rows), "a_unit": np.concatenate(act),
             "made": np.concatenate(made), "scratch": np.concatenate(scr)}
+
+
+def load_q_targets(label_paths: list[str]) -> dict[str, np.ndarray]:
+    """Q head targets of search label files (exp16_wm.search_data) aligned to load_teacher_data(label_paths): row (global), a_unit, pair,
+    score (the search's value of the shot, in [0, 1])."""
+    rows, act, pair, score, offset = [], [], [], [], 0
+    for lp in sorted(label_paths):
+        z = np.load(lp)
+        if "q_state" not in z.files:                                 # an ordinary label file mixed in: no Q targets
+            offset += len(z["obs"]); continue
+        rows.append(z["q_state"].astype(np.int64) + offset); act.append(to_unit(z["q_action"]).astype(np.float32))
+        pair.append(z["q_pair"].astype(np.int64)); score.append(z["q_score"].astype(np.float32))
+        offset += len(z["obs"])
+    if not rows:
+        raise ValueError("no label file has Q targets (exp16_wm.search_data)")
+    return {"row": np.concatenate(rows), "a_unit": np.concatenate(act), "pair": np.concatenate(pair), "score": np.concatenate(score)}
 
 
 def split_rows(game: np.ndarray, val_frac: float, seed: int) -> np.ndarray:
@@ -302,7 +322,8 @@ def train_bc(agent: VanillaSAC, data: dict[str, np.ndarray], train: np.ndarray, 
              aux: np.ndarray | None = None, aux_weight: float = 0.0, aux_only: bool = False,
              train_plateau: int = 0, train_plateau_tol: float = 0.01, made_only: bool = False, made_val_sims: int = 20000,
              ckpt_path: str | None = None, ckpt_every: int = 0, stop_after: int | None = None,
-             select_fn=None, select_every: int = 25) -> dict:
+             select_fn=None, select_every: int = 25, q_data: dict | None = None, q_weight: float = 0.0, v_weight: float = 0.0,
+             q_batch: int = 1024) -> dict:
     """select: 'loss' keeps the lowest val loss; 'within' the highest val within-threshold rate
     (the val loss is dominated by a few far-off predictions and can disagree with it).
     aux_only: train the encoder + aux head on the geometry look-ahead alone (no action / selection / made loss);
@@ -360,6 +381,18 @@ def train_bc(agent: VanillaSAC, data: dict[str, np.ndarray], train: np.ndarray, 
     sched = (torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=max(1, epochs), eta_min=lr * lr_final_frac)
              if lr_schedule == "cosine" else None)
     tr_idx, va_idx = np.where(train)[0], np.where(val)[0]
+    if "is_game_state" in data:                                     # epochs walk the real game states; search-tree states are only
+        tr_idx = tr_idx[np.asarray(data["is_game_state"], bool)[tr_idx]]   # reached through the sims / Q targets
+    use_q = q_data is not None and q_weight > 0
+    if use_q:                                                       # expert iteration: search scores of (state, shot)
+        q_tr = np.where(train[q_data["row"]])[0]
+        q_row, q_a = torch.as_tensor(q_data["row"]), torch.as_tensor(q_data["a_unit"])
+        q_pair, q_sc = torch.as_tensor(q_data["pair"]), torch.as_tensor(q_data["score"])
+    use_v = v_weight > 0
+    if use_v:                                                       # expert iteration: real game outcome from each game state
+        if "v_target" not in data:
+            raise ValueError("v_weight > 0 needs data['v_target'] (exp16_wm.search_data label files)")
+        v_t = torch.as_tensor(np.nan_to_num(data["v_target"], nan=-1.0).astype(np.float32))
     if sims is not None:
         from exp16_wm.sim_identity import from_bitmask
         n_slots = (obs.shape[1] - 12) // 3 * 6                      # 18 for 3 balls, 54 for 9 (G1)
@@ -409,6 +442,15 @@ def train_bc(agent: VanillaSAC, data: dict[str, np.ndarray], train: np.ndarray, 
                 made_b = torch.as_tensor(from_bitmask(s_mask[sb], n_slots))
                 lm = made2_weight * model.module.made2_loss(obs[s_row[sb]], s_a[sb], made_b, s_scr[sb])
                 l = lm if l is None else l + lm
+            if use_q:
+                qb = rng.choice(q_tr, size=min(q_batch, len(q_tr)), replace=False)
+                lq = q_weight * model.module.q_loss(obs[q_row[qb]], q_a[qb], q_pair[qb], q_sc[qb])
+                l = lq if l is None else l + lq
+            if use_v:
+                bv = torch.as_tensor(b)[v_t[b] >= 0]
+                if len(bv):
+                    lv = v_weight * model.module.v_loss(obs[bv], v_t[bv])
+                    l = lv if l is None else l + lv
             if use_aux:
                 la = model.module.aux_loss(obs[b], aux_t[b])
                 l = aux_weight * la if l is None else l + aux_weight * la
@@ -501,6 +543,9 @@ def load_scan_targets(label_paths: list[str], target_dir: str) -> tuple[np.ndarr
     cs, vs = [], []
     for lp in sorted(label_paths):
         tp = os.path.join(target_dir, os.path.basename(lp))
+        if not os.path.exists(tp) and json.loads(str(np.load(lp)["meta"])).get("teacher") == "search":
+            n, P = len(np.load(lp)["obs"]), (np.load(lp)["obs"].shape[1] - 14) // 3 * 6      # search states: no scan targets (NaN)
+            cs.append(np.full((n, P), np.nan, np.float32)); vs.append(np.zeros((n, P), bool)); continue
         z = np.load(tp)
         if len(z["scan_center_deg"]) != len(np.load(lp)["obs"]):
             raise ValueError(f"{tp}: {len(z['scan_center_deg'])} rows, the label file {len(np.load(lp)['obs'])}")
@@ -698,6 +743,10 @@ def parse_args():
                    help="--made-only: choose the final model by top-1 success on this fixed val set (exp16_wm.val_set) every --v0-every epochs "
                         "instead of the lowest made BCE on the training data's own val split")
     p.add_argument("--v0-every", type=int, default=25)
+    p.add_argument("--select-infer", type=str, default="all_pairs", choices=["all_pairs", "all_pairs_q"],
+                   help="--val-v0: the inference whose top-1 success chooses the model (all_pairs_q = by the Q head)")
+    p.add_argument("--q-weight", type=float, default=0.0, help="> 0: Q head trained on the search scores of the label files (search_data)")
+    p.add_argument("--v-weight", type=float, default=0.0, help="> 0: V head trained on the label files' v_target (real game outcome)")
     p.add_argument("--ckpt-every", type=int, default=0,
                    help="> 0: save the whole training state every this many epochs under <out-root>/_ckpt/ and resume from it if present "
                         "(the run dir name is kept), so an interrupted run continues")
@@ -709,6 +758,8 @@ def parse_args():
     p.add_argument("--init-from", type=str, default=None,
                    help="--model gnn: initialise the encoder and the aux head from this checkpoint (bc_model.pt); the "
                         "action / selection / made heads start fresh. E.g. an --aux-only run (pretrain on the geometry look-ahead)")
+    p.add_argument("--init-full", action="store_true", help="--init-from: also take the heads the checkpoint has (made2, aux, aim stats) — "
+                   "continue a model; heads it lacks (e.g. new Q / V) start fresh")
     p.add_argument("--aux-only", action="store_true",
                    help="diagnostic with --geom-aux-weight: train the encoder on the geometry look-ahead alone (no action / selection / "
                         "made loss), no policy evaluation; asks whether the encoder can represent the targets at all")
@@ -809,6 +860,10 @@ def main():
             raise SystemExit("--made2-head needs --model gnn, --data-frac 1, --augment none")
         sims = load_sims(sorted({p for pat in args.sims for p in glob.glob(pat)}), paths)
         sims["row"] = split_rows(data["game"], args.val_frac, args.seed)[sims["row"]]
+    q_data = None
+    if args.q_weight > 0:
+        q_data = load_q_targets(paths)
+        q_data["row"] = split_rows(data["game"], args.val_frac, args.seed)[q_data["row"]]
     data, train, val = build_split(data, args.val_frac, args.seed, args.data_frac, args.augment)
     extra_tag = ""
     if args.train_only_data:
@@ -859,7 +914,7 @@ def main():
             ("" if args.gnn_hidden == 128 or args.model != "gnn" else f"_H{args.gnn_hidden}") + \
             ("" if args.gnn_layers == 2 or args.model != "gnn" else f"_L{args.gnn_layers}") + \
             ("_sl1" if args.speed_loss == "l1" else "") + (f"_sb{args.speed_bins}" if args.speed_bins else "") + ("_kw" if args.uncertainty_weights else "") + (f"_ga{args.geom_aux_weight:g}" if args.geom_aux_weight > 0 else "") + ("_aim" if args.geom_aux_weight > 0 and args.geom_aux_set == "aim" else "") + ("_scan" if args.geom_aux_weight > 0 and args.geom_aux_set == "scan" else "") + ("_auxonly" if args.aux_only else "") + ("_madeonly" if args.made_only else "") + ("_noprop" if args.made2_no_proposal else "") + (f"_i{args.init_seed}" if args.init_seed is not None else "") + ("_init" if args.init_from else "") + (f"_ff{args.input_fourier}" if args.input_fourier else "") + \
-            ("_geoang" if args.geom_angle else "") + extra_tag + (f"_m2w{args.made2_weight:g}" if args.made2_head else "") + ("geo" if args.made2_geom else "") + ("L" if args.made2_aim_from else "") + (f"S{args.made2_self_aim[0]}" if args.made2_self_aim else "") + ("_wrap" if args.angle_wrap else "_nowrap")
+            ("_geoang" if args.geom_angle else "") + extra_tag + (f"_m2w{args.made2_weight:g}" if args.made2_head else "") + ("geo" if args.made2_geom else "") + ("L" if args.made2_aim_from else "") + (f"S{args.made2_self_aim[0]}" if args.made2_self_aim else "") + (f"_q{args.q_weight:g}" if args.q_weight > 0 else "") + (f"_v{args.v_weight:g}" if args.v_weight > 0 else "") + ("_wrap" if args.angle_wrap else "_nowrap")
     name = (f"exp16_bc_{teacher}_{args.loss}{h_tag}_a{args.angle_scale_deg:g}_v{args.speed_scale:g}"
             f"_s{args.seed}_{time.strftime('%Y-%m-%d@%H%M')}")
     ckpt_path = None
@@ -889,7 +944,7 @@ def main():
                               enc_layers=args.gnn_layers, speed_loss=args.speed_loss, speed_bins=args.speed_bins,
                               uncertainty_weights=args.uncertainty_weights, aux_dim=1 if args.made2_self_aim else ((1 if args.geom_aux_set in ("aim", "scan") else N_AUX) if args.geom_aux_weight > 0 else 0),
                               aim_encoder=aim_enc, fourier=args.input_fourier, made2_no_proposal=args.made2_no_proposal,
-                              self_aim=args.made2_self_aim or "")
+                              self_aim=args.made2_self_aim or "", q_head=args.q_weight > 0, v_head=args.v_weight > 0)
         if args.made2_self_aim:                                      # the own aim head regresses the standardised target
             if args.geom_aux_weight > 0:
                 agent.set_aim_stats(float(aux_mean[0]), float(aux_std[0]))
@@ -906,7 +961,7 @@ def main():
         agent.fact_terms = tuple(args.fact_terms)
         agent.wta_fallback = not args.no_wta_fallback
         if args.init_from:
-            loaded = agent.load_encoder(torch.load(args.init_from)["gnn"])
+            loaded = agent.load_encoder(torch.load(args.init_from)["gnn"], include_heads=args.init_full)
             print(f"  encoder initialised from {args.init_from}: {len(loaded)} tensors "
                   f"({sum(k.startswith('aux_head') for k in loaded)} of them the aux head)", flush=True)
         if modular:
@@ -923,7 +978,7 @@ def main():
 
         def v0_select(module: PairGNNPolicy) -> float:
             saved = (module.infer, module.refine_deg, module.refine_speed_abs)
-            module.infer, module.refine_deg, module.refine_speed_abs = "all_pairs", ANG31, ABS7
+            module.infer, module.refine_deg, module.refine_speed_abs = args.select_infer, ANG31, ABS7
             try:
                 return top1_serial(module, v0)
             finally:
@@ -936,7 +991,8 @@ def main():
                    sims=sims, made2_weight=args.made2_weight, sims_batch=args.sims_batch,
                    aux=aux, aux_weight=args.geom_aux_weight, aux_only=args.aux_only,
                    train_plateau=args.train_plateau, train_plateau_tol=args.train_plateau_tol, made_only=args.made_only,
-                   ckpt_path=ckpt_path, ckpt_every=args.ckpt_every, select_fn=v0_select, select_every=args.v0_every)
+                   ckpt_path=ckpt_path, ckpt_every=args.ckpt_every, select_fn=v0_select, select_every=args.v0_every,
+                   q_data=q_data, q_weight=args.q_weight, v_weight=args.v_weight)
     if fit["stop_reason"]:
         print(f"  stopped: {fit['stop_reason']}", flush=True)
     if args.save_last and isinstance(agent, PairGNNPolicy):
