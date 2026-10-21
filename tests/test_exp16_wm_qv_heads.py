@@ -91,3 +91,14 @@ def test_mixed_label_files_fill_v_target_and_game_state_flags(tmp_path):
     assert np.isnan(d["v_target"][:2]).all() and d["v_target"][2] == 1.0 and d["is_game_state"].tolist() == [True, True, True, False]
     q = load_q_targets(paths)
     assert q["row"].tolist() == [3] and q["pair"].tolist() == [4]                # offset past the ordinary file
+
+
+def test_build_split_keeps_the_expert_iteration_columns():
+    from exp16_wm.bc import build_split
+    n = 20
+    data = {"obs": np.zeros((n, 23), np.float32), "action": np.zeros((n, 2), np.float32), "good_actions": np.zeros((n, 1, 2), np.float32),
+            "n_good": np.ones(n, np.int32), "pocketed": np.zeros(n, np.int32), "shot": np.zeros(n, np.int32), "game": np.arange(n) // 2,
+            "is_game_state": np.arange(n) % 2 == 0, "v_target": np.arange(n, dtype=np.float32)}
+    d, tr, va = build_split(data, 0.2, 0, 1.0, "none")
+    assert "is_game_state" in d and "v_target" in d and d["is_game_state"].sum() == 10
+

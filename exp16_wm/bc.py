@@ -45,7 +45,8 @@ LOSSES = ("teacher", "nearest_good")
 
 # optional per-state arrays carried through load/split when every shard has them
 EXTRA_KEYS = ["good_pairs", "good_made", "good_scratch", "pair_n", "pair_made", "pair_any", "pair_scratch",
-              "aux_scan_center", "aux_scan_valid", "v_target"]       # v_target: expert iteration V head (exp16_wm.search_data)                 # the last two: simulator aim targets (--geom-aux-set scan), not in label files
+              "aux_scan_center", "aux_scan_valid", "v_target", "is_game_state"]   # expert iteration (exp16_wm.search_data): V target,
+              # real game state vs search-tree state — both must survive build_split (is_game_state once didn't: epochs walked 300k tree states)                 # the last two: simulator aim targets (--geom-aux-set scan), not in label files
 FACT_KEYS = ("good_made", "good_scratch", "pair_n", "pair_made", "pair_scratch")
 
 
