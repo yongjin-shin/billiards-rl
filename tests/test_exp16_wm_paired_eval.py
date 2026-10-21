@@ -117,3 +117,9 @@ def test_runout_counts_games_without_a_miss():
     with pytest.raises(ValueError):
         runout_flags(np.array([3]), np.ones(2, bool))
 
+
+def test_runout_treats_a_scratch_as_a_miss_when_flags_exist():
+    shots = np.array([3]); succ = np.ones(3, bool); balls = np.ones(3, int)
+    assert summarize({"shots": shots, "succ": succ, "balls": balls})["runout"] == 1.0              # old files: no flags
+    assert summarize({"shots": shots, "succ": succ, "balls": balls, "scratch": np.array([0, 1, 0], bool)})["runout"] == 0.0
+

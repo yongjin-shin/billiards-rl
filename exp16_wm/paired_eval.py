@@ -47,7 +47,7 @@ def play_paired(policy: Policy, eval_seeds: tuple[int, ...] = EVAL_SEEDS, games_
     """Play games_per_seed games for every eval seed → shots (G,) per game, succ / balls (S,) per shot, game (S,) the shot's game."""
     from simulator import BilliardsEnv
     from exp16_wm.teacher_data import CLEAR_ENV
-    shots, succ, balls, game = [], [], [], []
+    shots, succ, balls, game, scr = [], [], [], [], []
     for eval_seed in eval_seeds:
         env = BilliardsEnv(**(CLEAR_ENV if env_kw is None else env_kw))
         env.reset(seed=eval_seed)
@@ -58,11 +58,11 @@ def play_paired(policy: Policy, eval_seeds: tuple[int, ...] = EVAL_SEEDS, games_
                 obs, _, term, trunc, info = env.step(policy.act(obs, deterministic=True))
                 done, k = term or trunc, k + 1
                 n = int(info["pocketed_this_step"])
-                succ.append(n > 0); balls.append(n); game.append(len(shots))
+                succ.append(n > 0); balls.append(n); game.append(len(shots)); scr.append(bool(info.get("scratch", False)))
             shots.append(k)
         env.close()
     return {"shots": np.array(shots, np.int64), "succ": np.array(succ, bool), "balls": np.array(balls, np.int64),
-            "game": np.array(game, np.int64)}
+            "game": np.array(game, np.int64), "scratch": np.array(scr, bool)}
 
 
 def runout_flags(shots: np.ndarray, succ: np.ndarray) -> np.ndarray:
@@ -76,7 +76,9 @@ def runout_flags(shots: np.ndarray, succ: np.ndarray) -> np.ndarray:
 def summarize(res: dict[str, np.ndarray]) -> dict[str, float]:
     """games, shots/game with its SE, shot success, balls per successful shot (NaN without a successful shot), run-out rate."""
     s, ok, b = np.asarray(res["shots"], float), np.asarray(res["succ"], bool), np.asarray(res["balls"], float)
-    ro = runout_flags(res["shots"], ok)
+    # a scratch is a foul that ends the turn (G1 rules), so a scratch shot is a miss for the run-out even if a ball went in;
+    # files written before 2026-10-22 have no scratch flags (their run-out counted such shots as made)
+    ro = runout_flags(res["shots"], ok & ~np.asarray(res["scratch"], bool) if "scratch" in res else ok)
     return {"games": int(len(s)), "shots": float(s.mean()), "shots_se": float(s.std() / np.sqrt(len(s))),
             "runout": float(ro.mean()), "runout_se": float(ro.std() / np.sqrt(len(ro))),
             "shot_success": float(ok.mean()) if len(ok) else float("nan"),

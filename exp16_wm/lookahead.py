@@ -29,7 +29,7 @@ class LookaheadPolicy:
     """act(raw obs) → env action. scorer: MadeEnsemble (one member = a single model); sim(raw obs, env action) →
     (next raw obs, pocketed something, scratch, rack cleared)."""
 
-    def __init__(self, scorer, sim, k: int = 10, mode: str = "model", widths: tuple[int, ...] | None = None):
+    def __init__(self, scorer, sim, k: int = 10, mode: str = "model", widths: tuple[int, ...] | None = None, recorder=None):
         """widths = shots simulated per level: (10,) looks one shot ahead (= k), (10, 5) two shots ahead, …"""
         if mode not in ("model", "sim"):
             raise ValueError(f"mode must be 'model' or 'sim', got {mode!r}")
@@ -37,16 +37,28 @@ class LookaheadPolicy:
         if not self.widths or min(self.widths) < 1:
             raise ValueError(f"widths must be positive, got {self.widths}")
         self.scorer, self.sim, self.k, self.mode = scorer, sim, self.widths[0], mode
+        # recorder(kind, **data) sees every simulation ("sim": raw, action, made_mask, scratch) and the top level's scored shots
+        # ("top": raw, actions, pairs, scores) — the data for expert iteration (exp16_wm.search_data)
+        self.recorder = recorder
         self.sc, self.bi = scorer.act_scale, scorer.act_bias
 
     @torch.no_grad()
-    def _candidates(self, raw: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-        """(probabilities (M,), env actions (M, 2)) of every live candidate."""
+    def _candidates(self, raw: np.ndarray, with_pairs: bool = False):
+        """(probabilities (M,), env actions (M, 2)) of every live candidate (+ their pair indices (M,) if with_pairs)."""
         from exp16_wm.obs_transform import relative_obs
         z, cand = self.scorer.scores(torch.as_tensor(relative_obs(raw[None])))
+        C = z.shape[-1]
         z, cand = z[0].reshape(-1), cand[0].reshape(-1, 2)
         live = torch.isfinite(z)
-        return torch.sigmoid(z[live]).numpy(), (cand[live] * self.sc + self.bi).numpy()
+        out = (torch.sigmoid(z[live]).numpy(), (cand[live] * self.sc + self.bi).numpy())
+        return out + ((torch.nonzero(live)[:, 0] // C).numpy(),) if with_pairs else out
+
+    def _simulate(self, raw: np.ndarray, action: np.ndarray):
+        r = self.sim(raw, action)
+        nxt, made, scratch, cleared = r[:4]
+        if self.recorder is not None:
+            self.recorder("sim", raw=raw, action=np.asarray(action, np.float32), made_mask=r[4] if len(r) > 4 else None, scratch=scratch)
+        return nxt, made, scratch, cleared
 
     def next_chance(self, raw_next: np.ndarray) -> float:
         p, _ = self._candidates(raw_next)
@@ -55,14 +67,18 @@ class LookaheadPolicy:
     def _best(self, raw: np.ndarray, widths: tuple[int, ...]) -> tuple[float, np.ndarray | None]:
         """(value, best env action) of a position: with no widths left, the best shot's own chance (the position's ease);
         otherwise over its top widths[0] shots, shot chance × value of the position after it (one level deeper)."""
-        p, acts = self._candidates(raw)
+        top_level = widths == self.widths
+        if top_level and self.recorder is not None:
+            p, acts, pairs = self._candidates(raw, with_pairs=True)
+        else:
+            p, acts = self._candidates(raw)
         if len(p) == 0:
             return 0.0, None
         if not widths:
             i = int(p.argmax()); return float(p[i]), acts[i]
-        best, best_a = -1.0, None
+        best, best_a, rec = -1.0, None, []
         for i in np.argsort(-p)[:widths[0]]:
-            nxt, made, scratch, cleared = self.sim(raw, acts[i])
+            nxt, made, scratch, cleared = self._simulate(raw, acts[i])
             ok = made and not scratch
             now = float(ok) if self.mode == "sim" else float(p[i])      # sim: the simulated outcome verifies the shot
             if now == 0.0:
@@ -71,8 +87,13 @@ class LookaheadPolicy:
                 score = now
             else:                                                     # the same depth for every shot (a shallower value for some
                 score = now * self._best(nxt, widths[1:])[0]          # shots would favour them: fewer probabilities multiplied)
+            if top_level and self.recorder is not None:
+                rec.append((acts[i], int(pairs[i]), score))
             if score > best:
                 best, best_a = score, acts[i]
+        if rec:
+            self.recorder("top", raw=raw, actions=np.stack([r[0] for r in rec]), pairs=np.array([r[1] for r in rec]),
+                          scores=np.array([r[2] for r in rec], np.float32))
         return best, best_a
 
     def act(self, raw_obs: np.ndarray, deterministic: bool = True) -> np.ndarray:
@@ -87,10 +108,17 @@ def make_sim(n_balls: int):
     from exp16_wm.teacher_data import clear_env_kw
     env = BilliardsEnv(**clear_env_kw(n_balls)); env.reset(seed=12345)
 
+    from exp16_wm.outcomes import pocket_index_map, slots_from_system
+    pm = pocket_index_map(env)
+
     def sim(raw: np.ndarray, action: np.ndarray):
         restore_state(env, raw)
         nxt, _, term, _, info = env.step(np.asarray(action, np.float32))
-        return np.asarray(nxt, np.float32), int(info["pocketed_this_step"]) > 0, bool(info.get("scratch", False)), bool(term and all(env._pocketed.values()))
+        # which (ball, pocket) went in — made head data. After a scratch the env re-places the cue ball and the events are gone, so
+        # the mask can be empty; the made-head target is "made and no scratch", which is 0 for every pair then anyway
+        made_mask, scr = slots_from_system(env, env.system, pm)
+        return (np.asarray(nxt, np.float32), int(info["pocketed_this_step"]) > 0, bool(info.get("scratch", False)),
+                bool(term and all(env._pocketed.values())), made_mask)
     return sim
 
 

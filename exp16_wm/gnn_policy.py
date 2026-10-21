@@ -96,7 +96,7 @@ class PairGNNPolicy(nn.Module):
                  made2_head: bool = False, geom_angle: bool = False, made2_geom: bool = False,
                  enc_layers: int = 2, speed_loss: str = "mse", speed_bins: int = 0, uncertainty_weights: bool = False, aux_dim: int = 0,
                  aim_encoder: "PairGNNPolicy | list[PairGNNPolicy] | None" = None, fourier: int = 0, made2_no_proposal: bool = False,
-                 self_aim: str = ""):
+                 self_aim: str = "", q_head: bool = False, v_head: bool = False):
         super().__init__()
         if fourier < 0:
             raise ValueError(f"fourier must be ≥ 0, got {fourier}")
@@ -166,6 +166,15 @@ class PairGNNPolicy(nn.Module):
         if made2_head:
             # [e_ij, a, (a − a_ij)·scale, (aim term)] → will action a pocket pair ij; made2_no_proposal drops (a − a_ij)
             self.head_made2 = _mlp(H + 2 + (0 if made2_no_proposal else 2) + int(made2_geom), H, 1)
+        # expert iteration (roadmap "탐색 결과로 학습"): Q = P(keep pocketing | shot) from search scores, same input as made2;
+        # V = P(clear the rack from here) from real game outcomes, read from the pooled pair embeddings
+        self.q_head, self.v_head = q_head, v_head
+        if q_head:
+            if not made2_head:
+                raise ValueError("q_head needs made2_head (it shares its candidate features)")
+            self.head_q = _mlp(H + 2 + (0 if made2_no_proposal else 2) + int(made2_geom), H, 1)
+        if v_head:
+            self.head_v = _mlp(2 * H, H, 1)
         self.made2_no_proposal = made2_no_proposal
         self.aux_dim = aux_dim                          # auxiliary geometry targets predicted from each pair embedding (training only)
         if aux_dim:
@@ -359,6 +368,27 @@ class PairGNNPolicy(nn.Module):
         v = o["valid"]
         return F.binary_cross_entropy_with_logits(z[v], target[v])
 
+    def q_logits(self, o: dict[str, torch.Tensor], a: torch.Tensor, pair: torch.Tensor) -> torch.Tensor:
+        """(B,) Q logits of actions a (B, 2) in [-1, 1], each for its own pair index pair (B,)."""
+        r = torch.arange(len(pair))
+        return self.head_q(self._made2_features(o["e"][r, pair], a, o["means"][r, pair],
+                                                o["aim"][r, pair] if "aim" in o else None)).squeeze(-1)
+
+    def v_logit(self, o: dict[str, torch.Tensor]) -> torch.Tensor:
+        """(B,) logit of P(clear the rack from this position): mean and max of the live pairs' embeddings."""
+        e, v = o["e"], o["valid"][..., None].float()
+        mean = (e * v).sum(1) / v.sum(1).clamp(min=1)
+        mx = e.masked_fill(v == 0, -1e9).max(1).values.masked_fill(v.sum(1) == 0, 0.0)
+        return self.head_v(torch.cat([mean, mx], dim=-1)).squeeze(-1)
+
+    def q_loss(self, rel: torch.Tensor, a: torch.Tensor, pair: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        """BCE with soft targets: the search's score of each (state, shot) in [0, 1]."""
+        return F.binary_cross_entropy_with_logits(self.q_logits(self.forward_full(rel), a, pair), target)
+
+    def v_loss(self, rel: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        """BCE: did the rest of the game from this state go without a miss (0/1)."""
+        return F.binary_cross_entropy_with_logits(self.v_logit(self.forward_full(rel)), target)
+
     def _all_pairs_action(self, o: dict[str, torch.Tensor]) -> torch.Tensor:
         """
         infer = all_pairs(_prior): for every live pair, the refine grid around (its aim, its proposal's speed); the action is the
@@ -371,13 +401,14 @@ class PairGNNPolicy(nn.Module):
         d = o["aim"] - self.act_bias[0]
         aim_u = (torch.atan2(torch.sin(d), torch.cos(d)) / self.act_scale[0]).clamp(-1.0, 1.0)              # (B, 18)
         prior = F.log_softmax(o["logits"], dim=1) if self.infer == "all_pairs_prior" else None
+        head = self.head_q if self.infer == "all_pairs_q" else self.head_made2             # all_pairs_q: choose by Q, not P(made)
         best, best_a = torch.full((B,), -float("inf")), torch.zeros(B, 2)
         for j in range(o["e"].shape[1]):
             cand = self._unit_offsets(torch.stack([aim_u[:, j], o["means"][:, j, 1]], dim=-1))              # (B, C, 2)
             C = cand.shape[1]
-            z = self.head_made2(self._made2_features(o["e"][:, j][:, None].expand(-1, C, -1), cand,
-                                                     o["means"][:, j][:, None].expand(-1, C, -1),
-                                                     o["aim"][:, j][:, None].expand(-1, C))).squeeze(-1)       # (B, C)
+            z = head(self._made2_features(o["e"][:, j][:, None].expand(-1, C, -1), cand,
+                                          o["means"][:, j][:, None].expand(-1, C, -1),
+                                          o["aim"][:, j][:, None].expand(-1, C))).squeeze(-1)       # (B, C)
             sc = z if prior is None else prior[:, j][:, None] + F.logsigmoid(z)
             sc = sc.masked_fill(~o["valid"][:, j][:, None], -float("inf"))
             top, arg = sc.max(dim=1)
@@ -442,7 +473,7 @@ class PairGNNPolicy(nn.Module):
           verify_refine : both
         """
         o = self.forward_full(rel)
-        if self.infer in ("all_pairs", "all_pairs_prior"):
+        if self.infer in ("all_pairs", "all_pairs_prior", "all_pairs_q"):
             return self._all_pairs_action(o)
         score = o["logits"]
         if self.has_scratch and self.scratch_lambda > 0:
