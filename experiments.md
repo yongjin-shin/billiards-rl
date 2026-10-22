@@ -7106,3 +7106,4 @@ job `ei-iter-1`: Spot 회수 5번(자동 재시작), 학습 버그(is_game_state
 | L2-flat | M2 ± 3%p | 한 바퀴로 포화 |
 | Q-help | QD(made 상위 10 → Q)가 QD(made만)보다 +3%p 넘게 | Q가 다음 자리까지 보는 선택을 배웠다 |
 | Q-none | ± 3%p | Q가 도움이 안 됨 |
+**변경 (2026-10-22 20:35, 사용자 결정)**: QD(stop-gradient) 대신 **QS — Q·V 전용 encoder**(`--qv-encoder`: 같은 GNN 구조·별도 weight, made encoder에서 복사해 시작; Q·V loss는 전용 encoder와 Q·V head만 학습, 조준각은 읽기만)로 바꿔 다시 띄운다. 이유: stop-gradient면 Q·V가 made용 표현만 써야 해서 "다음 자리" 특징을 못 배울 수 있다. 탐색 2바퀴 데이터(60 shard)는 그대로, M2는 checkpoint에서 이어서. 판단표의 QD → QS.
