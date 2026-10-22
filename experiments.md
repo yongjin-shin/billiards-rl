@@ -7091,3 +7091,18 @@ job `ei-iter-1`: Spot 회수 5번(자동 재시작), 학습 버그(is_game_state
 **왜 Q 팔이 무너졌나 (추정)**: Q·V loss 가중치 1이 공유 encoder를 끌고 가서, 가중치 0.01인 조준각 head가 흘러갔다(학습 중 조준각 loss가 M 팔의 2~3배) → 후보 위치를 잃음 — EE0(조준각 정답 없음)과 같은 실패. 또 Q는 탐색 상위 10개 후보만 보고 배워서, 전체 후보에서 고르면 본 적 없는 샷을 과대평가한다(made 상위 10개 안에서 고르는 `all_pairs_qk` 추가).
 **읽을 수 있는 것**: 샷당 scratch가 4~5%로 커서, 6샷이면 약 4판 중 1판이 scratch로 끊긴다 — 다음 개선 대상. 탐색 데이터로 made만 늘려도 run-out +6%p.
 **다음 (EI2)**: Q·V head는 encoder로 gradient를 보내지 않게(stop-gradient) — made·조준각 보존; Q 정답에 "쳐 봤는데 안 들어간 샷 = 0"을 추가; M 팔 방식으로 한 바퀴 더(새 모델로 탐색 → 데이터).
+
+### EI2: 탐색 결과로 학습 두 바퀴째 — made만(M2) vs stop-gradient Q·V(QD) (서버, 2026-10-22 계획, 결과 보기 전)
+
+**왜**: EI1에서 탐색 데이터로 made만 늘려 run-out +6%p(39.6 → 45.6%), Q·V를 함께 학습하면 공유 encoder가 끌려 무너졌다.
+**방법** (job `ei-iter-2`): EI1 M i3(run-out 47.3%) + sim 3수 탐색으로 1,500판(eval seed 2000~2059). 학습은 EI1 M i1~i4에서 이어서, 데이터 = G6 + 탐색 1·2바퀴, lr 3e-4, 500 epoch.
+- **M2**(4 run): made만, V1 선택은 made로.
+- **QD**(4 run): made + Q + V, **Q·V는 encoder로 gradient를 보내지 않음**(`--qv-detach`), Q 정답에 "자기 pair가 안 들어간 후보 = 0"을 탐색 점수만큼 추가(`--q-neg 1`), V1 선택은 made 상위 10개 안에서 Q로(`all_pairs_qk`).
+- 평가: 6공 2,016판, scratch = 실패. M2(made), QD(made 상위 10 → Q), QD(made만, made 보존 확인).
+
+| # | 관측 (4 run 평균 run-out, EI1 M 45.6%) | 해석 |
+|---|---|---|
+| L2-gain | M2가 +3%p 넘게 | 탐색 루프가 바퀴마다 좋아진다 |
+| L2-flat | M2 ± 3%p | 한 바퀴로 포화 |
+| Q-help | QD(made 상위 10 → Q)가 QD(made만)보다 +3%p 넘게 | Q가 다음 자리까지 보는 선택을 배웠다 |
+| Q-none | ± 3%p | Q가 도움이 안 됨 |
