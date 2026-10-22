@@ -137,3 +137,19 @@ def test_q_negatives_are_missed_candidates_of_known_pairs():
     neg = q_negatives(sims, 18, 10, 0)
     assert neg["row"].tolist() == [1, 2, 3] and (neg["score"] == 0).all()     # 0 made its pair; 3 scratched; 4 unknown pair
     assert len(q_negatives(sims, 18, 2, 0)["row"]) == 2
+
+
+def test_separate_qv_encoder_trains_only_itself_and_the_qv_heads():
+    m, rel = _model(qv_encoder=True), torch.as_tensor(_rel(4))
+    m.copy_encoder_to_qv()
+    for n, p in m.named_parameters():
+        if n.startswith("qv_pair."):
+            torch.testing.assert_close(p, dict(m.named_parameters())[n[3:]])        # starts as a copy of the made encoder
+    (m.q_loss(rel, torch.zeros(4, 2), torch.tensor([0, 1, 2, 3]), torch.rand(4)) + m.v_loss(rel, torch.ones(4))).backward()
+    g = lambda pre: sum(float(p.grad.abs().sum()) for n, p in m.named_parameters() if n.startswith(pre) and p.grad is not None)
+    assert g("qv_pair.") > 0 and g("head_q") > 0 and g("head_v") > 0
+    assert g("pair.") == 0 and g("ball.") == 0 and g("head_made2") == 0                  # made encoder and made head untouched
+    m.eval(); m.refine_deg, m.refine_speed, m.refine_speed_abs = (-0.1, 0.0, 0.1), (1.0,), (1.0, 2.0)
+    m.infer = "all_pairs_qk"
+    with torch.no_grad():
+        assert m.predict_unit(rel).shape == (4, 2)

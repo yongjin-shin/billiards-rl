@@ -761,6 +761,7 @@ def parse_args():
                    help="--val-v0: the inference whose top-1 success chooses the model (all_pairs_q = by the Q head)")
     p.add_argument("--q-weight", type=float, default=0.0, help="> 0: Q head trained on the search scores of the label files (search_data)")
     p.add_argument("--q-neg", type=float, default=0.0, help="> 0: add zero Q targets from missed simulated candidates, up to this × the search scores")
+    p.add_argument("--qv-encoder", action="store_true", help="Q / V heads get their own encoder (same structure, own weights)")
     p.add_argument("--qv-detach", action="store_true", help="Q / V heads do not send gradients into the shared encoder")
     p.add_argument("--v-weight", type=float, default=0.0, help="> 0: V head trained on the label files' v_target (real game outcome)")
     p.add_argument("--ckpt-every", type=int, default=0,
@@ -934,7 +935,7 @@ def main():
             ("" if args.gnn_hidden == 128 or args.model != "gnn" else f"_H{args.gnn_hidden}") + \
             ("" if args.gnn_layers == 2 or args.model != "gnn" else f"_L{args.gnn_layers}") + \
             ("_sl1" if args.speed_loss == "l1" else "") + (f"_sb{args.speed_bins}" if args.speed_bins else "") + ("_kw" if args.uncertainty_weights else "") + (f"_ga{args.geom_aux_weight:g}" if args.geom_aux_weight > 0 else "") + ("_aim" if args.geom_aux_weight > 0 and args.geom_aux_set == "aim" else "") + ("_scan" if args.geom_aux_weight > 0 and args.geom_aux_set == "scan" else "") + ("_auxonly" if args.aux_only else "") + ("_madeonly" if args.made_only else "") + ("_noprop" if args.made2_no_proposal else "") + (f"_i{args.init_seed}" if args.init_seed is not None else "") + ("_init" if args.init_from else "") + (f"_ff{args.input_fourier}" if args.input_fourier else "") + \
-            ("_geoang" if args.geom_angle else "") + extra_tag + (f"_m2w{args.made2_weight:g}" if args.made2_head else "") + ("geo" if args.made2_geom else "") + ("L" if args.made2_aim_from else "") + (f"S{args.made2_self_aim[0]}" if args.made2_self_aim else "") + (f"_q{args.q_weight:g}" if args.q_weight > 0 else "") + ("d" if args.qv_detach else "") + (f"n{args.q_neg:g}" if args.q_neg > 0 else "") + (f"_v{args.v_weight:g}" if args.v_weight > 0 else "") + ("_wrap" if args.angle_wrap else "_nowrap")
+            ("_geoang" if args.geom_angle else "") + extra_tag + (f"_m2w{args.made2_weight:g}" if args.made2_head else "") + ("geo" if args.made2_geom else "") + ("L" if args.made2_aim_from else "") + (f"S{args.made2_self_aim[0]}" if args.made2_self_aim else "") + (f"_q{args.q_weight:g}" if args.q_weight > 0 else "") + ("d" if args.qv_detach else "") + ("e" if args.qv_encoder else "") + (f"n{args.q_neg:g}" if args.q_neg > 0 else "") + (f"_v{args.v_weight:g}" if args.v_weight > 0 else "") + ("_wrap" if args.angle_wrap else "_nowrap")
     name = (f"exp16_bc_{teacher}_{args.loss}{h_tag}_a{args.angle_scale_deg:g}_v{args.speed_scale:g}"
             f"_s{args.seed}_{time.strftime('%Y-%m-%d@%H%M')}")
     ckpt_path = None
@@ -964,7 +965,8 @@ def main():
                               enc_layers=args.gnn_layers, speed_loss=args.speed_loss, speed_bins=args.speed_bins,
                               uncertainty_weights=args.uncertainty_weights, aux_dim=1 if args.made2_self_aim else ((1 if args.geom_aux_set in ("aim", "scan") else N_AUX) if args.geom_aux_weight > 0 else 0),
                               aim_encoder=aim_enc, fourier=args.input_fourier, made2_no_proposal=args.made2_no_proposal,
-                              self_aim=args.made2_self_aim or "", q_head=args.q_weight > 0, v_head=args.v_weight > 0)
+                              self_aim=args.made2_self_aim or "", q_head=args.q_weight > 0, v_head=args.v_weight > 0,
+                              qv_encoder=args.qv_encoder)
         agent.qv_detach = args.qv_detach
         if args.made2_self_aim:                                      # the own aim head regresses the standardised target
             if args.geom_aux_weight > 0:
@@ -983,6 +985,8 @@ def main():
         agent.wta_fallback = not args.no_wta_fallback
         if args.init_from:
             loaded = agent.load_encoder(torch.load(args.init_from)["gnn"], include_heads=args.init_full)
+            if args.qv_encoder:
+                agent.copy_encoder_to_qv()
             print(f"  encoder initialised from {args.init_from}: {len(loaded)} tensors "
                   f"({sum(k.startswith('aux_head') for k in loaded)} of them the aux head)", flush=True)
         if modular:

@@ -96,7 +96,7 @@ class PairGNNPolicy(nn.Module):
                  made2_head: bool = False, geom_angle: bool = False, made2_geom: bool = False,
                  enc_layers: int = 2, speed_loss: str = "mse", speed_bins: int = 0, uncertainty_weights: bool = False, aux_dim: int = 0,
                  aim_encoder: "PairGNNPolicy | list[PairGNNPolicy] | None" = None, fourier: int = 0, made2_no_proposal: bool = False,
-                 self_aim: str = "", q_head: bool = False, v_head: bool = False):
+                 self_aim: str = "", q_head: bool = False, v_head: bool = False, qv_encoder: bool = False):
         super().__init__()
         if fourier < 0:
             raise ValueError(f"fourier must be ≥ 0, got {fourier}")
@@ -150,6 +150,13 @@ class PairGNNPolicy(nn.Module):
         self.bb   = _mlp(ball_dim + d2 + 1 + 1, H, H, enc_layers)
         self.ball = _mlp(ball_dim + H, H, H, enc_layers)
         self.pair = _mlp(H + d2 + d2 + 1 + 1, H, H, enc_layers)
+        # EI2: a separate encoder (same structure, own weights) for the Q / V heads — they learn position features of their own
+        # without moving the made head's encoder or the aim (the shared one dragged the aim away in EI1)
+        self.qv_encoder = qv_encoder
+        if qv_encoder:
+            self.qv_bb = _mlp(ball_dim + d2 + 1 + 1, H, H, enc_layers)
+            self.qv_ball = _mlp(ball_dim + H, H, H, enc_layers)
+            self.qv_pair = _mlp(H + d2 + d2 + 1 + 1, H, H, enc_layers)
         self.geom_angle = geom_angle                     # angle comes from a pair embedding without the neighbour message
         self.head_a = nn.Linear(H, 2)
         if geom_angle:
@@ -243,8 +250,15 @@ class PairGNNPolicy(nn.Module):
         _, e, valid, _ = self._encode_full(rel)
         return e, valid
 
-    def _encode_full(self, rel: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None]:
-        """(h, e, valid, e_geo): e_geo = pair embedding with the ball-ball message zeroed (None unless geom_angle)."""
+    def copy_encoder_to_qv(self) -> None:
+        """Start the Q / V encoder from the made encoder's weights."""
+        for a, b in ((self.qv_bb, self.bb), (self.qv_ball, self.ball), (self.qv_pair, self.pair)):
+            a.load_state_dict(b.state_dict())
+
+    def _encode_full(self, rel: torch.Tensor, qv: bool = False) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None]:
+        """(h, e, valid, e_geo): e_geo = pair embedding with the ball-ball message zeroed (None unless geom_angle).
+        qv: the Q / V encoder's modules instead of the made head's."""
+        bb, ball, pair = (self.qv_bb, self.qv_ball, self.qv_pair) if qv else (self.bb, self.ball, self.pair)
         B, NB = rel.shape[0], n_balls_of(rel)
         balls = rel[:, :3 * NB].reshape(B, NB, 3)
         pos, pocketed = balls[..., :2], balls[..., 2]
@@ -260,7 +274,7 @@ class PairGNNPolicy(nn.Module):
                            pocketed[:, None, :, None].expand(B, NB, NB, 1)], dim=-1)
         not_self = ~torch.eye(NB, dtype=torch.bool, device=rel.device)
         nb = (live[:, None, :] & not_self[None]).float()[..., None]
-        h = self.ball(torch.cat([ball_f, (self.bb(bb_in) * nb).sum(dim=2)], dim=-1))   # (B, 3, H)
+        h = ball(torch.cat([ball_f, (bb(bb_in) * nb).sum(dim=2)], dim=-1))   # (B, 3, H)
 
         pockets = rel[:, 3 * NB:].reshape(B, N_POCKETS, 2)
         pr = pockets[:, None, :, :] - pos[:, :, None, :]                   # (B, NB, 6, 2)
@@ -270,10 +284,10 @@ class PairGNNPolicy(nn.Module):
                                  self._ff(pockets)[:, None].expand(B, NB, N_POCKETS, 2 + 4 * self.fourier), self._ff(pr),
                                  pr.norm(dim=-1, keepdim=True),
                                  self.side.view(1, 1, N_POCKETS, 1).expand(B, NB, N_POCKETS, 1)], dim=-1)
-            return self.pair(pair_in).reshape(B, NB * N_POCKETS, H)
+            return pair(pair_in).reshape(B, NB * N_POCKETS, H)
 
         e = pair_embed(h)
-        e_geo = pair_embed(self.ball(torch.cat([ball_f, torch.zeros_like(h)], dim=-1))) if self.geom_angle else None
+        e_geo = pair_embed(ball(torch.cat([ball_f, torch.zeros_like(h)], dim=-1))) if self.geom_angle and not qv else None
         valid = live[:, :, None].expand(B, NB, N_POCKETS).reshape(B, NB * N_POCKETS)
         return h, e, valid, e_geo
 
@@ -291,6 +305,8 @@ class PairGNNPolicy(nn.Module):
             sp_unit = (bin_center_ms(idx, self.speed_bins) - self.act_bias[1]) / self.act_scale[1]
             means = torch.cat([means[..., :1], sp_unit[..., None]], dim=-1)       # the proposal's speed is the chosen bin's centre
         out = {"means": means, "valid": valid, "e": e}
+        if getattr(self, "qv_encoder", False):
+            out["e_qv"] = self._encode_full(rel, qv=True)[1]
         if self.speed_bins:
             out["speed_logits"] = sp_logits
         if self.made2_geom:
@@ -372,14 +388,18 @@ class PairGNNPolicy(nn.Module):
     def q_logits(self, o: dict[str, torch.Tensor], a: torch.Tensor, pair: torch.Tensor) -> torch.Tensor:
         """(B,) Q logits of actions a (B, 2) in [-1, 1], each for its own pair index pair (B,)."""
         r = torch.arange(len(pair))
-        e, aim = o["e"][r, pair], (o["aim"][r, pair] if "aim" in o else None)
-        if self.qv_detach:
-            e, aim = e.detach(), (None if aim is None else aim.detach())
+        sep = "e_qv" in o
+        e, aim = (o["e_qv"] if sep else o["e"])[r, pair], (o["aim"][r, pair] if "aim" in o else None)
+        if self.qv_detach or sep:                                   # a separate encoder: the aim is only read, never moved by Q
+            aim = None if aim is None else aim.detach()
+        if self.qv_detach and not sep:
+            e = e.detach()
         return self.head_q(self._made2_features(e, a, o["means"][r, pair], aim)).squeeze(-1)
 
     def v_logit(self, o: dict[str, torch.Tensor]) -> torch.Tensor:
         """(B,) logit of P(clear the rack from this position): mean and max of the live pairs' embeddings."""
-        e, v = (o["e"].detach() if self.qv_detach else o["e"]), o["valid"][..., None].float()
+        e = o["e_qv"] if "e_qv" in o else (o["e"].detach() if self.qv_detach else o["e"])
+        v = o["valid"][..., None].float()
         mean = (e * v).sum(1) / v.sum(1).clamp(min=1)
         mx = e.masked_fill(v == 0, -1e9).max(1).values.masked_fill(v.sum(1) == 0, 0.0)
         return self.head_v(torch.cat([mean, mx], dim=-1)).squeeze(-1)
@@ -435,7 +455,9 @@ class PairGNNPolicy(nn.Module):
             f = self._made2_features(o["e"][:, j][:, None].expand(-1, C, -1), cand, o["means"][:, j][:, None].expand(-1, C, -1),
                                      o["aim"][:, j][:, None].expand(-1, C))
             zm.append(self.head_made2(f).squeeze(-1).masked_fill(~o["valid"][:, j][:, None], -float("inf")))
-            zq.append(self.head_q(f).squeeze(-1)); cands.append(cand)
+            fq = f if "e_qv" not in o else self._made2_features(o["e_qv"][:, j][:, None].expand(-1, C, -1), cand,
+                                                                 o["means"][:, j][:, None].expand(-1, C, -1), o["aim"][:, j][:, None].expand(-1, C))
+            zq.append(self.head_q(fq).squeeze(-1)); cands.append(cand)
         zm, zq, cands = torch.cat(zm, 1), torch.cat(zq, 1), torch.cat(cands, 1)              # (B, P·C)
         top = zm.topk(min(k, zm.shape[1]), dim=1).indices
         q_top = zq.gather(1, top).masked_fill(~torch.isfinite(zm.gather(1, top)), -float("inf"))
