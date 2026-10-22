@@ -136,7 +136,7 @@ def load_sims(sims_paths: list[str], label_paths: list[str]) -> dict[str, np.nda
     by_name: dict[str, list[str]] = {}
     for p in sorted(sims_paths):
         by_name.setdefault(os.path.basename(p), []).append(p)
-    rows, act, made, scr, offset = [], [], [], [], 0
+    rows, act, made, scr, pair, offset = [], [], [], [], [], 0
     for lp in sorted(label_paths):
         z_obs = np.load(lp)["obs"]
         sps = by_name.get(os.path.basename(lp))
@@ -151,9 +151,10 @@ def load_sims(sims_paths: list[str], label_paths: list[str]) -> dict[str, np.nda
             rows.append(z["sim_state"].astype(np.int64) + offset)
             act.append(to_unit(z["sim_action"]).astype(np.float32))
             made.append(z["sim_made"]); scr.append(z["sim_scratch_replay"])
+            pair.append(z["sim_pair"].astype(np.int64) if "sim_pair" in z.files else np.full(len(z["sim_state"]), -1, np.int64))
         offset += len(z_obs)
     return {"row": np.concatenate(rows), "a_unit": np.concatenate(act),
-            "made": np.concatenate(made), "scratch": np.concatenate(scr)}
+            "made": np.concatenate(made), "scratch": np.concatenate(scr), "pair": np.concatenate(pair)}   # pair: the candidate's pair, −1 unknown
 
 
 def load_q_targets(label_paths: list[str]) -> dict[str, np.ndarray]:
@@ -170,6 +171,18 @@ def load_q_targets(label_paths: list[str]) -> dict[str, np.ndarray]:
     if not rows:
         raise ValueError("no label file has Q targets (exp16_wm.search_data)")
     return {"row": np.concatenate(rows), "a_unit": np.concatenate(act), "pair": np.concatenate(pair), "score": np.concatenate(score)}
+
+
+def q_negatives(sims: dict[str, np.ndarray], n_slots: int, max_n: int, seed: int) -> dict[str, np.ndarray]:
+    """Q targets of 0 from simulated candidates whose own pair did not go in cleanly (a missed shot keeps nothing going): exact
+    zeros for the poor candidates the search never scores, so Q does not over-rate them. At most max_n, sampled."""
+    from exp16_wm.sim_identity import from_bitmask
+    known = np.where(sims["pair"] >= 0)[0]
+    made = from_bitmask(sims["made"][known], n_slots)[np.arange(len(known)), sims["pair"][known]] & ~sims["scratch"][known]
+    neg = known[~made]
+    if len(neg) > max_n:
+        neg = np.sort(np.random.default_rng(seed).choice(neg, size=max_n, replace=False))
+    return {"row": sims["row"][neg], "a_unit": sims["a_unit"][neg], "pair": sims["pair"][neg], "score": np.zeros(len(neg), np.float32)}
 
 
 def split_rows(game: np.ndarray, val_frac: float, seed: int) -> np.ndarray:
@@ -747,6 +760,8 @@ def parse_args():
     p.add_argument("--select-infer", type=str, default="all_pairs", choices=["all_pairs", "all_pairs_q", "all_pairs_qk"],
                    help="--val-v0: the inference whose top-1 success chooses the model (all_pairs_q = by the Q head)")
     p.add_argument("--q-weight", type=float, default=0.0, help="> 0: Q head trained on the search scores of the label files (search_data)")
+    p.add_argument("--q-neg", type=float, default=0.0, help="> 0: add zero Q targets from missed simulated candidates, up to this × the search scores")
+    p.add_argument("--qv-detach", action="store_true", help="Q / V heads do not send gradients into the shared encoder")
     p.add_argument("--v-weight", type=float, default=0.0, help="> 0: V head trained on the label files' v_target (real game outcome)")
     p.add_argument("--ckpt-every", type=int, default=0,
                    help="> 0: save the whole training state every this many epochs under <out-root>/_ckpt/ and resume from it if present "
@@ -865,6 +880,10 @@ def main():
     if args.q_weight > 0:
         q_data = load_q_targets(paths)
         q_data["row"] = split_rows(data["game"], args.val_frac, args.seed)[q_data["row"]]
+        if args.q_neg > 0:                                      # sims["row"] is already in split order
+            neg = q_negatives(sims, (data["obs"].shape[1] - 14) // 3 * 6, int(args.q_neg * len(q_data["row"])), args.seed)
+            q_data = {k: np.concatenate([q_data[k], neg[k]]) for k in q_data}
+            print(f"  Q targets: {len(q_data['row']) - len(neg['row'])} search scores + {len(neg['row'])} zeros from missed candidates", flush=True)
     data, train, val = build_split(data, args.val_frac, args.seed, args.data_frac, args.augment)
     extra_tag = ""
     if args.train_only_data:
@@ -915,7 +934,7 @@ def main():
             ("" if args.gnn_hidden == 128 or args.model != "gnn" else f"_H{args.gnn_hidden}") + \
             ("" if args.gnn_layers == 2 or args.model != "gnn" else f"_L{args.gnn_layers}") + \
             ("_sl1" if args.speed_loss == "l1" else "") + (f"_sb{args.speed_bins}" if args.speed_bins else "") + ("_kw" if args.uncertainty_weights else "") + (f"_ga{args.geom_aux_weight:g}" if args.geom_aux_weight > 0 else "") + ("_aim" if args.geom_aux_weight > 0 and args.geom_aux_set == "aim" else "") + ("_scan" if args.geom_aux_weight > 0 and args.geom_aux_set == "scan" else "") + ("_auxonly" if args.aux_only else "") + ("_madeonly" if args.made_only else "") + ("_noprop" if args.made2_no_proposal else "") + (f"_i{args.init_seed}" if args.init_seed is not None else "") + ("_init" if args.init_from else "") + (f"_ff{args.input_fourier}" if args.input_fourier else "") + \
-            ("_geoang" if args.geom_angle else "") + extra_tag + (f"_m2w{args.made2_weight:g}" if args.made2_head else "") + ("geo" if args.made2_geom else "") + ("L" if args.made2_aim_from else "") + (f"S{args.made2_self_aim[0]}" if args.made2_self_aim else "") + (f"_q{args.q_weight:g}" if args.q_weight > 0 else "") + (f"_v{args.v_weight:g}" if args.v_weight > 0 else "") + ("_wrap" if args.angle_wrap else "_nowrap")
+            ("_geoang" if args.geom_angle else "") + extra_tag + (f"_m2w{args.made2_weight:g}" if args.made2_head else "") + ("geo" if args.made2_geom else "") + ("L" if args.made2_aim_from else "") + (f"S{args.made2_self_aim[0]}" if args.made2_self_aim else "") + (f"_q{args.q_weight:g}" if args.q_weight > 0 else "") + ("d" if args.qv_detach else "") + (f"n{args.q_neg:g}" if args.q_neg > 0 else "") + (f"_v{args.v_weight:g}" if args.v_weight > 0 else "") + ("_wrap" if args.angle_wrap else "_nowrap")
     name = (f"exp16_bc_{teacher}_{args.loss}{h_tag}_a{args.angle_scale_deg:g}_v{args.speed_scale:g}"
             f"_s{args.seed}_{time.strftime('%Y-%m-%d@%H%M')}")
     ckpt_path = None
@@ -946,6 +965,7 @@ def main():
                               uncertainty_weights=args.uncertainty_weights, aux_dim=1 if args.made2_self_aim else ((1 if args.geom_aux_set in ("aim", "scan") else N_AUX) if args.geom_aux_weight > 0 else 0),
                               aim_encoder=aim_enc, fourier=args.input_fourier, made2_no_proposal=args.made2_no_proposal,
                               self_aim=args.made2_self_aim or "", q_head=args.q_weight > 0, v_head=args.v_weight > 0)
+        agent.qv_detach = args.qv_detach
         if args.made2_self_aim:                                      # the own aim head regresses the standardised target
             if args.geom_aux_weight > 0:
                 agent.set_aim_stats(float(aux_mean[0]), float(aux_std[0]))

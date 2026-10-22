@@ -116,3 +116,24 @@ def test_made_topk_q_only_picks_among_the_made_heads_best():
     torch.testing.assert_close(a_k1, a_made)
     assert a_k5.shape == (4, 2)
 
+
+
+def test_qv_detach_keeps_q_and_v_gradients_out_of_the_encoder():
+    rel = torch.as_tensor(_rel(4))
+    for detach, expect_grad in ((False, True), (True, False)):
+        m = _model(); m.qv_detach = detach
+        (m.q_loss(rel, torch.zeros(4, 2), torch.tensor([0, 1, 2, 3]), torch.rand(4)) + m.v_loss(rel, torch.ones(4))).backward()
+        enc = sum(float(p.grad.abs().sum()) for n, p in m.named_parameters() if n.startswith(("pair.", "ball.")) and p.grad is not None)
+        heads = sum(float(p.grad.abs().sum()) for n, p in m.named_parameters() if n.startswith(("head_q", "head_v")) and p.grad is not None)
+        assert heads > 0 and (enc > 0) == expect_grad
+
+
+def test_q_negatives_are_missed_candidates_of_known_pairs():
+    from exp16_wm.bc import q_negatives
+    from exp16_wm.sim_identity import to_bitmask
+    made = np.zeros((5, 18), bool); made[0, 2] = True; made[1, 7] = True; made[3, 4] = True
+    sims = {"row": np.arange(5), "a_unit": np.zeros((5, 2), np.float32), "made": to_bitmask(made),
+            "scratch": np.array([0, 0, 0, 1, 0], bool), "pair": np.array([2, 3, 5, 4, -1])}
+    neg = q_negatives(sims, 18, 10, 0)
+    assert neg["row"].tolist() == [1, 2, 3] and (neg["score"] == 0).all()     # 0 made its pair; 3 scratched; 4 unknown pair
+    assert len(q_negatives(sims, 18, 2, 0)["row"]) == 2

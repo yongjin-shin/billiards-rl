@@ -104,6 +104,7 @@ def load_run(run_dir: str) -> PairGNNPolicy:
                       self_aim=a.get("made2_self_aim") or "", q_head=float(a.get("q_weight", 0) or 0) > 0,
                       v_head=float(a.get("v_weight", 0) or 0) > 0)
     m.load_state_dict(torch.load(os.path.join(run_dir, "bc_model.pt"))["gnn"])
+    m.qv_detach = bool(a.get("qv_detach", False))
     return m.eval()
 
 

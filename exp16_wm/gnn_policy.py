@@ -169,6 +169,7 @@ class PairGNNPolicy(nn.Module):
         # expert iteration (roadmap "탐색 결과로 학습"): Q = P(keep pocketing | shot) from search scores, same input as made2;
         # V = P(clear the rack from here) from real game outcomes, read from the pooled pair embeddings
         self.q_head, self.v_head = q_head, v_head
+        self.qv_detach = False          # EI2: Q / V read the encoder without sending gradients back (keeps made head and aim intact)
         if q_head:
             if not made2_head:
                 raise ValueError("q_head needs made2_head (it shares its candidate features)")
@@ -371,12 +372,14 @@ class PairGNNPolicy(nn.Module):
     def q_logits(self, o: dict[str, torch.Tensor], a: torch.Tensor, pair: torch.Tensor) -> torch.Tensor:
         """(B,) Q logits of actions a (B, 2) in [-1, 1], each for its own pair index pair (B,)."""
         r = torch.arange(len(pair))
-        return self.head_q(self._made2_features(o["e"][r, pair], a, o["means"][r, pair],
-                                                o["aim"][r, pair] if "aim" in o else None)).squeeze(-1)
+        e, aim = o["e"][r, pair], (o["aim"][r, pair] if "aim" in o else None)
+        if self.qv_detach:
+            e, aim = e.detach(), (None if aim is None else aim.detach())
+        return self.head_q(self._made2_features(e, a, o["means"][r, pair], aim)).squeeze(-1)
 
     def v_logit(self, o: dict[str, torch.Tensor]) -> torch.Tensor:
         """(B,) logit of P(clear the rack from this position): mean and max of the live pairs' embeddings."""
-        e, v = o["e"], o["valid"][..., None].float()
+        e, v = (o["e"].detach() if self.qv_detach else o["e"]), o["valid"][..., None].float()
         mean = (e * v).sum(1) / v.sum(1).clamp(min=1)
         mx = e.masked_fill(v == 0, -1e9).max(1).values.masked_fill(v.sum(1) == 0, 0.0)
         return self.head_v(torch.cat([mean, mx], dim=-1)).squeeze(-1)
