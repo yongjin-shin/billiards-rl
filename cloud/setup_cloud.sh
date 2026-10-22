@@ -24,7 +24,17 @@ python --version
 echo "[3/4] packages (torch CPU wheel first, then the pinned rest)"
 uv pip install --index-url https://download.pytorch.org/whl/cpu "torch==2.10.0"
 # pooltool 0.5.0 pins panda3d==1.11.0.dev3702 on Linux, a dev build that is not on PyPI (pooltool install docs).
-uv pip install --extra-index-url https://archive.panda3d.org/ -r requirements-cloud.txt
+if ! uv pip install --extra-index-url https://archive.panda3d.org/ -r requirements-cloud.txt; then
+  # archive.panda3d.org was down (HTTP 500 / connection refused, 2026-10-22). panda3d only renders; the physics is pooltool's own
+  # code, and the Mac runs the same pooltool 0.5.0 on PyPI's panda3d 1.10.16 — so fall back to that, pooltool installed without
+  # its Linux pin. machine_info() records the panda3d version in every result.
+  echo "[setup] panda3d archive unavailable: PyPI panda3d 1.10.16 + pooltool --no-deps"
+  grep -v '^pooltool-billiards' requirements-cloud.txt > /tmp/requirements-no-pooltool.txt
+  uv pip install -r /tmp/requirements-no-pooltool.txt
+  uv pip install "panda3d==1.10.16" "panda3d-gltf>=1.2.0" "panda3d-simplepbr>=0.12.0" "Pillow>=6.2.0" "attrs>=21.3.0" "cattrs>=22.1.0" \
+    "click>=8.0.0" "h11>=0.16.0" "h5py>=3.10" "msgpack>=1.0.0" "msgpack-numpy>=0.4.8" "rich>=14.0.0,<15.0.0"
+  uv pip install --no-deps pooltool-billiards==0.5.0
+fi
 python - <<'PY'
 import numba, numpy, pooltool, torch
 print("torch", torch.__version__, "| threads", torch.get_num_threads(), "| numpy", numpy.__version__, "| numba", numba.__version__)

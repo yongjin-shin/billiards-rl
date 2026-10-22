@@ -168,3 +168,11 @@ def test_avoid_placements_moves_reclaimed_pools_last() -> None:
     places = [("m7a.16xlarge", "us-east-1f", 0.7), ("c7a.16xlarge", "us-east-1b", 0.94), ("c7a.16xlarge", "us-east-1c", 0.99)]
     assert avoid_placements(places, ["c7a.16xlarge@us-east-1b"]) == [places[0], places[2], places[1]]
     assert avoid_placements(places, []) == places
+
+
+def test_setup_falls_back_to_pypi_panda3d_when_the_archive_is_down() -> None:
+    script = (Path(__file__).resolve().parent.parent / "cloud" / "setup_cloud.sh").read_text()
+    assert "--extra-index-url https://archive.panda3d.org/" in script
+    i_try, i_fb = script.index("if ! uv pip install --extra-index-url"), script.index('"panda3d==1.10.16"')
+    assert i_try < i_fb < script.index("uv pip install --no-deps pooltool-billiards==0.5.0")
+
