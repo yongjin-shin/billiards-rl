@@ -744,7 +744,7 @@ def parse_args():
                    help="--made-only: choose the final model by top-1 success on this fixed val set (exp16_wm.val_set) every --v0-every epochs "
                         "instead of the lowest made BCE on the training data's own val split")
     p.add_argument("--v0-every", type=int, default=25)
-    p.add_argument("--select-infer", type=str, default="all_pairs", choices=["all_pairs", "all_pairs_q"],
+    p.add_argument("--select-infer", type=str, default="all_pairs", choices=["all_pairs", "all_pairs_q", "all_pairs_qk"],
                    help="--val-v0: the inference whose top-1 success chooses the model (all_pairs_q = by the Q head)")
     p.add_argument("--q-weight", type=float, default=0.0, help="> 0: Q head trained on the search scores of the label files (search_data)")
     p.add_argument("--v-weight", type=float, default=0.0, help="> 0: V head trained on the label files' v_target (real game outcome)")

@@ -102,3 +102,17 @@ def test_build_split_keeps_the_expert_iteration_columns():
     d, tr, va = build_split(data, 0.2, 0, 1.0, "none")
     assert "is_game_state" in d and "v_target" in d and d["is_game_state"].sum() == 10
 
+
+def test_made_topk_q_only_picks_among_the_made_heads_best():
+    m, rel = _model().eval(), torch.as_tensor(_rel(4))
+    m.refine_deg, m.refine_speed, m.refine_speed_abs = (-0.1, 0.0, 0.1), (1.0,), (1.0, 2.0)
+    with torch.no_grad():
+        for p in m.head_q.parameters():
+            p.normal_()
+        m.infer = "all_pairs"; a_made = m.predict_unit(rel)
+        m.infer, m.q_topk = "all_pairs_qk", 1; a_k1 = m.predict_unit(rel)          # K = 1: the made head's own choice
+        m.q_topk = 5; a_k5 = m.predict_unit(rel)
+        o = m.forward_full(rel)
+    torch.testing.assert_close(a_k1, a_made)
+    assert a_k5.shape == (4, 2)
+
