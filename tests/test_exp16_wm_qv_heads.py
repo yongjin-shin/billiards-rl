@@ -153,3 +153,31 @@ def test_separate_qv_encoder_trains_only_itself_and_the_qv_heads():
     m.infer = "all_pairs_qk"
     with torch.no_grad():
         assert m.predict_unit(rel).shape == (4, 2)
+
+
+def test_rank_groups_pick_the_search_choice_and_skip_hopeless_states():
+    from exp16_wm.bc import rank_groups
+    q = {"row": np.array([5, 5, 5, 2, 2, 9, 9, 9]), "score": np.array([0.1, 0.8, 0.3, 0.0, 0.0, 0.4, 0.4, 0.9], np.float32)}
+    idx, ch = rank_groups(q, max_k=4)
+    assert idx.shape == (2, 4)                                                  # row 2: every score 0 → left out
+    groups = {int(q["row"][i[0]]): (i, c) for i, c in zip(idx, ch)}
+    i5, c5 = groups[5]; assert q["score"][i5[c5]] == pytest.approx(0.8) and i5[3] == -1
+    i9, c9 = groups[9]; assert q["score"][i9[c9]] == pytest.approx(0.9)
+
+
+def test_rank_loss_trains_the_q_head_to_prefer_the_chosen_shot():
+    data, tr, sims = _made_only_setup()
+    n = len(data["obs"])
+    rows = np.repeat(np.arange(n), 3)
+    score = np.tile(np.array([0.1, 0.9, 0.2], np.float32), n)                  # the search always picks the 2nd shot
+    acts = np.tile(np.array([[-0.5, 0.0], [0.5, 0.0], [0.0, 0.5]], np.float32), (n, 1))
+    q = {"row": rows, "a_unit": acts, "pair": np.zeros(3 * n, np.int64), "score": score}
+    m = _model(qv_encoder=True); m.copy_encoder_to_qv()
+    fit = train_bc(m, data, tr, ~tr, "nearest_good", epochs=25, batch=8, lr=1e-2, patience=100, seed=0, log_every=0, select="within",
+                   w=dim_weights(0.2, 0.5), sims=sims, sims_batch=64, made_only=True, q_data=q, q_weight=1.0, q_loss="rank",
+                   q_batch=30, select_last=True)
+    m.eval()
+    with torch.no_grad():
+        o = m.forward_full(torch.as_tensor(data["obs"][:20]))
+        z = torch.stack([m.q_logits(o, torch.as_tensor(acts[k]).expand(20, 2), torch.zeros(20, dtype=torch.long)) for k in range(3)], 1)
+    assert (z.argmax(1) == 1).float().mean() >= 0.75 and fit["best_epoch"] == fit["epochs_run"] - 1   # the chosen shot ranks first

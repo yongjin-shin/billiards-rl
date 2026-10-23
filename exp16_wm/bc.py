@@ -28,6 +28,7 @@ import time
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from simulator import BilliardsEnv
@@ -171,6 +172,24 @@ def load_q_targets(label_paths: list[str]) -> dict[str, np.ndarray]:
     if not rows:
         raise ValueError("no label file has Q targets (exp16_wm.search_data)")
     return {"row": np.concatenate(rows), "a_unit": np.concatenate(act), "pair": np.concatenate(pair), "score": np.concatenate(score)}
+
+
+def rank_groups(q_data: dict[str, np.ndarray], max_k: int = 10) -> tuple[np.ndarray, np.ndarray]:
+    """Group the search's scored shots by state for a listwise loss: (idx (G, max_k) indices into q_data, −1 padded;
+    chosen (G,) column of the shot the search picked = highest score). States where no shot scores above 0 (the search found
+    nothing) or with a single shot are left out."""
+    order = np.argsort(q_data["row"], kind="stable")
+    rows = q_data["row"][order]
+    starts = np.flatnonzero(np.r_[True, rows[1:] != rows[:-1]])
+    ends = np.r_[starts[1:], len(rows)]
+    idx, chosen = [], []
+    for a, b in zip(starts, ends):
+        g = order[a:b][:max_k]
+        sc = q_data["score"][g]
+        if len(g) < 2 or sc.max() <= 0:
+            continue
+        idx.append(np.r_[g, np.full(max_k - len(g), -1)]); chosen.append(int(sc.argmax()))
+    return (np.array(idx, np.int64).reshape(-1, max_k), np.array(chosen, np.int64))
 
 
 def q_negatives(sims: dict[str, np.ndarray], n_slots: int, max_n: int, seed: int) -> dict[str, np.ndarray]:
@@ -337,7 +356,7 @@ def train_bc(agent: VanillaSAC, data: dict[str, np.ndarray], train: np.ndarray, 
              train_plateau: int = 0, train_plateau_tol: float = 0.01, made_only: bool = False, made_val_sims: int = 20000,
              ckpt_path: str | None = None, ckpt_every: int = 0, stop_after: int | None = None,
              select_fn=None, select_every: int = 25, q_data: dict | None = None, q_weight: float = 0.0, v_weight: float = 0.0,
-             q_batch: int = 1024) -> dict:
+             q_batch: int = 1024, q_loss: str = "bce", select_last: bool = False) -> dict:
     """select: 'loss' keeps the lowest val loss; 'within' the highest val within-threshold rate
     (the val loss is dominated by a few far-off predictions and can disagree with it).
     aux_only: train the encoder + aux head on the geometry look-ahead alone (no action / selection / made loss);
@@ -402,6 +421,14 @@ def train_bc(agent: VanillaSAC, data: dict[str, np.ndarray], train: np.ndarray, 
         q_tr = np.where(train[q_data["row"]])[0]
         q_row, q_a = torch.as_tensor(q_data["row"]), torch.as_tensor(q_data["a_unit"])
         q_pair, q_sc = torch.as_tensor(q_data["pair"]), torch.as_tensor(q_data["score"])
+        if q_loss not in ("bce", "rank"):
+            raise ValueError(f"unknown q_loss {q_loss!r}")
+        if q_loss == "rank":                                        # policy distillation: which of the state's shots the search chose
+            g_idx, g_chosen = rank_groups(q_data)
+            g_tr = np.where(train[q_data["row"][g_idx[:, 0]]])[0]
+            if len(g_tr) == 0:
+                raise ValueError("q_loss rank: no training state with a chosen shot")
+            g_idx_t, g_ch_t = torch.as_tensor(g_idx), torch.as_tensor(g_chosen)
     use_v = v_weight > 0
     if use_v:                                                       # expert iteration: real game outcome from each game state
         if "v_target" not in data:
@@ -456,9 +483,17 @@ def train_bc(agent: VanillaSAC, data: dict[str, np.ndarray], train: np.ndarray, 
                 made_b = torch.as_tensor(from_bitmask(s_mask[sb], n_slots))
                 lm = made2_weight * model.module.made2_loss(obs[s_row[sb]], s_a[sb], made_b, s_scr[sb])
                 l = lm if l is None else l + lm
-            if use_q:
+            if use_q and q_loss == "bce":
                 qb = rng.choice(q_tr, size=min(q_batch, len(q_tr)), replace=False)
                 lq = q_weight * model.module.q_loss(obs[q_row[qb]], q_a[qb], q_pair[qb], q_sc[qb])
+                l = lq if l is None else l + lq
+            if use_q and q_loss == "rank":
+                gb = rng.choice(g_tr, size=min(max(1, q_batch // g_idx.shape[1]), len(g_tr)), replace=False)
+                gi = g_idx_t[gb]                                     # (G, K) with −1 padding
+                flat = gi.clamp(min=0).reshape(-1)
+                z = model.module.q_logits(model.module.forward_full(obs[q_row[flat]]), q_a[flat], q_pair[flat]).reshape(gi.shape)
+                z = z.masked_fill(gi < 0, -1e9)
+                lq = q_weight * F.cross_entropy(z, g_ch_t[gb])
                 l = lq if l is None else l + lq
             if use_v:
                 bv = torch.as_tensor(b)[v_t[b] >= 0]
@@ -527,6 +562,8 @@ def train_bc(agent: VanillaSAC, data: dict[str, np.ndarray], train: np.ndarray, 
             stop_reason = f"stop_after {stop_after}"
             break
     last_state = {k: v.clone() for k, v in model.module.state_dict().items()}      # the weights after the last epoch run
+    if select_last:                                                 # e.g. a policy head that the selection criterion cannot judge
+        best_state, best_epoch = last_state, len(history) - 1
     model.module.load_state_dict(best_state)
     model.module.eval()
     return {"best_val_loss": best_val, "best_epoch": best_epoch, "epochs_run": len(history),
@@ -760,6 +797,9 @@ def parse_args():
     p.add_argument("--select-infer", type=str, default="all_pairs", choices=["all_pairs", "all_pairs_q", "all_pairs_qk"],
                    help="--val-v0: the inference whose top-1 success chooses the model (all_pairs_q = by the Q head)")
     p.add_argument("--q-weight", type=float, default=0.0, help="> 0: Q head trained on the search scores of the label files (search_data)")
+    p.add_argument("--q-loss", type=str, default="bce", choices=["bce", "rank"],
+                   help="rank: the Q head learns which of a state's scored shots the search chose (softmax over them) — policy distillation")
+    p.add_argument("--select-last", action="store_true", help="the final model is the last epoch's weights, not the selected best")
     p.add_argument("--q-neg", type=float, default=0.0, help="> 0: add zero Q targets from missed simulated candidates, up to this × the search scores")
     p.add_argument("--qv-encoder", action="store_true", help="Q / V heads get their own encoder (same structure, own weights)")
     p.add_argument("--qv-detach", action="store_true", help="Q / V heads do not send gradients into the shared encoder")
@@ -935,7 +975,7 @@ def main():
             ("" if args.gnn_hidden == 128 or args.model != "gnn" else f"_H{args.gnn_hidden}") + \
             ("" if args.gnn_layers == 2 or args.model != "gnn" else f"_L{args.gnn_layers}") + \
             ("_sl1" if args.speed_loss == "l1" else "") + (f"_sb{args.speed_bins}" if args.speed_bins else "") + ("_kw" if args.uncertainty_weights else "") + (f"_ga{args.geom_aux_weight:g}" if args.geom_aux_weight > 0 else "") + ("_aim" if args.geom_aux_weight > 0 and args.geom_aux_set == "aim" else "") + ("_scan" if args.geom_aux_weight > 0 and args.geom_aux_set == "scan" else "") + ("_auxonly" if args.aux_only else "") + ("_madeonly" if args.made_only else "") + ("_noprop" if args.made2_no_proposal else "") + (f"_i{args.init_seed}" if args.init_seed is not None else "") + ("_init" if args.init_from else "") + (f"_ff{args.input_fourier}" if args.input_fourier else "") + \
-            ("_geoang" if args.geom_angle else "") + extra_tag + (f"_m2w{args.made2_weight:g}" if args.made2_head else "") + ("geo" if args.made2_geom else "") + ("L" if args.made2_aim_from else "") + (f"S{args.made2_self_aim[0]}" if args.made2_self_aim else "") + (f"_q{args.q_weight:g}" if args.q_weight > 0 else "") + ("d" if args.qv_detach else "") + ("e" if args.qv_encoder else "") + (f"n{args.q_neg:g}" if args.q_neg > 0 else "") + (f"_v{args.v_weight:g}" if args.v_weight > 0 else "") + ("_wrap" if args.angle_wrap else "_nowrap")
+            ("_geoang" if args.geom_angle else "") + extra_tag + (f"_m2w{args.made2_weight:g}" if args.made2_head else "") + ("geo" if args.made2_geom else "") + ("L" if args.made2_aim_from else "") + (f"S{args.made2_self_aim[0]}" if args.made2_self_aim else "") + (f"_q{args.q_weight:g}" if args.q_weight > 0 else "") + ("d" if args.qv_detach else "") + ("e" if args.qv_encoder else "") + ("r" if args.q_loss == "rank" else "") + (f"n{args.q_neg:g}" if args.q_neg > 0 else "") + (f"_v{args.v_weight:g}" if args.v_weight > 0 else "") + ("_wrap" if args.angle_wrap else "_nowrap")
     name = (f"exp16_bc_{teacher}_{args.loss}{h_tag}_a{args.angle_scale_deg:g}_v{args.speed_scale:g}"
             f"_s{args.seed}_{time.strftime('%Y-%m-%d@%H%M')}")
     ckpt_path = None
@@ -1017,7 +1057,7 @@ def main():
                    aux=aux, aux_weight=args.geom_aux_weight, aux_only=args.aux_only,
                    train_plateau=args.train_plateau, train_plateau_tol=args.train_plateau_tol, made_only=args.made_only,
                    ckpt_path=ckpt_path, ckpt_every=args.ckpt_every, select_fn=v0_select, select_every=args.v0_every,
-                   q_data=q_data, q_weight=args.q_weight, v_weight=args.v_weight)
+                   q_data=q_data, q_weight=args.q_weight, v_weight=args.v_weight, q_loss=args.q_loss, select_last=args.select_last)
     if fit["stop_reason"]:
         print(f"  stopped: {fit['stop_reason']}", flush=True)
     if args.save_last and isinstance(agent, PairGNNPolicy):
