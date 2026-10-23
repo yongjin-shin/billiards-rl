@@ -108,6 +108,12 @@ def test_bundle_missing_extra_raises(repo: Path, tmp_path_factory: pytest.TempPa
         make_bundle(repo, tmp_path_factory.mktemp("out") / "b.tar.gz", extras=["nope"])
 
 
+@pytest.mark.parametrize("extra", ["", " ", "."])
+def test_bundle_rejects_extra_naming_the_repo_root(repo: Path, tmp_path_factory: pytest.TempPathFactory, extra: str) -> None:
+    with pytest.raises(ValueError):
+        make_bundle(repo, tmp_path_factory.mktemp("out") / "b.tar.gz", extras=[extra])
+
+
 def test_is_dirty_detects_tracked_changes_only(repo: Path) -> None:
     assert not is_dirty(repo)  # untracked files do not count
     (repo / "tracked.txt").write_text("changed")

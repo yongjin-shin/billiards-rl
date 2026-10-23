@@ -143,6 +143,8 @@ def is_dirty(repo_dir: Path) -> bool:
 def make_bundle(repo_dir: Path, out_path: Path, extras: Sequence[str] = ()) -> Path:
     """tar.gz of `git archive HEAD` plus extra (e.g. untracked data) paths given relative to repo_dir."""
     for extra in extras:
+        if not extra.strip() or (repo_dir / extra).resolve() == repo_dir.resolve():   # "" (a trailing newline) = the whole repo + logs
+            raise ValueError(f"--include path must name a sub-path, got {extra!r}")
         if not (repo_dir / extra).exists():
             raise FileNotFoundError(f"--include path not found: {extra}")
     proc = subprocess.Popen(["git", "-C", str(repo_dir), "archive", "--format=tar", "HEAD"], stdout=subprocess.PIPE)
