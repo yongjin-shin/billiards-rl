@@ -111,3 +111,31 @@ def test_model_mode_values_every_shot_at_the_same_depth():
     pol.act(OBS)
     assert (0.1, 0) in calls or (0.1, 1) in calls                               # the missed shot's position is also looked into
 
+
+
+def test_v_leaf_values_the_last_positions_with_the_v_head_and_counts_simulations():
+    import torch as _t
+
+    class M:                                                                      # a member with a V head: V = position's cue x
+        def forward_full(self, rel): return {"rel": rel}
+        def v_logit(self, o): return _t.logit(_t.tensor([float(self.cue)]))
+    class S:
+        act_scale, act_bias = _t.ones(2), _t.zeros(2)
+        def __init__(self): self.models = [M()]
+        def scores(self, rel):
+            return _t.tensor([[[1.0, 1.0]]]), _t.tensor([[[0.0, 1.0], [0.1, 1.0]]])[None]
+    sc = S()
+    def sim(raw, a):
+        out = raw.copy(); out[0] = 0.2 if float(a[0]) < 0.05 else 0.7              # shot 1 leaves the position V likes
+        return out, True, False, False
+    pol = LookaheadPolicy(sc, sim, widths=(2,), leaf="v", mode="sim")
+    orig = pol._candidates
+    def cands(raw):
+        sc.models[0].cue = float(raw[0]); return orig(raw)
+    pol._candidates = cands
+    sc.models[0].cue = 0.5
+    _orig_v = pol._v
+    pol._v = lambda raw: (setattr(sc.models[0], "cue", float(raw[0])), _orig_v(raw))[1]
+    assert pol.act(OBS)[0] == pytest.approx(0.1) and pol.n_sims == 2
+    with pytest.raises(ValueError):
+        LookaheadPolicy(sc, sim, leaf="mcts")

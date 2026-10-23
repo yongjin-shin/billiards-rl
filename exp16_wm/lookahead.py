@@ -29,7 +29,8 @@ class LookaheadPolicy:
     """act(raw obs) → env action. scorer: MadeEnsemble (one member = a single model); sim(raw obs, env action) →
     (next raw obs, pocketed something, scratch, rack cleared)."""
 
-    def __init__(self, scorer, sim, k: int = 10, mode: str = "model", widths: tuple[int, ...] | None = None, recorder=None):
+    def __init__(self, scorer, sim, k: int = 10, mode: str = "model", widths: tuple[int, ...] | None = None, recorder=None,
+                 leaf: str = "made"):
         """widths = shots simulated per level: (10,) looks one shot ahead (= k), (10, 5) two shots ahead, …"""
         if mode not in ("model", "sim"):
             raise ValueError(f"mode must be 'model' or 'sim', got {mode!r}")
@@ -40,6 +41,12 @@ class LookaheadPolicy:
         # recorder(kind, **data) sees every simulation ("sim": raw, action, made_mask, scratch) and the top level's scored shots
         # ("top": raw, actions, pairs, scores) — the data for expert iteration (exp16_wm.search_data)
         self.recorder = recorder
+        # leaf: how the last level's positions are valued — "made" = the best shot's made probability (one shot of ease),
+        # "v" = the model's V head (P(clear the rack from here), learned from search games) — farther sight at the same depth
+        if leaf not in ("made", "v"):
+            raise ValueError(f"leaf must be 'made' or 'v', got {leaf!r}")
+        self.leaf = leaf
+        self.n_sims = 0                                             # simulations run (cost per shot = n_sims / shots)
         self.sc, self.bi = scorer.act_scale, scorer.act_bias
 
     @torch.no_grad()
@@ -55,10 +62,18 @@ class LookaheadPolicy:
 
     def _simulate(self, raw: np.ndarray, action: np.ndarray):
         r = self.sim(raw, action)
+        self.n_sims += 1
         nxt, made, scratch, cleared = r[:4]
         if self.recorder is not None:
             self.recorder("sim", raw=raw, action=np.asarray(action, np.float32), made_mask=r[4] if len(r) > 4 else None, scratch=scratch)
         return nxt, made, scratch, cleared
+
+    @torch.no_grad()
+    def _v(self, raw: np.ndarray) -> float:
+        """P(clear the rack from this position): mean over the scorer's members of sigmoid(V logit)."""
+        from exp16_wm.obs_transform import relative_obs
+        rel = torch.as_tensor(relative_obs(raw[None]))
+        return float(np.mean([torch.sigmoid(m.v_logit(m.forward_full(rel)))[0].item() for m in self.scorer.models]))
 
     def next_chance(self, raw_next: np.ndarray) -> float:
         p, _ = self._candidates(raw_next)
@@ -75,7 +90,8 @@ class LookaheadPolicy:
         if len(p) == 0:
             return 0.0, None
         if not widths:
-            i = int(p.argmax()); return float(p[i]), acts[i]
+            i = int(p.argmax())
+            return (self._v(raw) if self.leaf == "v" else float(p[i])), acts[i]
         best, best_a, rec = -1.0, None, []
         for i in np.argsort(-p)[:widths[0]]:
             nxt, made, scratch, cleared = self._simulate(raw, acts[i])
@@ -130,19 +146,21 @@ def main() -> None:
     p.add_argument("--runs", nargs="+", required=True); p.add_argument("--aim", default="mean", choices=["shared", "mean"])
     p.add_argument("--n-balls", type=int, default=6); p.add_argument("--k", type=int, default=10)
     p.add_argument("--widths", type=int, nargs="+", default=None, help="shots simulated per level, e.g. 10 5 = two shots ahead")
+    p.add_argument("--leaf", default="made", choices=["made", "v"], help="value of the last level's positions: made probability or the V head")
     p.add_argument("--mode", default="model", choices=["model", "sim"]); p.add_argument("--out", required=True)
     p.add_argument("--threads", type=int, default=2)
     p.add_argument("--seeds", type=int, nargs="+", default=list(EVAL_SEEDS)); p.add_argument("--games-per-seed", type=int, default=GAMES_PER_SEED)
     args = p.parse_args()
     torch.set_num_threads(args.threads)
     runs = [find_run(g) for g in args.runs]
-    pol = LookaheadPolicy(load_ensemble(runs, args.aim), make_sim(args.n_balls), args.k, args.mode, args.widths)
+    pol = LookaheadPolicy(load_ensemble(runs, args.aim), make_sim(args.n_balls), args.k, args.mode, args.widths, leaf=args.leaf)
     t0 = time.time()
     res = play_paired(pol, tuple(args.seeds), args.games_per_seed, clear_env_kw(args.n_balls))
-    meta = {"runs": runs, "infer": f"lookahead_{args.mode}_w{'-'.join(map(str, pol.widths))}", "n_balls": args.n_balls, "eval_seeds": args.seeds,
+    meta = {"runs": runs, "infer": f"lookahead_{args.mode}_w{'-'.join(map(str, pol.widths))}_{args.leaf}", "n_balls": args.n_balls, "eval_seeds": args.seeds,
             "games_per_seed": args.games_per_seed, "seconds": round(time.time() - t0, 1), "machine": machine_info()}
+    meta["sims_per_shot"] = round(pol.n_sims / max(1, len(res["succ"])), 2)
     save(args.out, res, meta)
-    print(_line(os.path.basename(args.out), summarize(res)), f"  ({meta['seconds']:.0f}s)", flush=True)
+    print(_line(os.path.basename(args.out), summarize(res)), f"  ({meta['seconds']:.0f}s, {meta['sims_per_shot']} sims/shot)", flush=True)
 
 
 if __name__ == "__main__":
