@@ -62,21 +62,29 @@ def page_data(cache: str) -> dict:
                                            "stats": panel_stats(maps[n], xs, ys, balls, TABLE_W, TABLE_L)} for n in NAMES]}
 
 
-def explain_figure(png: str) -> str:
-    """The <section> that shows the explanation picture (a PNG embedded as a data URI); empty when no picture is given."""
+def explain_figure(png: str, heading: str = '먼저: "1 cm 흔든다"는 게 무슨 뜻인가', alt: str = "", caption: str = "") -> str:
+    """A <section> that shows a picture (a PNG embedded as a data URI); empty when no picture is given."""
     if not png:
         return ""
     import base64
     with open(png, "rb") as f:
         uri = base64.b64encode(f.read()).decode("ascii")
-    return ('<section class="explain"><h2>먼저: "1 cm 흔든다"는 게 무슨 뜻인가</h2>'
-            '<figure><img src="data:image/png;base64,' + uri + '" alt="왼쪽: 수구 한 자리를 1 cm 원 안에서 8번 옮겨 쳐 본 결과. 오른쪽: 같은 줄을 따라간 ① 실제 결과, ② 1 cm 평균, ③ V의 예측.">'
-            '<figcaption>왼쪽은 한 자리를 1 cm 흔들어 8번 쳐 본 실제 결과입니다. 오른쪽에서 ①은 칸마다 한 번 친 값, ②는 칸마다 이 8번의 평균입니다.</figcaption></figure></section>')
+    alt = alt or "왼쪽: 수구 한 자리를 1 cm 원 안에서 8번 옮겨 쳐 본 결과. 오른쪽: 같은 줄을 따라간 ① 실제 결과, ② 1 cm 평균, ③ V의 예측."
+    caption = caption or "왼쪽은 한 자리를 1 cm 흔들어 8번 쳐 본 실제 결과입니다. 오른쪽에서 ①은 칸마다 한 번 친 값, ②는 칸마다 이 8번의 평균입니다."
+    return ('<section class="explain"><h2>' + heading + '</h2><figure><img src="data:image/png;base64,' + uri + '" alt="' + alt + '">'
+            '<figcaption>' + caption + '</figcaption></figure></section>')
 
 
-def build_html(cache: str, explain_png: str = "") -> str:
+def radii_figure(png: str) -> str:
+    return explain_figure(png, "평균 반지름을 키우면 지도가 어떻게 달라지나",
+                          "왼쪽부터 ① 실제 결과, 1 cm 평균, 2 ~ 5 cm 평균, V의 예측입니다. 같은 공 배치와 같은 색 척도이고 각 그림 아래는 이웃한 칸이 1개 이상 다른 비율입니다.",
+                          "같은 공 배치에서 ① 실제 결과, 1 cm, 2 cm, 3 cm, 4 cm, 5 cm 평균, V의 예측을 나란히 놓은 2차원 지도 7장. 반지름이 커질수록 매끄러워진다.") \
+        .replace('<section class="explain">', '<section class="explain" id="radii">')
+
+
+def build_html(cache: str, explain_png: str = "", radii_png: str = "") -> str:
     data = page_data(cache)
-    return (TEMPLATE.replace("__TITLE__", TITLE).replace("__EXPLAIN__", explain_figure(explain_png))
+    return (TEMPLATE.replace("__TITLE__", TITLE).replace("__EXPLAIN__", explain_figure(explain_png) + radii_figure(radii_png))
             .replace("__DATA__", json.dumps(data, ensure_ascii=False, allow_nan=False, separators=(",", ":"))))
 
 
@@ -84,8 +92,9 @@ def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--cache", required=True); p.add_argument("--out", required=True)
     p.add_argument("--explain-png", default="", help="a picture (exp16_wm.v_heatmap_explain) to show above the maps")
+    p.add_argument("--radii-png", default="", help="the radius comparison (exp16_wm.v_heatmap_radii) to show above the maps")
     args = p.parse_args()
-    html = build_html(args.cache, args.explain_png)
+    html = build_html(args.cache, args.explain_png, args.radii_png)
     os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
     with open(args.out, "w") as f:
         f.write(html)
