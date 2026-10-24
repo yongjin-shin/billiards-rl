@@ -106,11 +106,13 @@ def subsample_games(gid: np.ndarray, rows: np.ndarray, frac: float, seed: int) -
     return rows[np.isin(gid[rows], keep)]
 
 
-def widen_qv(model, run_args: dict, qv_hidden: int):
-    """A copy of model whose Q / V encoder and V head have width qv_hidden (freshly initialised); every other weight is copied.
-    The Q head is dropped (it reads made2 features of the made width)."""
+def widen_qv(model, run_args: dict, qv_hidden: int, qv_fourier: int | None = None):
+    """A copy of model whose Q / V encoder and V head have width qv_hidden and qv_fourier Fourier frequencies (None = the run's), freshly
+    initialised; every other weight is copied. The Q head is dropped (it reads made2 features of the made width)."""
     from exp16_wm import eval_by_balls as E
     a = {**run_args, "qv_encoder": True, "qv_hidden": qv_hidden, "q_weight": 0, "v_weight": 1.0}
+    if qv_fourier is not None:
+        a["qv_fourier"] = qv_fourier
     new = E.policy_from_args(a)
     keep = {k: v for k, v in model.state_dict().items() if not k.startswith(("qv_", "head_v", "head_q"))}
     res = new.load_state_dict(keep, strict=False)
@@ -135,6 +137,8 @@ def main() -> None:
     p.add_argument("--horizon", type=int, default=0, help="V3: count only the next H balls (0 = until the first miss, V2)")
     p.add_argument("--data-frac", type=float, default=1.0, help="V5: train on this fraction of the training games (val unchanged)")
     p.add_argument("--qv-hidden", type=int, default=0, help="V5: width of a fresh Q / V encoder and V head (0 = keep the run's)")
+    p.add_argument("--qv-fourier", type=int, default=-1,
+                   help="V6: Fourier frequencies of a fresh Q / V encoder's input coordinates (−1 = keep the run's; 0 = a fresh one without)")
     args = p.parse_args()
     torch.set_num_threads(args.threads); torch.manual_seed(args.seed)
     run = find_run(args.run)
@@ -142,10 +146,11 @@ def main() -> None:
     if not getattr(model, "qv_encoder", False):
         raise ValueError(f"{run} has no Q / V encoder (trained without --qv-encoder)")
     run_args = json.load(open(os.path.join(run, "results.json")))["args"]
-    if args.qv_hidden and args.qv_hidden != model.qv_hidden:
-        model, run_args = widen_qv(model, run_args, args.qv_hidden)
+    new_width, new_fourier = bool(args.qv_hidden and args.qv_hidden != model.qv_hidden), args.qv_fourier >= 0
+    if new_width or new_fourier:
+        model, run_args = widen_qv(model, run_args, args.qv_hidden or model.qv_hidden, args.qv_fourier if new_fourier else None)
         if args.init == "made":
-            raise ValueError("--init made copies the made encoder, which has another width than --qv-hidden")
+            raise ValueError("--init made copies the made encoder, which has another width / input than --qv-hidden / --qv-fourier")
     elif args.init == "made":
         model.copy_encoder_to_qv()
         for mod in model.head_v.modules():

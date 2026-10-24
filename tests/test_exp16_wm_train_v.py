@@ -104,3 +104,67 @@ def test_qv_hidden_needs_qv_encoder_and_no_q_head():
         PairGNNPolicy(hidden=8, made2_head=True, q_head=True, v_head=True, qv_encoder=True, qv_hidden=16)
     m = PairGNNPolicy(hidden=8, v_head=True, qv_encoder=True, qv_hidden=0)          # 0 = same width: old checkpoints load
     assert m.qv_pair[-1].out_features == 8
+
+
+def _v_model(**kw):
+    from exp16_wm.gnn_policy import PairGNNPolicy
+    torch.manual_seed(0)
+    return PairGNNPolicy(hidden=8, v_head=True, qv_encoder=True, **kw).eval()
+
+
+def test_ff_fourier_features_layout_and_zero_is_identity():
+    m = _v_model()
+    x = torch.tensor([[0.5, -1.0]])
+    assert torch.equal(m._ff(x, 0), x)                                  # k = 0: the plain coordinates
+    f = m._ff(x, 3)
+    assert f.shape == (1, 2 + 4 * 3)
+    assert torch.equal(f[:, :2], x)
+    xs = (x[..., None] * (2.0 ** torch.arange(3) * np.pi / 4.0)).flatten(-2)
+    torch.testing.assert_close(f[:, 2:8], torch.sin(xs)); torch.testing.assert_close(f[:, 8:], torch.cos(xs))
+
+
+def test_qv_fourier_none_or_equal_gives_the_same_model_as_before():
+    rel = torch.as_tensor(__import__("exp16_wm.obs_transform", fromlist=["relative_obs"]).relative_obs(np.tile(OBS, (3, 1))))
+    a, b = _v_model(), _v_model(qv_fourier=0)
+    assert a.state_dict().keys() == b.state_dict().keys()
+    assert all(torch.equal(a.state_dict()[k], b.state_dict()[k]) for k in a.state_dict())
+    assert torch.equal(v_logits(a, rel), v_logits(b, rel))             # fourier = 0 on both sides → the old V, bit for bit
+
+
+def test_qv_fourier_widens_only_the_v_encoder_input():
+    from exp16_wm.obs_transform import relative_obs
+    old, new = _v_model(), _v_model(qv_fourier=4)
+    assert new.bb[0].in_features == old.bb[0].in_features and new.pair[0].in_features == old.pair[0].in_features    # made side unchanged
+    assert new.qv_bb[0].in_features == old.qv_bb[0].in_features + 2 * 4 * 4          # ball_f and diff each get 4·k extra
+    assert new.qv_pair[0].in_features == old.qv_pair[0].in_features + 2 * 4 * 4
+    rel = torch.as_tensor(relative_obs(np.tile(OBS, (2, 1))))
+    assert v_logits(new, rel).shape == (2,) and torch.isfinite(v_logits(new, rel)).all()
+    # the made encoder is not affected by qv_fourier: same weights seed → same made-side embeddings
+    assert torch.equal(new._encode_full(rel)[1], _v_model()._encode_full(rel)[1])
+
+
+def test_qv_fourier_errors():
+    from exp16_wm.gnn_policy import PairGNNPolicy
+    with pytest.raises(ValueError):
+        PairGNNPolicy(hidden=8, v_head=True, qv_fourier=3)                          # needs qv_encoder
+    with pytest.raises(ValueError):
+        PairGNNPolicy(hidden=8, v_head=True, qv_encoder=True, qv_fourier=-1)
+    with pytest.raises(ValueError):
+        _v_model(qv_fourier=3).copy_encoder_to_qv()                                 # other input width than the made encoder
+    _v_model().copy_encoder_to_qv()                                                  # same width: still fine
+
+
+def test_widen_qv_with_fourier_is_rebuilt_by_load_run_and_keeps_the_made_side():
+    from exp16_wm import eval_by_balls as E
+    from exp16_wm.train_v import widen_qv
+    a = {"gnn_hidden": 8, "gnn_layers": 2, "made2_head": True, "q_weight": 1.0, "v_weight": 1.0, "qv_encoder": True}
+    m = E.policy_from_args(a)
+    new, a2 = widen_qv(m, a, 8, 6)
+    assert a2["qv_fourier"] == 6 and new.qv_fourier == 6 and new.fourier == 0
+    for k, v in m.state_dict().items():
+        if not k.startswith(("qv_", "head_v", "head_q")):
+            assert torch.equal(new.state_dict()[k], v)
+    rebuilt = E.policy_from_args(a2)
+    assert rebuilt.state_dict().keys() == new.state_dict().keys()
+    assert all(rebuilt.state_dict()[k].shape == v.shape for k, v in new.state_dict().items())     # load_run can load the saved weights
+    assert E.policy_from_args(a).qv_fourier == 0                                    # runs without the key are the old model

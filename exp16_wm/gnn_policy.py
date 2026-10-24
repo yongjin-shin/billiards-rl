@@ -97,7 +97,7 @@ class PairGNNPolicy(nn.Module):
                  enc_layers: int = 2, speed_loss: str = "mse", speed_bins: int = 0, uncertainty_weights: bool = False, aux_dim: int = 0,
                  aim_encoder: "PairGNNPolicy | list[PairGNNPolicy] | None" = None, fourier: int = 0, made2_no_proposal: bool = False,
                  self_aim: str = "", q_head: bool = False, v_head: bool = False, qv_encoder: bool = False,
-                 qv_hidden: int = 0):
+                 qv_hidden: int = 0, qv_fourier: int | None = None):
         super().__init__()
         if fourier < 0:
             raise ValueError(f"fourier must be ≥ 0, got {fourier}")
@@ -160,10 +160,18 @@ class PairGNNPolicy(nn.Module):
         if q_head and QH != H:
             raise ValueError("q_head reads made2 features of width hidden; qv_hidden must equal hidden with q_head")
         self.qv_hidden = QH if qv_encoder else 0
+        QF = fourier if qv_fourier is None else qv_fourier   # V6: the Q / V encoder's own number of Fourier frequencies (None = the made encoder's)
+        if QF < 0:
+            raise ValueError(f"qv_fourier must be ≥ 0, got {qv_fourier}")
+        if QF != fourier and not qv_encoder:
+            raise ValueError("qv_fourier needs qv_encoder")
+        self.qv_fourier = QF
         if qv_encoder:
-            self.qv_bb = _mlp(ball_dim + d2 + 1 + 1, QH, QH, enc_layers)
-            self.qv_ball = _mlp(ball_dim + QH, QH, QH, enc_layers)
-            self.qv_pair = _mlp(QH + d2 + d2 + 1 + 1, QH, QH, enc_layers)
+            qd2 = 2 + 4 * QF
+            qball_dim = qd2 + 3
+            self.qv_bb = _mlp(qball_dim + qd2 + 1 + 1, QH, QH, enc_layers)
+            self.qv_ball = _mlp(qball_dim + QH, QH, QH, enc_layers)
+            self.qv_pair = _mlp(QH + qd2 + qd2 + 1 + 1, QH, QH, enc_layers)
         self.geom_angle = geom_angle                     # angle comes from a pair embedding without the neighbour message
         self.head_a = nn.Linear(H, 2)
         if geom_angle:
@@ -246,11 +254,12 @@ class PairGNNPolicy(nn.Module):
 
     # ── encoder ───────────────────────────────
 
-    def _ff(self, x: torch.Tensor) -> torch.Tensor:
-        """(…, 2) coordinates in metres → (…, 2 + 4·fourier): the coordinates, then sin and cos at each frequency."""
-        if not self.fourier:
+    def _ff(self, x: torch.Tensor, k: int | None = None) -> torch.Tensor:
+        """(…, 2) coordinates in metres → (…, 2 + 4·k): the coordinates, then sin and cos at each of k frequencies (default: self.fourier)."""
+        k = self.fourier if k is None else k
+        if not k:
             return x
-        freq = (2.0 ** torch.arange(self.fourier, dtype=x.dtype, device=x.device)) * (np.pi / FOURIER_SCALE)
+        freq = (2.0 ** torch.arange(k, dtype=x.dtype, device=x.device)) * (np.pi / FOURIER_SCALE)
         xs = (x[..., None] * freq).flatten(-2)                                  # (…, 2·fourier)
         return torch.cat([x, torch.sin(xs), torch.cos(xs)], dim=-1)
 
@@ -260,6 +269,8 @@ class PairGNNPolicy(nn.Module):
 
     def copy_encoder_to_qv(self) -> None:
         """Start the Q / V encoder from the made encoder's weights."""
+        if self.qv_fourier != self.fourier:
+            raise ValueError("the Q / V encoder has another input width (qv_fourier) than the made encoder")
         for a, b in ((self.qv_bb, self.bb), (self.qv_ball, self.ball), (self.qv_pair, self.pair)):
             a.load_state_dict(b.state_dict())
 
@@ -267,6 +278,7 @@ class PairGNNPolicy(nn.Module):
         """(h, e, valid, e_geo): e_geo = pair embedding with the ball-ball message zeroed (None unless geom_angle).
         qv: the Q / V encoder's modules instead of the made head's."""
         bb, ball, pair = (self.qv_bb, self.qv_ball, self.qv_pair) if qv else (self.bb, self.ball, self.pair)
+        K = self.qv_fourier if qv else self.fourier
         B, NB = rel.shape[0], n_balls_of(rel)
         balls = rel[:, :3 * NB].reshape(B, NB, 3)
         pos, pocketed = balls[..., :2], balls[..., 2]
@@ -274,10 +286,10 @@ class PairGNNPolicy(nn.Module):
         dist = pos.norm(dim=-1)
         ref = torch.where(live, dist, torch.full_like(dist, float("inf"))).argmin(dim=1)
         is_ref = F.one_hot(ref, NB).float() * live.any(dim=1, keepdim=True).float()
-        ball_f = torch.cat([self._ff(pos), dist[..., None], pocketed[..., None], is_ref[..., None]], dim=-1)
+        ball_f = torch.cat([self._ff(pos, K), dist[..., None], pocketed[..., None], is_ref[..., None]], dim=-1)
 
         diff = pos[:, None, :, :] - pos[:, :, None, :]                    # (B, i, k, 2): k relative to i
-        bb_in = torch.cat([ball_f[:, :, None, :].expand(B, NB, NB, ball_f.shape[-1]), self._ff(diff),
+        bb_in = torch.cat([ball_f[:, :, None, :].expand(B, NB, NB, ball_f.shape[-1]), self._ff(diff, K),
                            diff.norm(dim=-1, keepdim=True),
                            pocketed[:, None, :, None].expand(B, NB, NB, 1)], dim=-1)
         not_self = ~torch.eye(NB, dtype=torch.bool, device=rel.device)
@@ -289,7 +301,7 @@ class PairGNNPolicy(nn.Module):
         H = h.shape[-1]
         def pair_embed(hb: torch.Tensor) -> torch.Tensor:
             pair_in = torch.cat([hb[:, :, None, :].expand(B, NB, N_POCKETS, H),
-                                 self._ff(pockets)[:, None].expand(B, NB, N_POCKETS, 2 + 4 * self.fourier), self._ff(pr),
+                                 self._ff(pockets, K)[:, None].expand(B, NB, N_POCKETS, 2 + 4 * K), self._ff(pr, K),
                                  pr.norm(dim=-1, keepdim=True),
                                  self.side.view(1, 1, N_POCKETS, 1).expand(B, NB, N_POCKETS, 1)], dim=-1)
             return pair(pair_in).reshape(B, NB * N_POCKETS, H)
