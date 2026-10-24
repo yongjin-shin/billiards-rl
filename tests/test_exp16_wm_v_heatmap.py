@@ -99,3 +99,15 @@ def test_neighbour_jump_share_counts_steps_of_one_ball_and_ignores_holes():
     # horizontal pairs: (0,1)=1 ✓, (1,nan) skipped, (0,0.5)=0.5 ✗, (0.5,0.5)=0 ✗ ; vertical: (0,0)=0, (1,0.5)=0.5, (nan,.5) skipped → 1 of 5
     assert neighbour_jump_share(z) == 0.2
     assert np.isnan(neighbour_jump_share(np.full((2, 2), np.nan)))
+
+
+def test_html_page_embeds_the_explanation_picture_only_when_given(tmp_path):
+    import base64
+    from exp16_wm.v_heatmap_html import build_html
+    png = tmp_path / "e.png"
+    png.write_bytes(b"\x89PNG\r\n\x1a\n" + b"0" * 40)
+    cache = _cache(tmp_path)
+    with_fig, without = build_html(cache, str(png)), build_html(cache)
+    assert "data:image/png;base64," + base64.b64encode(png.read_bytes()).decode() in with_fig
+    assert 'class="explain"' in with_fig and 'class="explain"' not in without.split("<style>")[1].split("</style>")[1]
+    assert "__EXPLAIN__" not in with_fig and "__EXPLAIN__" not in without

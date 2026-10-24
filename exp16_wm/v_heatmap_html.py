@@ -62,16 +62,30 @@ def page_data(cache: str) -> dict:
                                            "stats": panel_stats(maps[n], xs, ys, balls, TABLE_W, TABLE_L)} for n in NAMES]}
 
 
-def build_html(cache: str) -> str:
+def explain_figure(png: str) -> str:
+    """The <section> that shows the explanation picture (a PNG embedded as a data URI); empty when no picture is given."""
+    if not png:
+        return ""
+    import base64
+    with open(png, "rb") as f:
+        uri = base64.b64encode(f.read()).decode("ascii")
+    return ('<section class="explain"><h2>먼저: "1 cm 흔든다"는 게 무슨 뜻인가</h2>'
+            '<figure><img src="data:image/png;base64,' + uri + '" alt="왼쪽: 수구 한 자리를 1 cm 원 안에서 8번 옮겨 쳐 본 결과. 오른쪽: 같은 줄을 따라간 ① 실제 결과, ② 1 cm 평균, ③ V의 예측.">'
+            '<figcaption>왼쪽은 한 자리를 1 cm 흔들어 8번 쳐 본 실제 결과입니다. 오른쪽에서 ①은 칸마다 한 번 친 값, ②는 칸마다 이 8번의 평균입니다.</figcaption></figure></section>')
+
+
+def build_html(cache: str, explain_png: str = "") -> str:
     data = page_data(cache)
-    return TEMPLATE.replace("__TITLE__", TITLE).replace("__DATA__", json.dumps(data, ensure_ascii=False, allow_nan=False, separators=(",", ":")))
+    return (TEMPLATE.replace("__TITLE__", TITLE).replace("__EXPLAIN__", explain_figure(explain_png))
+            .replace("__DATA__", json.dumps(data, ensure_ascii=False, allow_nan=False, separators=(",", ":"))))
 
 
 def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--cache", required=True); p.add_argument("--out", required=True)
+    p.add_argument("--explain-png", default="", help="a picture (exp16_wm.v_heatmap_explain) to show above the maps")
     args = p.parse_args()
-    html = build_html(args.cache)
+    html = build_html(args.cache, args.explain_png)
     os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
     with open(args.out, "w") as f:
         f.write(html)
@@ -136,6 +150,11 @@ th, td { padding: 0.3rem 0.8rem; border-bottom: 1px solid var(--line); text-alig
 th:first-child, td:first-child { text-align: left; }
 th { color: var(--fg); font-weight: 600; }
 td { color: var(--fg); }
+.explain { display: flex; flex-direction: column; gap: 0.5rem; }
+.explain h2 { font-size: 1.05rem; font-weight: 600; margin: 0; }
+.explain figure { margin: 0; display: flex; flex-direction: column; gap: 0.4rem; }
+.explain img { display: block; max-width: 100%; height: auto; border: 1px solid var(--line); border-radius: 0.5rem; background: #fcfcfb; }
+.explain figcaption { color: var(--muted); font-size: 0.875rem; max-width: 52rem; }
 .foot { color: var(--muted); font-size: 0.875rem; max-width: 52rem; margin: 0; }
 </style>
 
@@ -144,6 +163,8 @@ td { color: var(--fg); }
     <h1>__TITLE__</h1>
     <p class="lede">공 5개의 배치를 고정하고 수구를 놓는 자리를 바꿔 가며 값을 쟀습니다. 바닥은 수구 위치, 높이와 색은 그 자리에서 놓칠 때까지 연속으로 넣는 공 수입니다. 아무 곳이나 끌면 세 지도가 함께 돌아갑니다.</p>
   </header>
+
+  __EXPLAIN__
 
   <div class="controls">
     <div class="group" role="group" aria-label="보는 각도">
