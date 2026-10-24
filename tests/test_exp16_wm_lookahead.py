@@ -173,3 +173,44 @@ def test_next_state_cue_feeds_the_approximate_position_to_the_next_level():
     assert len(seen) == 2 and seen[1][5] == pytest.approx(OBS[5])          # level 2 sees ball 1 unmoved
     with pytest.raises(ValueError):
         LookaheadPolicy(sc, sim, next_state="world")
+
+
+def test_oracle_cue_next_pockets_the_target_and_moves_only_the_cue_ball():
+    from exp16_wm.lookahead import oracle_cue_next
+    nxt = OBS.copy(); nxt[0:2] = [0.9, 0.9]; nxt[5:7] = [0.1, 0.1]           # the simulator also pushed ball 1 — ignored
+    out, cleared = oracle_cue_next(OBS, nxt, ball=0)
+    np.testing.assert_allclose(out[0:2], [0.9, 0.9])
+    assert out[4] == 1.0 and not cleared                                     # target ball 0 counted as in
+    np.testing.assert_allclose(out[5:11], OBS[5:11])
+
+
+def test_oracle_cue_next_noise_stays_on_the_table_off_the_balls_and_last_ball_clears():
+    from exp16_wm.gnn_policy import BALL_RADIUS
+    from exp16_wm.lookahead import oracle_cue_next
+    from exp16_wm.obs_transform import _SCALE
+    rng = np.random.default_rng(0)
+    nxt = OBS.copy(); nxt[0:2] = [0.02, 0.5]                                 # near a cushion: big noise must be re-drawn inside
+    for _ in range(50):
+        out, _ = oracle_cue_next(OBS, nxt, ball=0, sigma_m=0.1, rng=rng)
+        c = out[0:2] * _SCALE
+        assert np.all(c >= BALL_RADIUS - 1e-6) and np.all(c <= _SCALE - BALL_RADIUS + 1e-6)
+        for i in (1, 2):
+            assert np.linalg.norm(out[2 + 3 * i:4 + 3 * i] * _SCALE - c) >= 2 * BALL_RADIUS - 1e-6
+    last = OBS.copy(); last[7] = 1.0; last[10] = 1.0                         # balls 1 and 2 already in
+    assert oracle_cue_next(last, last, ball=0)[1]                            # pocketing ball 0 clears the rack
+
+
+def test_oracle_cue_mode_needs_model_mode_and_feeds_the_oracle_position():
+    seen = []
+    def sim(raw, a):
+        nxt = raw.copy(); nxt[0] += 0.1; nxt[5] = 0.123; nxt[4] = 0.0          # simulator: missed, pushed ball 1
+        seen.append(raw.copy())
+        return nxt, False, False, False
+    sc = Scorer({round(0.5 + 0.1 * d, 2): [1.0, 0.0, -1.0] for d in range(4)})
+    with pytest.raises(ValueError):
+        LookaheadPolicy(sc, sim, mode="sim", next_state="oracle_cue")
+    pol = LookaheadPolicy(sc, sim, mode="model", widths=(1, 1), next_state="oracle_cue")
+    orig = pol._candidates
+    pol._candidates = lambda raw, **kw: (setattr(sc, "_cue", raw[0]), orig(raw, **kw))[1]
+    pol.act(OBS)
+    assert len(seen) == 2 and seen[1][4] == 1.0 and seen[1][5] == pytest.approx(OBS[5])   # target in, ball 1 unmoved
