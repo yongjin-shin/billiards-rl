@@ -180,7 +180,7 @@ def plot(args: argparse.Namespace) -> None:
         ax.set_title(title, color=ink, fontsize=13, loc="left", pad=22)
         ax.text(0, 1.012, sub, transform=ax.transAxes, color=ink2, fontsize=10, va="bottom")
     cb = fig.colorbar(im, ax=axes, fraction=0.025, pad=0.02, ticks=range(0, left + 1))
-    cb.set_label("넣는 공 수", color=ink2, fontsize=11); cb.ax.tick_params(colors=ink2)
+    cb.ax.set_title("넣는 공 수", color=ink2, fontsize=11, pad=10); cb.ax.tick_params(colors=ink2)
     cb.outline.set_edgecolor(ink2)
     fig.savefig(args.out, dpi=150, facecolor=surface, bbox_inches="tight")
     print(f"saved {args.out}", flush=True)
