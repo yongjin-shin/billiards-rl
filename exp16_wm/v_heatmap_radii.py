@@ -79,6 +79,24 @@ def zone_auc(pred: np.ndarray, zone_map: np.ndarray, threshold: float) -> float:
     return float(roc_auc_score(y, pred[m]))
 
 
+def noise_report(a: np.ndarray, b: np.ndarray, v: np.ndarray, threshold: float = 4.0) -> dict[str, float]:
+    """Two independent simulated maps a, b of the same radius (different copies) and V's map v: how much of a map is sampling noise.
+    reproducibility = corr(a, b); the 16-copy average (a + b) / 2 has reliability 2r / (1 + r) (Spearman-Brown); the zone agreement is
+    the share of cells on which both maps put the cell on the same side of `threshold`; replicate_auc is how well b finds a's good zone
+    (a perfect predictor of the smooth map, handicapped by the noise in both maps)."""
+    from sklearn.metrics import roc_auc_score
+    m = np.isfinite(a) & np.isfinite(b) & np.isfinite(v)
+    r = float(np.corrcoef(a[m], b[m])[0, 1])
+    avg = (a + b) / 2
+    rel = 2 * r / (1 + r)
+    za, zb = a[m] >= threshold, b[m] >= threshold
+    cv = lambda z: float(np.corrcoef(v[m], z[m])[0, 1])
+    return {"reproducibility": r, "reliability_16": rel, "jump_single": (jump_share(a) + jump_share(b)) / 2, "jump_16": jump_share(avg),
+            "corr_v_single": (cv(a) + cv(b)) / 2, "corr_v_16": cv(avg), "corr_v_16_corrected": cv(avg) / float(np.sqrt(rel)),
+            "zone_agreement": float(np.mean(za == zb)), "replicate_auc": float(roc_auc_score(za, b[m])) if 0 < za.mean() < 1 else float("nan"),
+            "v_auc": float(roc_auc_score(za, v[m])) if 0 < za.mean() < 1 else float("nan")}
+
+
 def made_max_map(c, runs: list[str]) -> np.ndarray:
     """The made head's highest pair probability with the cue ball on every free cell of the cache (the "is there an easy shot" baseline)."""
     from exp16_wm.networks import TABLE_L, TABLE_W
@@ -188,7 +206,15 @@ def main() -> None:
     p.add_argument("--real", default="", help="npz of simulated 2 ~ 5 cm maps (written by --simulate, read when it exists)")
     p.add_argument("--simulate", action="store_true", help="simulate the 2 ~ 5 cm maps into --real first")
     p.add_argument("--runs", nargs="+", default=[]); p.add_argument("--workers", type=int, default=8)
+    p.add_argument("--replicate", default="", help="npz of the same radius simulated with another seed (smooth_<--replicate-cm>): print the noise report")
+    p.add_argument("--replicate-cm", type=float, default=3.0)
     args = p.parse_args()
+    if args.replicate:
+        c = np.load(args.cache, allow_pickle=True)
+        a, b = np.load(args.real)[f"smooth_{args.replicate_cm:g}"], np.load(args.replicate)[f"smooth_{args.replicate_cm:g}"]
+        for k, val in noise_report(a, b, c["v"]).items():
+            print(f"{k:22s} {val:.3f}")
+        return
     if args.simulate:
         if not args.real or not args.runs:
             raise SystemExit("--simulate needs --real and --runs")

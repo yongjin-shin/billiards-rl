@@ -77,7 +77,8 @@ def explain_figure(png: str, heading: str = '먼저: "1 cm 흔든다"는 게 무
 
 def radii_figure(png: str) -> str:
     return explain_figure(png, "평균 반지름을 키우면 지도가 어떻게 달라지나",
-                          "왼쪽부터 ① 실제 결과, 1 cm 평균, 2 ~ 5 cm 평균, V의 예측입니다. 같은 공 배치와 같은 색 척도이고 각 그림 아래는 이웃한 칸이 1개 이상 다른 비율입니다.",
+                          "왼쪽부터 ① 실제 결과, 1 ~ 5 cm 평균(칸마다 8번 실제로 친 평균), V의 예측입니다. 같은 공 배치와 같은 색 척도이고 각 그림 아래는 이웃한 칸이 1개 이상 다른 비율입니다. "
+                          "평균 지도의 점 무늬는 8번 평균에 남은 표본 잡음입니다(같은 3 cm 지도를 독립적으로 두 번 만들면 서로 상관 0.81).",
                           "같은 공 배치에서 ① 실제 결과, 1 cm, 2 cm, 3 cm, 4 cm, 5 cm 평균, V의 예측을 나란히 놓은 2차원 지도 7장. 반지름이 커질수록 매끄러워진다.") \
         .replace('<section class="explain">', '<section class="explain" id="radii">')
 

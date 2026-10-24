@@ -7,7 +7,7 @@ import numpy as np
 import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from exp16_wm.v_heatmap_radii import correlation_table, disk_average, jump_share, load_real, panels_of, plot_radii, zone_auc, zone_table
+from exp16_wm.v_heatmap_radii import correlation_table, disk_average, jump_share, load_real, panels_of, noise_report, plot_radii, zone_auc, zone_table
 
 
 def test_disk_average_radius_zero_is_identity_and_constant_stays_constant_around_holes():
@@ -89,3 +89,15 @@ def test_zone_table_rows_for_the_averaged_maps_only():
     rows = zone_table(panels_of(c), {"x": c["truth"]}, threshold=1.0)
     assert len(rows) == 5 and rows[0][0] == "1 cm 평균"                                       # 1 cm, 2, 3, 4, 5 cm
     assert set(rows[0][2]) == {"V", "① 한 번 친 결과", "x"} and 0.0 <= rows[0][1] <= 1.0
+
+
+def test_noise_report_identical_maps_are_noise_free_and_independent_noise_lowers_reproducibility():
+    rng = np.random.default_rng(0)
+    base = rng.integers(0, 6, (40, 30)).astype(float)
+    v = base * 0.5 + rng.normal(0, 1, base.shape)
+    same = noise_report(base, base, v)
+    assert same["reproducibility"] == pytest.approx(1.0) and same["reliability_16"] == pytest.approx(1.0) and same["zone_agreement"] == 1.0
+    assert same["replicate_auc"] == pytest.approx(1.0) and same["jump_single"] == pytest.approx(same["jump_16"])
+    noisy = noise_report(base + rng.normal(0, 1.5, base.shape), base + rng.normal(0, 1.5, base.shape), v)
+    assert noisy["reproducibility"] < 0.9 and noisy["jump_16"] < noisy["jump_single"] and noisy["zone_agreement"] < 1.0   # averaging two copies smooths
+    assert noisy["corr_v_16_corrected"] > noisy["corr_v_16"]                                                              # the correction raises the correlation
