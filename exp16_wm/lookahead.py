@@ -70,7 +70,8 @@ class LookaheadPolicy:
     (next raw obs, pocketed something, scratch, rack cleared)."""
 
     def __init__(self, scorer, sim, k: int = 10, mode: str = "model", widths: tuple[int, ...] | None = None, recorder=None,
-                 leaf: str = "made", next_state: str = "sim", cue_noise_m: float = 0.0, seed: int = 0):
+                 leaf: str = "made", next_state: str = "sim", cue_noise_m: float = 0.0, seed: int = 0,
+                 objective: str = "runout"):
         """widths = shots simulated per level: (10,) looks one shot ahead (= k), (10, 5) two shots ahead, …"""
         if mode not in ("model", "sim"):
             raise ValueError(f"mode must be 'model' or 'sim', got {mode!r}")
@@ -96,6 +97,11 @@ class LookaheadPolicy:
             raise ValueError("next_state 'oracle_cue' needs mode 'model' (the simulator only gives the cue ball's landing spot)")
         self.next_state, self.cue_noise_m = next_state, float(cue_noise_m)
         self.rng = np.random.default_rng(seed)                      # its own RNG: the game's RNG is untouched
+        # objective: "runout" = value of a position = P(every shot to the end goes in) (probabilities multiplied);
+        # "balls" (V2) = expected balls before the first miss: score(a) = p(a) × (1 + value(s')), leaf V = balls left × sigmoid(V)
+        if objective not in ("runout", "balls"):
+            raise ValueError(f"objective must be 'runout' or 'balls', got {objective!r}")
+        self.objective = objective
         self.n_sims = 0                                             # simulations run (cost per shot = n_sims / shots)
         self.sc, self.bi = scorer.act_scale, scorer.act_bias
 
@@ -143,7 +149,14 @@ class LookaheadPolicy:
             return 0.0, None
         if not widths:
             i = int(p.argmax())
-            return (self._v(raw) if self.leaf == "v" else float(p[i])), acts[i]
+            if self.leaf == "v":
+                v = self._v(raw)
+                if self.objective == "balls":
+                    from exp16_wm.v_data import pocketed_count
+                    from exp16_wm.obs_transform import n_balls_raw
+                    v *= n_balls_raw(len(raw)) - pocketed_count(raw)
+                return v, acts[i]
+            return float(p[i]), acts[i]
         best, best_a, rec = -1.0, None, []
         for i in np.argsort(-p)[:widths[0]]:
             nxt, made, scratch, cleared = self._simulate(raw, acts[i])
@@ -155,6 +168,8 @@ class LookaheadPolicy:
                 score = 0.0
             elif cleared:
                 score = now
+            elif self.objective == "balls":                           # this shot's ball + the balls expected after it
+                score = now * (1.0 + self._best(nxt, widths[1:])[0])
             else:                                                     # the same depth for every shot (a shallower value for some
                 score = now * self._best(nxt, widths[1:])[0]          # shots would favour them: fewer probabilities multiplied)
             if top_level and self.recorder is not None:
@@ -205,16 +220,18 @@ def main() -> None:
     p.add_argument("--next-state", default="sim", choices=["sim", "cue", "oracle_cue"],
                    help="cue: only the cue ball moves (D1-a); oracle_cue: target ball in, cue ball at its landing spot + noise (D2)")
     p.add_argument("--cue-noise-cm", type=float, default=0.0, help="oracle_cue: sd (cm, per axis) of the cue ball's position")
+    p.add_argument("--objective", default="runout", choices=["runout", "balls"], help="balls: expected balls before a miss (V2)")
     p.add_argument("--threads", type=int, default=2)
     p.add_argument("--seeds", type=int, nargs="+", default=list(EVAL_SEEDS)); p.add_argument("--games-per-seed", type=int, default=GAMES_PER_SEED)
     args = p.parse_args()
     torch.set_num_threads(args.threads)
     runs = [find_run(g) for g in args.runs]
     pol = LookaheadPolicy(load_ensemble(runs, args.aim), make_sim(args.n_balls), args.k, args.mode, args.widths, leaf=args.leaf, next_state=args.next_state,
-                          cue_noise_m=args.cue_noise_cm / 100.0, seed=1000 + args.seeds[0])
+                          cue_noise_m=args.cue_noise_cm / 100.0, seed=1000 + args.seeds[0],
+                          objective=args.objective)
     t0 = time.time()
     res = play_paired(pol, tuple(args.seeds), args.games_per_seed, clear_env_kw(args.n_balls))
-    meta = {"runs": runs, "infer": f"lookahead_{args.mode}_w{'-'.join(map(str, pol.widths))}_{args.leaf}_next{args.next_state}" + (f"_n{args.cue_noise_cm:g}cm" if args.cue_noise_cm else ""), "n_balls": args.n_balls, "eval_seeds": args.seeds,
+    meta = {"runs": runs, "infer": f"lookahead_{args.mode}_w{'-'.join(map(str, pol.widths))}_{args.leaf}_next{args.next_state}" + (f"_n{args.cue_noise_cm:g}cm" if args.cue_noise_cm else "") + ("_balls" if args.objective == "balls" else ""), "n_balls": args.n_balls, "eval_seeds": args.seeds,
             "games_per_seed": args.games_per_seed, "seconds": round(time.time() - t0, 1), "machine": machine_info()}
     meta["sims_per_shot"] = round(pol.n_sims / max(1, len(res["succ"])), 2)
     save(args.out, res, meta)

@@ -214,3 +214,15 @@ def test_oracle_cue_mode_needs_model_mode_and_feeds_the_oracle_position():
     pol._candidates = lambda raw, **kw: (setattr(sc, "_cue", raw[0]), orig(raw, **kw))[1]
     pol.act(OBS)
     assert len(seen) == 2 and seen[1][4] == 1.0 and seen[1][5] == pytest.approx(OBS[5])   # target in, ball 1 unmoved
+
+
+def test_balls_objective_prefers_a_sure_ball_then_a_likely_one_over_a_likely_run_out():
+    # shot 0: p 0.9, next position's best shot 0.5; shot 1: p 0.6, next best 0.95
+    # runout: 0.45 vs 0.57 → shot 1; balls: 0.9·1.5 = 1.35 vs 0.6·1.95 = 1.17 → shot 0
+    logit = lambda q: float(np.log(q / (1 - q)))
+    for objective, want in (("runout", 0.1), ("balls", 0.0)):
+        pol = _policy([logit(0.9), logit(0.6), -20.0], [logit(0.5), logit(0.95), -20.0], [True, True, False], k=2)
+        pol.objective = objective
+        assert pol.act(OBS)[0] == pytest.approx(want)
+    with pytest.raises(ValueError):
+        LookaheadPolicy(Scorer({}), lambda r, a: None, objective="score")
