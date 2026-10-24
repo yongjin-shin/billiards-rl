@@ -48,14 +48,19 @@ def load_v_data(paths: list[str], val_frac: float = 0.1, seed: int = 0) -> dict[
     return {k: v[keep] for k, v in d.items()}
 
 
-def load_smooth_k(paths: list[str], smooth_dir: str, d: dict[str, np.ndarray]) -> np.ndarray:
+def load_smooth_k(paths: list[str], smooth_dir: str, d: dict[str, np.ndarray], eps_mm: float = 0.0) -> np.ndarray:
     """(N,) the mean k over the ε-moved copies of each position (exp16_wm.v_perturb output `<smooth_dir>/<data file name>`), aligned with the
-    rows load_v_data returned for `paths`. A position none of whose copies could be placed keeps its exact k. Raises when a file's k or
-    balls left differ from d's (the labels belong to other data)."""
+    rows load_v_data returned for `paths`. eps_mm picks the radius when a file holds several (0 = the file must hold exactly one). A
+    position none of whose copies could be placed keeps its exact k. Raises when a file's k or balls left differ from d's (the labels
+    belong to other data) or the radius is not in the file."""
     ks, lefts, means = [], [], []
     for p in paths:
         z = np.load(os.path.join(smooth_dir, os.path.basename(p)))
-        kp = z["k_pert"][:, 0, :]
+        eps = np.atleast_1d(z["eps_mm"])
+        hits = np.arange(len(eps)) if eps_mm == 0 else np.nonzero(np.isclose(eps, eps_mm))[0]
+        if len(hits) != 1:
+            raise ValueError(f"{p}: radii in the label file are {eps.tolist()} mm; pick one with eps_mm (asked {eps_mm})")
+        kp = z["k_pert"][:, int(hits[0]), :]
         placed = kp >= 0
         n = placed.sum(axis=1)
         means.append(np.where(n > 0, np.where(placed, kp, 0).sum(axis=1) / np.maximum(n, 1), np.nan))
@@ -209,6 +214,7 @@ def main() -> None:
     p.add_argument("--qv-hidden", type=int, default=0, help="V5: width of a fresh Q / V encoder and V head (0 = keep the run's)")
     p.add_argument("--smooth-labels", default="",
                    help="V6-E: a folder of v_perturb outputs (one per data file name); the label is the mean k of the ε-moved copies instead of the exact k")
+    p.add_argument("--smooth-eps-mm", type=float, default=0.0, help="V6-E: which radius of the label files to use (0 = they hold exactly one)")
     p.add_argument("--target", default="frac", choices=["frac", "clear"],
                    help="V6-D: the label — frac = balls in a row / balls left (0 ~ 1), clear = 1 if every ball goes in else 0")
     p.add_argument("--v-steps", type=int, default=0,
@@ -242,7 +248,7 @@ def main() -> None:
     if args.smooth_labels:
         if args.v_steps or args.target != "frac":
             raise ValueError("--smooth-labels works with the single value head and --target frac only")
-        d["k_label"] = load_smooth_k(data_paths, args.smooth_labels, d)
+        d["k_label"] = load_smooth_k(data_paths, args.smooth_labels, d, args.smooth_eps_mm)
     else:
         d["k_label"] = d["k"]
     if args.no_branch:

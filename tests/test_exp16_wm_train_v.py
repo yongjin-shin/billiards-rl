@@ -282,3 +282,16 @@ def test_load_smooth_k_rejects_labels_of_other_data(tmp_path):
     with pytest.raises(ValueError):
         load_smooth_k([f], sdir, {k: v[:-1] for k, v in d.items()})                   # a different number of rows
     np.testing.assert_allclose(targets(load_smooth_k([f], sdir, d), d["left"]), [2 / 3, 0.5 / 3, 2 / 3, 1.0, 1.0], atol=1e-6)    # soft target in [0, 1]
+
+
+def test_load_smooth_k_picks_the_radius_when_a_file_holds_several(tmp_path):
+    d, f, sdir = _smooth_setup(tmp_path)
+    z = dict(np.load(tmp_path / "s" / "a.npz"))
+    kp2 = np.concatenate([z["k_pert"], z["k_pert"] * 0 + 1], axis=1)                  # a second radius where every copy gives 1 ball
+    np.savez(tmp_path / "s" / "a.npz", **{**z, "k_pert": kp2, "eps_mm": np.array([10.0, 30.0])})
+    np.testing.assert_allclose(load_smooth_k([f], sdir, d, eps_mm=10.0), [2.0, 0.5, 2.0, 3.0, 3.0])
+    np.testing.assert_allclose(load_smooth_k([f], sdir, d, eps_mm=30.0), [1.0] * 5)
+    with pytest.raises(ValueError):
+        load_smooth_k([f], sdir, d)                                                    # two radii and none chosen
+    with pytest.raises(ValueError):
+        load_smooth_k([f], sdir, d, eps_mm=20.0)                                       # that radius is not in the file
