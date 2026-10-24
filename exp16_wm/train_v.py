@@ -47,9 +47,16 @@ def load_v_data(paths: list[str], val_frac: float = 0.1, seed: int = 0) -> dict[
     return {k: v[keep] for k, v in d.items()}
 
 
-def targets(k: np.ndarray, left: np.ndarray) -> np.ndarray:
-    """Fraction of the balls left that go in before the first miss, in [0, 1]."""
-    return np.clip(np.asarray(k, np.float32) / np.maximum(1, np.asarray(left, np.float32)), 0.0, 1.0)
+def cap(left: np.ndarray, horizon: int = 0) -> np.ndarray:
+    """The most balls V can count: the balls left, or at most `horizon` of them (V3: the next H shots only; 0 = no limit)."""
+    left = np.asarray(left)
+    return np.minimum(left, horizon) if horizon > 0 else left
+
+
+def targets(k: np.ndarray, left: np.ndarray, horizon: int = 0) -> np.ndarray:
+    """Fraction of the countable balls (cap) that go in before the first miss, in [0, 1]."""
+    c = np.maximum(1, cap(left, horizon)).astype(np.float32)
+    return np.clip(np.minimum(np.asarray(k, np.float32), c) / c, 0.0, 1.0)
 
 
 def v_logits(model, rel: torch.Tensor) -> torch.Tensor:
@@ -59,23 +66,33 @@ def v_logits(model, rel: torch.Tensor) -> torch.Tensor:
 
 
 @torch.no_grad()
-def predict_balls(model, obs: np.ndarray, left: np.ndarray, chunk: int = 2048) -> np.ndarray:
+def predict_balls(model, obs: np.ndarray, left: np.ndarray, horizon: int = 0, chunk: int = 2048) -> np.ndarray:
     from exp16_wm.obs_transform import relative_obs
     rel = torch.as_tensor(relative_obs(obs))
     z = torch.cat([v_logits(model, rel[i:i + chunk]) for i in range(0, len(rel), chunk)])
-    return torch.sigmoid(z).numpy() * left
+    return torch.sigmoid(z).numpy() * cap(left, horizon)
 
 
-def metrics(pred_balls: np.ndarray, k: np.ndarray, left: np.ndarray) -> dict[str, float]:
-    """AUC for "clears the rack" (k == left), Spearman with the balls pocketed, mean absolute error (balls); baseline = −balls left."""
+def metrics(pred_balls: np.ndarray, k: np.ndarray, left: np.ndarray, horizon: int = 0) -> dict[str, float]:
+    """With k capped at the horizon: AUC for "every countable ball goes in", Spearman with the balls pocketed, the same Spearman within
+    each number of balls left (weighted mean — telling apart positions with as many balls left: what look-ahead needs; the
+    balls-left baseline is 0 there), mean absolute error (balls); baseline = −balls left."""
     from scipy.stats import spearmanr
     from sklearn.metrics import roc_auc_score
-    clear = k >= left
+    c = cap(left, horizon)
+    k = np.minimum(k, c)
+    within, wsum = 0.0, 0
+    for n in np.unique(left):
+        g = left == n
+        if g.sum() > 10 and np.std(k[g]) > 0 and np.std(pred_balls[g]) > 0:
+            within += spearmanr(pred_balls[g], k[g]).correlation * g.sum(); wsum += g.sum()
+    clear = k >= c
     two = 0 < clear.mean() < 1
-    return {"auc_clear": float(roc_auc_score(clear, pred_balls / np.maximum(1, left))) if two else float("nan"),
+    return {"auc_clear": float(roc_auc_score(clear, pred_balls / np.maximum(1, c))) if two else float("nan"),
             "auc_clear_left_baseline": float(roc_auc_score(clear, -left)) if two else float("nan"),
             "spearman_balls": float(spearmanr(pred_balls, k).correlation),
             "spearman_left_baseline": float(spearmanr(left, k).correlation),
+            "spearman_within_left": float(within / wsum) if wsum else float("nan"),
             "mae_balls": float(np.mean(np.abs(pred_balls - k)))}
 
 
@@ -91,6 +108,7 @@ def main() -> None:
     p.add_argument("--init", default="made", choices=["made", "keep"],
                    help="made: the Q / V encoder starts as a copy of the made encoder and the V head fresh; keep: PRm's own Q / V weights")
     p.add_argument("--no-branch", action="store_true", help="game positions only (ablation)")
+    p.add_argument("--horizon", type=int, default=0, help="V3: count only the next H balls (0 = until the first miss, V2)")
     args = p.parse_args()
     torch.set_num_threads(args.threads); torch.manual_seed(args.seed)
     run = find_run(args.run)
@@ -108,7 +126,7 @@ def main() -> None:
     d = load_v_data(sorted(glob.glob(args.data)), seed=args.seed)
     if args.no_branch:
         d = {k: v[~d["branch"]] for k, v in d.items()}
-    rel, y = torch.as_tensor(relative_obs(d["obs"])), torch.as_tensor(targets(d["k"], d["left"]))
+    rel, y = torch.as_tensor(relative_obs(d["obs"])), torch.as_tensor(targets(d["k"], d["left"], args.horizon))
     tr, va = np.nonzero(~d["val"])[0], np.nonzero(d["val"])[0]
     print(f"{len(tr)} train / {len(va)} val positions ({d['branch'].mean():.0%} branch), mean target {y.mean():.3f}", flush=True)
     opt = torch.optim.Adam(params, lr=args.lr)
@@ -130,14 +148,15 @@ def main() -> None:
         if ep % 5 == 0 or ep == args.epochs - 1:
             print(f"  epoch {ep}: val loss {vl:.4f} (best {best:.4f}) {time.time() - t0:.0f}s", flush=True)
     model.load_state_dict(best_state); model.eval()
-    res = {"val": metrics(predict_balls(model, d["obs"][va], d["left"][va]), d["k"][va], d["left"][va])}
+    H = args.horizon
+    res = {"val": metrics(predict_balls(model, d["obs"][va], d["left"][va], H), d["k"][va], d["left"][va], H)}
     if args.eval_data:
         z = np.load(args.eval_data, allow_pickle=True)
         ok = z["left"] > 0
-        res["eval"] = metrics(predict_balls(model, z["obs"][ok], z["left"][ok]), z["k"][ok], z["left"][ok])
+        res["eval"] = metrics(predict_balls(model, z["obs"][ok], z["left"][ok], H), z["k"][ok], z["left"][ok], H)
     os.makedirs(args.out, exist_ok=True)
     a = json.load(open(os.path.join(run, "results.json")))
-    a["args"].update(v_weight=1.0, qv_encoder=True)
+    a["args"].update(v_weight=1.0, qv_encoder=True, v_horizon=args.horizon)
     a["v2"] = {**vars(args), "from_run": run, "best_val_loss": best, "val_history": hist, "metrics": res, "git_commit": code_version()}
     json.dump(a, open(os.path.join(args.out, "results.json"), "w"), indent=1)
     torch.save({"gnn": model.state_dict()}, os.path.join(args.out, "bc_model.pt"))

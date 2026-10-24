@@ -71,7 +71,7 @@ class LookaheadPolicy:
 
     def __init__(self, scorer, sim, k: int = 10, mode: str = "model", widths: tuple[int, ...] | None = None, recorder=None,
                  leaf: str = "made", next_state: str = "sim", cue_noise_m: float = 0.0, seed: int = 0,
-                 objective: str = "runout"):
+                 objective: str = "runout", v_horizon: int = 0):
         """widths = shots simulated per level: (10,) looks one shot ahead (= k), (10, 5) two shots ahead, …"""
         if mode not in ("model", "sim"):
             raise ValueError(f"mode must be 'model' or 'sim', got {mode!r}")
@@ -102,6 +102,7 @@ class LookaheadPolicy:
         if objective not in ("runout", "balls"):
             raise ValueError(f"objective must be 'runout' or 'balls', got {objective!r}")
         self.objective = objective
+        self.v_horizon = int(v_horizon)                             # V3: the V head counts only the next H balls (0 = all)
         self.n_sims = 0                                             # simulations run (cost per shot = n_sims / shots)
         self.sc, self.bi = scorer.act_scale, scorer.act_bias
 
@@ -154,7 +155,8 @@ class LookaheadPolicy:
                 if self.objective == "balls":
                     from exp16_wm.v_data import pocketed_count
                     from exp16_wm.obs_transform import n_balls_raw
-                    v *= n_balls_raw(len(raw)) - pocketed_count(raw)
+                    left = n_balls_raw(len(raw)) - pocketed_count(raw)
+                    v *= min(left, self.v_horizon) if self.v_horizon > 0 else left
                 return v, acts[i]
             return float(p[i]), acts[i]
         best, best_a, rec = -1.0, None, []
@@ -184,6 +186,11 @@ class LookaheadPolicy:
     def act(self, raw_obs: np.ndarray, deterministic: bool = True) -> np.ndarray:
         _, a = self._best(np.asarray(raw_obs, np.float32), self.widths)
         return np.array([0.0, 1.0], np.float32) if a is None else np.asarray(a, np.float32)
+
+
+def _run_v_horizon(run_dir: str) -> int:
+    import json
+    return int(json.load(open(os.path.join(run_dir, "results.json")))["args"].get("v_horizon", 0) or 0)
 
 
 def make_sim(n_balls: int):
@@ -220,6 +227,7 @@ def main() -> None:
     p.add_argument("--next-state", default="sim", choices=["sim", "cue", "oracle_cue"],
                    help="cue: only the cue ball moves (D1-a); oracle_cue: target ball in, cue ball at its landing spot + noise (D2)")
     p.add_argument("--cue-noise-cm", type=float, default=0.0, help="oracle_cue: sd (cm, per axis) of the cue ball's position")
+    p.add_argument("--v-horizon", type=int, default=-1, help="balls the V head counts (default: the run's v_horizon, 0 = all)")
     p.add_argument("--objective", default="runout", choices=["runout", "balls"], help="balls: expected balls before a miss (V2)")
     p.add_argument("--threads", type=int, default=2)
     p.add_argument("--seeds", type=int, nargs="+", default=list(EVAL_SEEDS)); p.add_argument("--games-per-seed", type=int, default=GAMES_PER_SEED)
@@ -228,7 +236,7 @@ def main() -> None:
     runs = [find_run(g) for g in args.runs]
     pol = LookaheadPolicy(load_ensemble(runs, args.aim), make_sim(args.n_balls), args.k, args.mode, args.widths, leaf=args.leaf, next_state=args.next_state,
                           cue_noise_m=args.cue_noise_cm / 100.0, seed=1000 + args.seeds[0],
-                          objective=args.objective)
+                          objective=args.objective, v_horizon=args.v_horizon if args.v_horizon >= 0 else _run_v_horizon(runs[0]))
     t0 = time.time()
     res = play_paired(pol, tuple(args.seeds), args.games_per_seed, clear_env_kw(args.n_balls))
     meta = {"runs": runs, "infer": f"lookahead_{args.mode}_w{'-'.join(map(str, pol.widths))}_{args.leaf}_next{args.next_state}" + (f"_n{args.cue_noise_cm:g}cm" if args.cue_noise_cm else "") + ("_balls" if args.objective == "balls" else ""), "n_balls": args.n_balls, "eval_seeds": args.seeds,

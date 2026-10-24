@@ -45,3 +45,19 @@ def test_only_v_modules_get_gradients():
     v_logits(m, torch.as_tensor(relative_obs(OBS[None]))).sum().backward()
     got = {n.split(".")[0] for n, prm in m.named_parameters() if prm.grad is not None and prm.grad.abs().sum() > 0}
     assert got and got <= set(V_MODULES)
+
+
+def test_horizon_caps_the_target_and_the_prediction_scale():
+    from exp16_wm.train_v import cap
+    k, left = np.array([0, 1, 3, 5]), np.array([6, 6, 6, 1])
+    np.testing.assert_array_equal(cap(left, 2), [2, 2, 2, 1])
+    np.testing.assert_allclose(targets(k, left, 2), [0.0, 0.5, 1.0, 1.0])
+    np.testing.assert_allclose(targets(k, left, 0), [0.0, 1 / 6, 0.5, 1.0])
+
+
+def test_within_left_spearman_is_zero_signal_for_the_balls_left_baseline_and_one_for_a_perfect_v():
+    left = np.repeat([3, 6], 20)
+    k = np.r_[np.arange(20) % 4, np.arange(20) % 7]
+    m = metrics(k.astype(float), k, left)
+    assert m["spearman_within_left"] == pytest.approx(1.0)
+    assert np.isnan(metrics(left.astype(float), k, left)["spearman_within_left"])   # constant within each group: no signal
