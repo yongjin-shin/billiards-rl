@@ -88,6 +88,14 @@ def scan_metrics(prob: np.ndarray, truth: np.ndarray) -> dict[str, float]:
 def load_run(run_dir: str) -> PairGNNPolicy:
     """Rebuild the policy from the run's results.json args and its bc_model.pt."""
     a = json.load(open(os.path.join(run_dir, "results.json")))["args"]
+    m = policy_from_args(a)
+    m.load_state_dict(torch.load(os.path.join(run_dir, "bc_model.pt"))["gnn"])
+    m.qv_detach = bool(a.get("qv_detach", False))
+    return m.eval()
+
+
+def policy_from_args(a: dict) -> PairGNNPolicy:
+    """An untrained policy with the structure a run's results.json args describe (weights not loaded)."""
     aim_enc = None
     if a.get("made2_aim_from"):                                         # cascade: rebuild the frozen aim encoder(s) (weights come with the checkpoint)
         from exp16_wm.bc import load_aim_encoder
@@ -102,10 +110,9 @@ def load_run(run_dir: str) -> PairGNNPolicy:
                       aux_dim=1 if a.get("made2_self_aim") else ((1 if a.get("geom_aux_set") in ("aim", "scan") else 4) if float(a.get("geom_aux_weight", 0) or 0) > 0 else 0),
                       aim_encoder=aim_enc, fourier=int(a.get("input_fourier", 0) or 0), made2_no_proposal=bool(a.get("made2_no_proposal", False)),
                       self_aim=a.get("made2_self_aim") or "", q_head=float(a.get("q_weight", 0) or 0) > 0,
-                      v_head=float(a.get("v_weight", 0) or 0) > 0, qv_encoder=bool(a.get("qv_encoder", False)))
-    m.load_state_dict(torch.load(os.path.join(run_dir, "bc_model.pt"))["gnn"])
-    m.qv_detach = bool(a.get("qv_detach", False))
-    return m.eval()
+                      v_head=float(a.get("v_weight", 0) or 0) > 0, qv_encoder=bool(a.get("qv_encoder", False)),
+                      qv_hidden=int(a.get("qv_hidden", 0) or 0))
+    return m
 
 
 def play(env, pm, obs: np.ndarray, action: np.ndarray) -> tuple[np.ndarray, bool]:

@@ -34,14 +34,15 @@ def load_v_data(paths: list[str], val_frac: float = 0.1, seed: int = 0) -> dict[
     if not paths:
         raise FileNotFoundError("no V data files")
     rng = np.random.default_rng(seed)
-    out = {k: [] for k in ("obs", "k", "left", "branch", "val")}
-    for p in paths:
+    out = {k: [] for k in ("obs", "k", "left", "branch", "val", "gid")}
+    for f, p in enumerate(paths):
         z = np.load(p, allow_pickle=True)
         games = np.unique(z["game"])
         val_games = set(rng.choice(games, size=max(1, int(round(val_frac * len(games)))), replace=False).tolist()) if val_frac > 0 else set()
         for k in ("obs", "k", "left", "branch"):
             out[k].append(z[k])
         out["val"].append(np.isin(z["game"], list(val_games)))
+        out["gid"].append(f * 10_000_000 + z["game"].astype(np.int64))      # a game id unique across files
     d = {k: np.concatenate(v) for k, v in out.items()}
     keep = d["left"] > 0
     return {k: v[keep] for k, v in d.items()}
@@ -96,6 +97,29 @@ def metrics(pred_balls: np.ndarray, k: np.ndarray, left: np.ndarray, horizon: in
             "mae_balls": float(np.mean(np.abs(pred_balls - k)))}
 
 
+def subsample_games(gid: np.ndarray, rows: np.ndarray, frac: float, seed: int) -> np.ndarray:
+    """The rows of a random frac of the games among rows (whole games; frac 1 keeps all)."""
+    if frac >= 1.0:
+        return rows
+    games = np.unique(gid[rows])
+    keep = np.random.default_rng(seed).choice(games, size=max(1, int(round(frac * len(games)))), replace=False)
+    return rows[np.isin(gid[rows], keep)]
+
+
+def widen_qv(model, run_args: dict, qv_hidden: int):
+    """A copy of model whose Q / V encoder and V head have width qv_hidden (freshly initialised); every other weight is copied.
+    The Q head is dropped (it reads made2 features of the made width)."""
+    from exp16_wm import eval_by_balls as E
+    a = {**run_args, "qv_encoder": True, "qv_hidden": qv_hidden, "q_weight": 0, "v_weight": 1.0}
+    new = E.policy_from_args(a)
+    keep = {k: v for k, v in model.state_dict().items() if not k.startswith(("qv_", "head_v", "head_q"))}
+    res = new.load_state_dict(keep, strict=False)
+    if res.unexpected_keys or any(not k.startswith(("qv_", "head_v")) for k in res.missing_keys):
+        raise RuntimeError(f"widen_qv: unexpected {res.unexpected_keys}, missing {res.missing_keys}")
+    new.qv_detach = model.qv_detach
+    return new, a
+
+
 def main() -> None:
     from exp16_wm import eval_by_balls as E
     from exp16_wm.code_version import code_version
@@ -109,13 +133,20 @@ def main() -> None:
                    help="made: the Q / V encoder starts as a copy of the made encoder and the V head fresh; keep: PRm's own Q / V weights")
     p.add_argument("--no-branch", action="store_true", help="game positions only (ablation)")
     p.add_argument("--horizon", type=int, default=0, help="V3: count only the next H balls (0 = until the first miss, V2)")
+    p.add_argument("--data-frac", type=float, default=1.0, help="V5: train on this fraction of the training games (val unchanged)")
+    p.add_argument("--qv-hidden", type=int, default=0, help="V5: width of a fresh Q / V encoder and V head (0 = keep the run's)")
     args = p.parse_args()
     torch.set_num_threads(args.threads); torch.manual_seed(args.seed)
     run = find_run(args.run)
     model = E.load_run(run)
     if not getattr(model, "qv_encoder", False):
         raise ValueError(f"{run} has no Q / V encoder (trained without --qv-encoder)")
-    if args.init == "made":
+    run_args = json.load(open(os.path.join(run, "results.json")))["args"]
+    if args.qv_hidden and args.qv_hidden != model.qv_hidden:
+        model, run_args = widen_qv(model, run_args, args.qv_hidden)
+        if args.init == "made":
+            raise ValueError("--init made copies the made encoder, which has another width than --qv-hidden")
+    elif args.init == "made":
         model.copy_encoder_to_qv()
         for mod in model.head_v.modules():
             if hasattr(mod, "reset_parameters"):
@@ -128,16 +159,22 @@ def main() -> None:
         d = {k: v[~d["branch"]] for k, v in d.items()}
     rel, y = torch.as_tensor(relative_obs(d["obs"])), torch.as_tensor(targets(d["k"], d["left"], args.horizon))
     tr, va = np.nonzero(~d["val"])[0], np.nonzero(d["val"])[0]
+    n_full = len(tr)
+    tr = subsample_games(d["gid"], tr, args.data_frac, args.seed)
     print(f"{len(tr)} train / {len(va)} val positions ({d['branch'].mean():.0%} branch), mean target {y.mean():.3f}", flush=True)
     opt = torch.optim.Adam(params, lr=args.lr)
     rng = np.random.default_rng(args.seed)
-    best, best_state, hist, t0 = float("inf"), None, [], time.time()
+    best, best_state, hist, tr_hist, t0 = float("inf"), None, [], [], time.time()
+    steps = -(-n_full // args.batch)                     # steps per epoch of the full data, also with --data-frac (same compute)
     for ep in range(args.epochs):
         model.train()
-        for i in range(0, len(tr), args.batch):
+        tl, tn = 0.0, 0
+        for i in range(steps):
             b = torch.as_tensor(tr[rng.integers(0, len(tr), args.batch)])
             loss = F.binary_cross_entropy_with_logits(v_logits(model, rel[b]), y[b])
             opt.zero_grad(); loss.backward(); opt.step()
+            tl += loss.item(); tn += 1
+        tr_hist.append(tl / max(1, tn))
         model.eval()
         with torch.no_grad():
             vl = sum(F.binary_cross_entropy_with_logits(v_logits(model, rel[va[i:i + 4096]]), y[va[i:i + 4096]], reduction="sum").item()
@@ -146,7 +183,7 @@ def main() -> None:
         if vl < best:
             best, best_state = vl, {k: v.clone() for k, v in model.state_dict().items()}
         if ep % 5 == 0 or ep == args.epochs - 1:
-            print(f"  epoch {ep}: val loss {vl:.4f} (best {best:.4f}) {time.time() - t0:.0f}s", flush=True)
+            print(f"  epoch {ep}: train loss {tr_hist[-1]:.4f}  val loss {vl:.4f} (best {best:.4f}) {time.time() - t0:.0f}s", flush=True)
     model.load_state_dict(best_state); model.eval()
     H = args.horizon
     res = {"val": metrics(predict_balls(model, d["obs"][va], d["left"][va], H), d["k"][va], d["left"][va], H)}
@@ -156,8 +193,9 @@ def main() -> None:
         res["eval"] = metrics(predict_balls(model, z["obs"][ok], z["left"][ok], H), z["k"][ok], z["left"][ok], H)
     os.makedirs(args.out, exist_ok=True)
     a = json.load(open(os.path.join(run, "results.json")))
-    a["args"].update(v_weight=1.0, qv_encoder=True, v_horizon=args.horizon)
-    a["v2"] = {**vars(args), "from_run": run, "best_val_loss": best, "val_history": hist, "metrics": res, "git_commit": code_version()}
+    a["args"] = {**run_args, "v_weight": 1.0, "qv_encoder": True, "v_horizon": args.horizon}
+    a["v2"] = {**vars(args), "from_run": run, "best_val_loss": best, "val_history": hist, "train_history": tr_hist,
+               "n_train": int(len(tr)), "metrics": res, "git_commit": code_version()}
     json.dump(a, open(os.path.join(args.out, "results.json"), "w"), indent=1)
     torch.save({"gnn": model.state_dict()}, os.path.join(args.out, "bc_model.pt"))
     for k, m in res.items():

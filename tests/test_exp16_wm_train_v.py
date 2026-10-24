@@ -61,3 +61,46 @@ def test_within_left_spearman_is_zero_signal_for_the_balls_left_baseline_and_one
     m = metrics(k.astype(float), k, left)
     assert m["spearman_within_left"] == pytest.approx(1.0)
     assert np.isnan(metrics(left.astype(float), k, left)["spearman_within_left"])   # constant within each group: no signal
+
+
+def test_subsample_games_keeps_whole_games_and_all_with_frac_one():
+    from exp16_wm.train_v import subsample_games
+    gid = np.repeat(np.arange(10), 3); rows = np.arange(30)
+    np.testing.assert_array_equal(subsample_games(gid, rows, 1.0, 0), rows)
+    half = subsample_games(gid, rows, 0.5, 0)
+    assert len(half) == 15 and all((gid[half] == g).sum() == 3 for g in np.unique(gid[half]))
+    assert len(subsample_games(gid, rows, 0.01, 0)) == 3                        # at least one game
+
+
+def test_load_v_data_game_ids_differ_across_files(tmp_path):
+    for f in ("a", "b"):
+        np.savez(tmp_path / f"{f}.npz", obs=np.tile(OBS, (4, 1)), k=np.ones(4, int), left=np.full(4, 3),
+                 game=np.array([0, 0, 1, 1]), branch=np.zeros(4, bool))
+    d = load_v_data([str(tmp_path / "a.npz"), str(tmp_path / "b.npz")], val_frac=0.0)
+    assert len(np.unique(d["gid"])) == 4
+
+
+def test_widen_qv_copies_the_made_side_and_gives_a_wider_v():
+    from exp16_wm import eval_by_balls as E
+    from exp16_wm.obs_transform import relative_obs
+    from exp16_wm.train_v import widen_qv
+    a = {"gnn_hidden": 8, "gnn_layers": 2, "made2_head": True, "q_weight": 1.0, "v_weight": 1.0, "qv_encoder": True}
+    m = E.policy_from_args(a)
+    new, a2 = widen_qv(m, a, 16)
+    assert a2["qv_hidden"] == 16 and a2["q_weight"] == 0 and not hasattr(new, "head_q")
+    for k, v in m.state_dict().items():
+        if not k.startswith(("qv_", "head_v", "head_q")):
+            assert torch.equal(new.state_dict()[k], v)
+    assert new.qv_pair[-1].out_features == 16
+    assert v_logits(new, torch.as_tensor(relative_obs(np.tile(OBS, (2, 1))))).shape == (2,)
+    assert E.policy_from_args(a2).state_dict().keys() == new.state_dict().keys()    # load_run rebuilds the same structure
+
+
+def test_qv_hidden_needs_qv_encoder_and_no_q_head():
+    from exp16_wm.gnn_policy import PairGNNPolicy
+    with pytest.raises(ValueError):
+        PairGNNPolicy(hidden=8, v_head=True, qv_hidden=16)
+    with pytest.raises(ValueError):
+        PairGNNPolicy(hidden=8, made2_head=True, q_head=True, v_head=True, qv_encoder=True, qv_hidden=16)
+    m = PairGNNPolicy(hidden=8, v_head=True, qv_encoder=True, qv_hidden=0)          # 0 = same width: old checkpoints load
+    assert m.qv_pair[-1].out_features == 8

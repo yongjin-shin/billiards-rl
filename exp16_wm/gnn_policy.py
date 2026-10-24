@@ -96,7 +96,8 @@ class PairGNNPolicy(nn.Module):
                  made2_head: bool = False, geom_angle: bool = False, made2_geom: bool = False,
                  enc_layers: int = 2, speed_loss: str = "mse", speed_bins: int = 0, uncertainty_weights: bool = False, aux_dim: int = 0,
                  aim_encoder: "PairGNNPolicy | list[PairGNNPolicy] | None" = None, fourier: int = 0, made2_no_proposal: bool = False,
-                 self_aim: str = "", q_head: bool = False, v_head: bool = False, qv_encoder: bool = False):
+                 self_aim: str = "", q_head: bool = False, v_head: bool = False, qv_encoder: bool = False,
+                 qv_hidden: int = 0):
         super().__init__()
         if fourier < 0:
             raise ValueError(f"fourier must be ≥ 0, got {fourier}")
@@ -153,10 +154,16 @@ class PairGNNPolicy(nn.Module):
         # EI2: a separate encoder (same structure, own weights) for the Q / V heads — they learn position features of their own
         # without moving the made head's encoder or the aim (the shared one dragged the aim away in EI1)
         self.qv_encoder = qv_encoder
+        QH = qv_hidden or H                              # V5: the Q / V encoder may be wider than the made encoder (0 = same width)
+        if qv_hidden and not qv_encoder:
+            raise ValueError("qv_hidden needs qv_encoder")
+        if q_head and QH != H:
+            raise ValueError("q_head reads made2 features of width hidden; qv_hidden must equal hidden with q_head")
+        self.qv_hidden = QH if qv_encoder else 0
         if qv_encoder:
-            self.qv_bb = _mlp(ball_dim + d2 + 1 + 1, H, H, enc_layers)
-            self.qv_ball = _mlp(ball_dim + H, H, H, enc_layers)
-            self.qv_pair = _mlp(H + d2 + d2 + 1 + 1, H, H, enc_layers)
+            self.qv_bb = _mlp(ball_dim + d2 + 1 + 1, QH, QH, enc_layers)
+            self.qv_ball = _mlp(ball_dim + QH, QH, QH, enc_layers)
+            self.qv_pair = _mlp(QH + d2 + d2 + 1 + 1, QH, QH, enc_layers)
         self.geom_angle = geom_angle                     # angle comes from a pair embedding without the neighbour message
         self.head_a = nn.Linear(H, 2)
         if geom_angle:
@@ -182,7 +189,8 @@ class PairGNNPolicy(nn.Module):
                 raise ValueError("q_head needs made2_head (it shares its candidate features)")
             self.head_q = _mlp(H + 2 + (0 if made2_no_proposal else 2) + int(made2_geom), H, 1)
         if v_head:
-            self.head_v = _mlp(2 * H, H, 1)
+            VH = QH if qv_encoder else H
+            self.head_v = _mlp(2 * VH, VH, 1)
         self.made2_no_proposal = made2_no_proposal
         self.aux_dim = aux_dim                          # auxiliary geometry targets predicted from each pair embedding (training only)
         if aux_dim:
