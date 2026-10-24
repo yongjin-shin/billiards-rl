@@ -74,3 +74,17 @@ def test_metrics_horizon_caps_labels():
 def test_within_spearman_is_nan_without_variation():
     left = np.array([2] * 20)
     assert np.isnan(within_spearman(np.ones(20), np.arange(20.0), left))
+
+
+def test_testset_order_metrics_perfect_and_reversed_copies():
+    from exp16_wm.v_perturb import testset_order_metrics
+    t = {"valid": np.ones((2, 3), bool), "succ": np.array([[True, True, True], [True, True, False]]),
+         "cleared": np.zeros((2, 3), bool), "k_next": np.array([[3, 1, 2], [0, 4, -1]])}
+    use = t["valid"] & t["succ"] & ~t["cleared"]
+    k = t["k_next"][use]                                                   # row-major order of the rankable positions
+    m = testset_order_metrics(t, np.repeat(k[:, None], 4, axis=1))
+    assert m["order_ceiling"] == 1.0 and m["order_repeat"] == 1.0 and m["placed"] == 1.0
+    rev = testset_order_metrics(t, np.repeat((10 - k)[:, None], 2, axis=1))
+    assert rev["order_ceiling"] == 0.0
+    part = np.repeat(k[:, None], 2, axis=1); part[0] = -1                    # one position never placed: dropped, not a crash
+    assert testset_order_metrics(t, part)["placed"] == 0.8

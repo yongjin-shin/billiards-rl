@@ -72,6 +72,26 @@ def perturb_metrics(k: np.ndarray, left: np.ndarray, k_pert: np.ndarray, horizon
             "placed": float(have.mean())}
 
 
+def testset_order_metrics(t: dict[str, np.ndarray], k_pert: np.ndarray) -> dict[str, float]:
+    """V5-c: k_pert (M, C) for the test set's rankable next positions (valid & succ & ~cleared, row-major order): same-origin pair
+    accuracy against the unmoved k_next of the mean over copies (ceiling) and of single copies (repeat, averaged)."""
+    from exp16_wm.v_testset import pair_accuracy
+    use = t["valid"] & t["succ"] & ~t["cleared"]
+    kp = np.where(k_pert >= 0, k_pert, np.nan).astype(float)
+    import warnings
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        mean = np.nanmean(kp, axis=1)
+
+    def grid(v: np.ndarray) -> np.ndarray:
+        g = np.full(use.shape, np.nan); g[use] = v
+        return g
+    ok = use & np.isfinite(grid(mean))
+    rep = [pair_accuracy(np.nan_to_num(grid(kp[:, j])), t["k_next"], use & np.isfinite(grid(kp[:, j]))) for j in range(kp.shape[1])]
+    return {"order_ceiling": pair_accuracy(np.nan_to_num(grid(mean)), t["k_next"], ok), "order_repeat": float(np.mean(rep)),
+            "placed": float(np.isfinite(kp).mean())}
+
+
 def _worker(job: tuple) -> np.ndarray:
     rows, raws, lefts, eps_list, copies, runs, n_balls, seed = job
     import torch
@@ -103,16 +123,30 @@ def main() -> None:
     from exp16_wm.paired_eval import find_run
     from exp16_wm.obs_transform import n_balls_raw
     p = argparse.ArgumentParser()
-    p.add_argument("--runs", nargs="+", required=True); p.add_argument("--data", required=True)
+    p.add_argument("--runs", nargs="+", required=True); p.add_argument("--data", default="")
+    p.add_argument("--testset", default="", help="V5-c: perturb the next positions of this v_testset file instead of --data")
     p.add_argument("--eps-mm", type=float, nargs="+", default=[2.0, 10.0]); p.add_argument("--copies", type=int, default=8)
     p.add_argument("--workers", type=int, default=8); p.add_argument("--seed", type=int, default=0)
     p.add_argument("--limit", type=int, default=0, help="first N positions only (smoke test)"); p.add_argument("--out", required=True)
     args = p.parse_args()
-    z = np.load(args.data, allow_pickle=True)
-    ok = np.nonzero(z["left"] > 0)[0]
-    if args.limit:
-        ok = ok[:args.limit]
-    obs, k, left = z["obs"][ok], z["k"][ok], z["left"][ok]
+    t = None
+    if args.testset:
+        z = np.load(args.testset, allow_pickle=True)
+        t = {k: z[k] for k in ("made", "succ", "balls", "k_next", "cleared", "valid", "next_obs", "left_next")}
+        use = t["valid"] & t["succ"] & ~t["cleared"]
+        if args.limit:
+            use[args.limit:] = False
+            for k in t:
+                t[k] = t[k][:args.limit]
+            use = use[:args.limit]
+        obs, k, left = t["next_obs"][use], t["k_next"][use], t["left_next"][use]
+        ok = np.nonzero(use.reshape(-1))[0]
+    else:
+        z = np.load(args.data, allow_pickle=True)
+        ok = np.nonzero(z["left"] > 0)[0]
+        if args.limit:
+            ok = ok[:args.limit]
+        obs, k, left = z["obs"][ok], z["k"][ok], z["left"][ok]
     runs, n_balls, eps = [find_run(g) for g in args.runs], n_balls_raw(obs.shape[1]), [e / 1000.0 for e in args.eps_mm]
     chunks = np.array_split(np.arange(len(ok)), max(1, args.workers * 4))
     jobs = [(ok[c], obs[c], left[c], eps, args.copies, runs, n_balls, args.seed) for c in chunks if len(c)]
@@ -124,6 +158,9 @@ def main() -> None:
              meta=str({**vars(args), "git_commit": code_version(), "seconds": round(time.time() - t0, 1)}))
     print(f"saved {args.out}: {len(ok)} positions × {len(eps)} ε × {args.copies} copies ({time.time() - t0:.0f}s)", flush=True)
     for e, mm in enumerate(args.eps_mm):
+        if t is not None:
+            m = testset_order_metrics(t, k_pert[:, e])
+            print(f"  ε {mm:g} mm, same-origin order: " + "  ".join(f"{n} {v:.3f}" for n, v in m.items()), flush=True)
         for h in (0, 2):
             m = perturb_metrics(k, left, k_pert[:, e], h)
             print(f"  ε {mm:g} mm, target min(k,{h or '∞'}): " + "  ".join(f"{n} {v:.3f}" for n, v in m.items()), flush=True)
