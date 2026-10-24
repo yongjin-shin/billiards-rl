@@ -25,12 +25,25 @@ import torch
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
+def cue_only_next(raw: np.ndarray, nxt: np.ndarray) -> np.ndarray:
+    """The position after a shot if only the cue ball moved: the cue ball and the pocketed balls from nxt, every ball still on the
+    table where it was in raw (raw layout: cue (2), n × (x, y, pocketed), pockets (12))."""
+    from exp16_wm.obs_transform import n_balls_raw
+    out = np.array(raw, np.float32, copy=True)
+    out[0:2] = nxt[0:2]
+    for i in range(n_balls_raw(len(raw))):
+        j = 2 + 3 * i
+        if nxt[j + 2] > 0.5:
+            out[j:j + 3] = nxt[j:j + 3]
+    return out
+
+
 class LookaheadPolicy:
     """act(raw obs) → env action. scorer: MadeEnsemble (one member = a single model); sim(raw obs, env action) →
     (next raw obs, pocketed something, scratch, rack cleared)."""
 
     def __init__(self, scorer, sim, k: int = 10, mode: str = "model", widths: tuple[int, ...] | None = None, recorder=None,
-                 leaf: str = "made"):
+                 leaf: str = "made", next_state: str = "sim"):
         """widths = shots simulated per level: (10,) looks one shot ahead (= k), (10, 5) two shots ahead, …"""
         if mode not in ("model", "sim"):
             raise ValueError(f"mode must be 'model' or 'sim', got {mode!r}")
@@ -46,6 +59,11 @@ class LookaheadPolicy:
         if leaf not in ("made", "v"):
             raise ValueError(f"leaf must be 'made' or 'v', got {leaf!r}")
         self.leaf = leaf
+        # next_state (D1-a): "sim" = the simulator's next position; "cue" = only the cue ball's landing spot (and which balls went in)
+        # from the simulator, every other ball where it was — is predicting the cue ball alone enough to look ahead?
+        if next_state not in ("sim", "cue"):
+            raise ValueError(f"next_state must be 'sim' or 'cue', got {next_state!r}")
+        self.next_state = next_state
         self.n_sims = 0                                             # simulations run (cost per shot = n_sims / shots)
         self.sc, self.bi = scorer.act_scale, scorer.act_bias
 
@@ -66,6 +84,8 @@ class LookaheadPolicy:
         nxt, made, scratch, cleared = r[:4]
         if self.recorder is not None:
             self.recorder("sim", raw=raw, action=np.asarray(action, np.float32), made_mask=r[4] if len(r) > 4 else None, scratch=scratch)
+        if self.next_state == "cue":
+            nxt = cue_only_next(raw, nxt)
         return nxt, made, scratch, cleared
 
     @torch.no_grad()
@@ -148,15 +168,16 @@ def main() -> None:
     p.add_argument("--widths", type=int, nargs="+", default=None, help="shots simulated per level, e.g. 10 5 = two shots ahead")
     p.add_argument("--leaf", default="made", choices=["made", "v"], help="value of the last level's positions: made probability or the V head")
     p.add_argument("--mode", default="model", choices=["model", "sim"]); p.add_argument("--out", required=True)
+    p.add_argument("--next-state", default="sim", choices=["sim", "cue"], help="cue: only the cue ball moves (D1-a)")
     p.add_argument("--threads", type=int, default=2)
     p.add_argument("--seeds", type=int, nargs="+", default=list(EVAL_SEEDS)); p.add_argument("--games-per-seed", type=int, default=GAMES_PER_SEED)
     args = p.parse_args()
     torch.set_num_threads(args.threads)
     runs = [find_run(g) for g in args.runs]
-    pol = LookaheadPolicy(load_ensemble(runs, args.aim), make_sim(args.n_balls), args.k, args.mode, args.widths, leaf=args.leaf)
+    pol = LookaheadPolicy(load_ensemble(runs, args.aim), make_sim(args.n_balls), args.k, args.mode, args.widths, leaf=args.leaf, next_state=args.next_state)
     t0 = time.time()
     res = play_paired(pol, tuple(args.seeds), args.games_per_seed, clear_env_kw(args.n_balls))
-    meta = {"runs": runs, "infer": f"lookahead_{args.mode}_w{'-'.join(map(str, pol.widths))}_{args.leaf}", "n_balls": args.n_balls, "eval_seeds": args.seeds,
+    meta = {"runs": runs, "infer": f"lookahead_{args.mode}_w{'-'.join(map(str, pol.widths))}_{args.leaf}_next{args.next_state}", "n_balls": args.n_balls, "eval_seeds": args.seeds,
             "games_per_seed": args.games_per_seed, "seconds": round(time.time() - t0, 1), "machine": machine_info()}
     meta["sims_per_shot"] = round(pol.n_sims / max(1, len(res["succ"])), 2)
     save(args.out, res, meta)

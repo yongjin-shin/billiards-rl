@@ -139,3 +139,37 @@ def test_v_leaf_values_the_last_positions_with_the_v_head_and_counts_simulations
     assert pol.act(OBS)[0] == pytest.approx(0.1) and pol.n_sims == 2
     with pytest.raises(ValueError):
         LookaheadPolicy(sc, sim, leaf="mcts")
+
+
+def test_cue_only_next_keeps_unpocketed_balls_where_they_were():
+    from exp16_wm.lookahead import cue_only_next
+    nxt = OBS.copy()
+    nxt[0:2] = [0.9, 0.9]                       # cue ball landed elsewhere
+    nxt[2:5] = [0.0, 0.0, 1]                    # ball 0 pocketed
+    nxt[5:7] = [0.1, 0.1]                       # ball 1 was pushed — cue_only ignores it
+    out = cue_only_next(OBS, nxt)
+    np.testing.assert_allclose(out[0:2], [0.9, 0.9])
+    np.testing.assert_allclose(out[2:5], [0.0, 0.0, 1])
+    np.testing.assert_allclose(out[5:11], OBS[5:11])
+    np.testing.assert_allclose(out[11:], OBS[11:])
+
+
+def test_cue_only_next_with_nothing_changed_is_the_same_position():
+    from exp16_wm.lookahead import cue_only_next
+    np.testing.assert_allclose(cue_only_next(OBS, OBS.copy()), OBS)
+
+
+def test_next_state_cue_feeds_the_approximate_position_to_the_next_level():
+    seen = []
+    def sim(raw, a):
+        nxt = raw.copy(); nxt[0] += 0.1; nxt[5] = 0.123                       # cue moves, ball 1 is pushed
+        seen.append(raw.copy())
+        return nxt, True, False, False
+    sc = Scorer({round(0.5 + 0.1 * d, 2): [1.0, 0.0, -1.0] for d in range(4)})
+    pol = LookaheadPolicy(sc, sim, mode="sim", widths=(1, 1), next_state="cue")
+    orig = pol._candidates
+    pol._candidates = lambda raw, **kw: (setattr(sc, "_cue", raw[0]), orig(raw, **kw))[1]
+    pol.act(OBS)
+    assert len(seen) == 2 and seen[1][5] == pytest.approx(OBS[5])          # level 2 sees ball 1 unmoved
+    with pytest.raises(ValueError):
+        LookaheadPolicy(sc, sim, next_state="world")
