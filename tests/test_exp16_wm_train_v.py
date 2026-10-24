@@ -8,7 +8,7 @@ import pytest
 import torch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from exp16_wm.train_v import V_MODULES, hazard_nll, hazard_targets, hazard_value, load_v_data, metrics, targets, v_logits
+from exp16_wm.train_v import V_MODULES, hazard_nll, hazard_targets, hazard_value, load_smooth_k, load_v_data, metrics, targets, v_logits
 
 POCKETS = [0, 0, 0, 0.5, 0, 1, 1, 0, 1, 0.5, 1, 1]
 OBS = np.array([0.5, 0.2, 0.3, 0.6, 0, 0.6, 0.3, 0, 0.7, 0.7, 0, *POCKETS], np.float32)
@@ -253,3 +253,32 @@ def test_targets_clear_is_one_only_when_every_countable_ball_goes_in():
     np.testing.assert_allclose(targets(k, left), [1.0, 0.8, 0.0, 1.0, 1.0])                        # the default is unchanged
     with pytest.raises(ValueError):
         targets(k, left, mode="soft")
+
+
+def _smooth_setup(tmp_path):
+    n = 6
+    obs = np.tile(OBS, (n, 1)); k = np.array([3, 0, 2, 1, 3, 2]); left = np.array([3, 3, 0, 3, 3, 3])      # row 2 has no balls left → dropped
+    np.savez(tmp_path / "a.npz", obs=obs, k=k, left=left, game=np.arange(n), branch=np.zeros(n, bool))
+    d = load_v_data([str(tmp_path / "a.npz")], val_frac=0.0)
+    ok = np.nonzero(left > 0)[0]                                                                              # what v_perturb keeps
+    kp = np.array([[[3, 1, -1, -1]], [[0, 0, 0, 2]], [[2, 2, 2, 2]], [[-1, -1, -1, -1]], [[3, 3, 3, 3]]])      # (5, 1, 4 copies); row 3 has none placed
+    (tmp_path / "s").mkdir()
+    np.savez(tmp_path / "s" / "a.npz", rows=ok, k=k[ok], left=left[ok], k_pert=kp, eps_mm=np.array([10.0]))
+    return d, str(tmp_path / "a.npz"), str(tmp_path / "s")
+
+
+def test_load_smooth_k_means_over_placed_copies_and_falls_back_to_the_exact_k(tmp_path):
+    d, f, sdir = _smooth_setup(tmp_path)
+    got = load_smooth_k([f], sdir, d)
+    np.testing.assert_allclose(got, [2.0, 0.5, 2.0, 3.0, 3.0])                       # (3+1)/2, (0+0+0+2)/4, 2, no copy placed → its exact k = 3, 3
+    assert len(got) == len(d["k"]) == 5
+
+
+def test_load_smooth_k_rejects_labels_of_other_data(tmp_path):
+    d, f, sdir = _smooth_setup(tmp_path)
+    d2 = {**d, "k": d["k"] + 1}
+    with pytest.raises(ValueError):
+        load_smooth_k([f], sdir, d2)                                                  # k differs
+    with pytest.raises(ValueError):
+        load_smooth_k([f], sdir, {k: v[:-1] for k, v in d.items()})                   # a different number of rows
+    np.testing.assert_allclose(targets(load_smooth_k([f], sdir, d), d["left"]), [2 / 3, 0.5 / 3, 2 / 3, 1.0, 1.0], atol=1e-6)    # soft target in [0, 1]

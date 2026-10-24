@@ -48,6 +48,24 @@ def load_v_data(paths: list[str], val_frac: float = 0.1, seed: int = 0) -> dict[
     return {k: v[keep] for k, v in d.items()}
 
 
+def load_smooth_k(paths: list[str], smooth_dir: str, d: dict[str, np.ndarray]) -> np.ndarray:
+    """(N,) the mean k over the ε-moved copies of each position (exp16_wm.v_perturb output `<smooth_dir>/<data file name>`), aligned with the
+    rows load_v_data returned for `paths`. A position none of whose copies could be placed keeps its exact k. Raises when a file's k or
+    balls left differ from d's (the labels belong to other data)."""
+    ks, lefts, means = [], [], []
+    for p in paths:
+        z = np.load(os.path.join(smooth_dir, os.path.basename(p)))
+        kp = z["k_pert"][:, 0, :]
+        placed = kp >= 0
+        n = placed.sum(axis=1)
+        means.append(np.where(n > 0, np.where(placed, kp, 0).sum(axis=1) / np.maximum(n, 1), np.nan))
+        ks.append(z["k"]); lefts.append(z["left"])
+    k, left, mean = np.concatenate(ks), np.concatenate(lefts), np.concatenate(means)
+    if len(k) != len(d["k"]) or not np.array_equal(k, d["k"]) or not np.array_equal(left, d["left"]):
+        raise ValueError(f"the smoothed labels in {smooth_dir} do not match the V data rows (k / left differ or the counts differ)")
+    return np.where(np.isfinite(mean), mean, d["k"].astype(float))
+
+
 def cap(left: np.ndarray, horizon: int = 0) -> np.ndarray:
     """The most balls V can count: the balls left, or at most `horizon` of them (V3: the next H shots only; 0 = no limit)."""
     left = np.asarray(left)
@@ -189,6 +207,8 @@ def main() -> None:
     p.add_argument("--horizon", type=int, default=0, help="V3: count only the next H balls (0 = until the first miss, V2)")
     p.add_argument("--data-frac", type=float, default=1.0, help="V5: train on this fraction of the training games (val unchanged)")
     p.add_argument("--qv-hidden", type=int, default=0, help="V5: width of a fresh Q / V encoder and V head (0 = keep the run's)")
+    p.add_argument("--smooth-labels", default="",
+                   help="V6-E: a folder of v_perturb outputs (one per data file name); the label is the mean k of the ε-moved copies instead of the exact k")
     p.add_argument("--target", default="frac", choices=["frac", "clear"],
                    help="V6-D: the label — frac = balls in a row / balls left (0 ~ 1), clear = 1 if every ball goes in else 0")
     p.add_argument("--v-steps", type=int, default=0,
@@ -217,10 +237,17 @@ def main() -> None:
     for name, prm in model.named_parameters():
         prm.requires_grad = name.split(".")[0] in V_MODULES
     params = [q for q in model.parameters() if q.requires_grad]
-    d = load_v_data(sorted(glob.glob(args.data)), seed=args.seed)
+    data_paths = sorted(glob.glob(args.data))
+    d = load_v_data(data_paths, seed=args.seed)
+    if args.smooth_labels:
+        if args.v_steps or args.target != "frac":
+            raise ValueError("--smooth-labels works with the single value head and --target frac only")
+        d["k_label"] = load_smooth_k(data_paths, args.smooth_labels, d)
+    else:
+        d["k_label"] = d["k"]
     if args.no_branch:
         d = {k: v[~d["branch"]] for k, v in d.items()}
-    rel, y = torch.as_tensor(relative_obs(d["obs"])), torch.as_tensor(targets(d["k"], d["left"], args.horizon, args.target))
+    rel, y = torch.as_tensor(relative_obs(d["obs"])), torch.as_tensor(targets(d["k_label"], d["left"], args.horizon, args.target))
     S = args.v_steps
     if S:
         reached, success = (torch.as_tensor(x) for x in hazard_targets(d["k"], d["left"], S))
