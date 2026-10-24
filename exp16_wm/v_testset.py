@@ -114,6 +114,21 @@ def next_values(t: dict[str, np.ndarray], run: str) -> np.ndarray:
     return out.reshape(N, K)
 
 
+def first_step_values(t: dict[str, np.ndarray], run: str) -> np.ndarray | None:
+    """(N, K) a hazard V run's P(the first shot from each candidate's next position goes in), 0 where there is no next position;
+    None for a run without a hazard head."""
+    from exp16_wm import eval_by_balls as E
+    from exp16_wm.train_v import predict_first_step
+    m = E.load_run(run)
+    if not getattr(m, "v_steps", 0):
+        return None
+    N, K, D = t["next_obs"].shape
+    use = (t["valid"] & t["succ"] & ~t["cleared"]).reshape(-1)
+    out = np.zeros(N * K)
+    out[use] = predict_first_step(m, t["next_obs"].reshape(-1, D)[use])
+    return out.reshape(N, K)
+
+
 def made_max_values(t: dict[str, np.ndarray], runs: list[str]) -> np.ndarray:
     """(N, K) baseline: the made head's highest probability on each next position (how easy the next shot looks)."""
     import torch

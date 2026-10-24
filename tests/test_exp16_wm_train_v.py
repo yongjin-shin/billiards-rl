@@ -8,7 +8,7 @@ import pytest
 import torch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from exp16_wm.train_v import V_MODULES, load_v_data, metrics, targets, v_logits
+from exp16_wm.train_v import V_MODULES, hazard_nll, hazard_targets, hazard_value, load_v_data, metrics, targets, v_logits
 
 POCKETS = [0, 0, 0, 0.5, 0, 1, 1, 0, 1, 0.5, 1, 1]
 OBS = np.array([0.5, 0.2, 0.3, 0.6, 0, 0.6, 0.3, 0, 0.7, 0.7, 0, *POCKETS], np.float32)
@@ -168,3 +168,79 @@ def test_widen_qv_with_fourier_is_rebuilt_by_load_run_and_keeps_the_made_side():
     assert rebuilt.state_dict().keys() == new.state_dict().keys()
     assert all(rebuilt.state_dict()[k].shape == v.shape for k, v in new.state_dict().items())     # load_run can load the saved weights
     assert E.policy_from_args(a).qv_fourier == 0                                    # runs without the key are the old model
+
+
+def test_hazard_targets_reached_and_success_rows():
+    reached, success = hazard_targets(np.array([2, 0, 3, 4]), np.array([5, 3, 3, 4]), 6)
+    np.testing.assert_array_equal(reached, [[1, 1, 1, 0, 0, 0],       # k = 2, 5 left: shots 1-3 played (the 3rd missed)
+                                            [1, 0, 0, 0, 0, 0],       # k = 0: only the first shot, a miss
+                                            [1, 1, 1, 0, 0, 0],       # k = left = 3: all three went in
+                                            [1, 1, 1, 1, 0, 0]])
+    np.testing.assert_array_equal(success, [[1, 1, 0, 0, 0, 0], [0] * 6, [1, 1, 1, 0, 0, 0], [1, 1, 1, 1, 0, 0]])
+    with pytest.raises(ValueError):
+        hazard_targets(np.array([1]), np.array([7]), 6)                    # more balls left than steps
+
+
+def test_hazard_value_is_the_survival_sum_and_respects_left():
+    p = torch.tensor([[0.9, 0.8, 0.7, 0.5, 0.5, 0.5]])
+    z = torch.log(p / (1 - p))
+    assert hazard_value(z, torch.tensor([3])).item() == pytest.approx(0.9 + 0.72 + 0.504, abs=1e-5)
+    assert hazard_value(z, torch.tensor([2])).item() == pytest.approx(0.9 + 0.72, abs=1e-5)    # shots beyond the balls left do not count
+    assert hazard_value(torch.full((1, 6), -20.0), torch.tensor([6])).item() < 1e-6              # the first shot never goes in → 0
+    assert hazard_value(torch.full((1, 6), 20.0), torch.tensor([4])).item() == pytest.approx(4.0, abs=1e-4)
+
+
+def test_hazard_nll_counts_only_played_shots():
+    z = torch.tensor([[0.3, -0.2, 1.0, 5.0, 5.0, 5.0]])
+    reached, success = (torch.as_tensor(x) for x in hazard_targets(np.array([2]), np.array([5]), 6))
+    expect = sum(torch.nn.functional.binary_cross_entropy_with_logits(z[0, j], success[0, j]) for j in range(3))
+    assert hazard_nll(z, reached, success).item() == pytest.approx(expect.item(), abs=1e-6)
+    z2 = z.clone(); z2[0, 3:] = -50.0                                       # shots that were not played change nothing
+    assert hazard_nll(z2, reached, success).item() == pytest.approx(expect.item(), abs=1e-6)
+    zz = torch.cat([z, z]); r2, s2 = reached.repeat(2, 1), success.repeat(2, 1)
+    assert hazard_nll(zz, r2, s2, "sum").item() == pytest.approx(2 * expect.item(), abs=1e-5)
+
+
+def test_hazard_head_shape_and_scalar_head_unchanged():
+    from exp16_wm.gnn_policy import PairGNNPolicy
+    from exp16_wm.obs_transform import relative_obs
+    rel = torch.as_tensor(relative_obs(np.tile(OBS, (3, 1))))
+    hz = _v_model(v_steps=6)
+    _, e, valid, _ = hz._encode_full(rel, qv=True)
+    assert hz.v_hazard_logits({"e_qv": e, "valid": valid}).shape == (3, 6)
+    with pytest.raises(ValueError):
+        hz.v_logit({"e_qv": e, "valid": valid})                            # a hazard head has no single value logit
+    sc = _v_model()
+    assert sc.head_v[-1].out_features == 1 and hz.head_v[-1].out_features == 6
+    assert {k: v.shape for k, v in sc.state_dict().items() if not k.startswith("head_v.4")} == \
+           {k: v.shape for k, v in hz.state_dict().items() if not k.startswith("head_v.4")}      # only the last Linear differs
+    with pytest.raises(ValueError):
+        PairGNNPolicy(hidden=8, v_head=False, v_steps=6)
+    with pytest.raises(ValueError):
+        sc.v_hazard_logits({"e_qv": e, "valid": valid})
+
+
+def test_predict_balls_hazard_matches_the_manual_survival_sum_and_p1():
+    from exp16_wm.obs_transform import relative_obs
+    from exp16_wm.train_v import predict_balls, predict_first_step, v_hazard_logits
+    hz = _v_model(v_steps=6)
+    obs = np.tile(OBS, (4, 1)); left = np.array([3, 2, 1, 3])
+    got = predict_balls(hz, obs, left)
+    z = v_hazard_logits(hz, torch.as_tensor(relative_obs(obs))).detach()
+    np.testing.assert_allclose(got, hazard_value(z, torch.as_tensor(left)).numpy(), atol=1e-6)
+    assert ((got >= 0) & (got <= left + 1e-6)).all()
+    np.testing.assert_allclose(predict_first_step(hz, obs), torch.sigmoid(z[:, 0]).numpy(), atol=1e-6)
+    with pytest.raises(ValueError):
+        predict_balls(hz, obs, left, horizon=2)
+
+
+def test_widen_qv_with_hazard_head_is_rebuilt_by_load_run():
+    from exp16_wm import eval_by_balls as E
+    from exp16_wm.train_v import widen_qv
+    a = {"gnn_hidden": 8, "gnn_layers": 2, "made2_head": True, "q_weight": 1.0, "v_weight": 1.0, "qv_encoder": True}
+    m = E.policy_from_args(a)
+    new, a2 = widen_qv(m, a, 8, None, 6)
+    assert a2["v_steps"] == 6 and new.v_steps == 6 and new.head_v[-1].out_features == 6
+    rebuilt = E.policy_from_args(a2)
+    assert all(rebuilt.state_dict()[k].shape == v.shape for k, v in new.state_dict().items())
+    assert E.policy_from_args(a).v_steps == 0                               # runs without the key are the single value head

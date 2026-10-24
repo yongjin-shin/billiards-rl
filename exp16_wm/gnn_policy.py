@@ -97,7 +97,7 @@ class PairGNNPolicy(nn.Module):
                  enc_layers: int = 2, speed_loss: str = "mse", speed_bins: int = 0, uncertainty_weights: bool = False, aux_dim: int = 0,
                  aim_encoder: "PairGNNPolicy | list[PairGNNPolicy] | None" = None, fourier: int = 0, made2_no_proposal: bool = False,
                  self_aim: str = "", q_head: bool = False, v_head: bool = False, qv_encoder: bool = False,
-                 qv_hidden: int = 0, qv_fourier: int | None = None):
+                 qv_hidden: int = 0, qv_fourier: int | None = None, v_steps: int = 0):
         super().__init__()
         if fourier < 0:
             raise ValueError(f"fourier must be ≥ 0, got {fourier}")
@@ -196,9 +196,12 @@ class PairGNNPolicy(nn.Module):
             if not made2_head:
                 raise ValueError("q_head needs made2_head (it shares its candidate features)")
             self.head_q = _mlp(H + 2 + (0 if made2_no_proposal else 2) + int(made2_geom), H, 1)
+        if v_steps < 0 or (v_steps and not v_head):
+            raise ValueError(f"v_steps must be ≥ 0 and needs v_head, got {v_steps}")
+        self.v_steps = v_steps          # V6-C: 0 = one value logit; S > 0 = a hazard logit for each of the next S shots
         if v_head:
             VH = QH if qv_encoder else H
-            self.head_v = _mlp(2 * VH, VH, 1)
+            self.head_v = _mlp(2 * VH, VH, v_steps or 1)
         self.made2_no_proposal = made2_no_proposal
         self.aux_dim = aux_dim                          # auxiliary geometry targets predicted from each pair embedding (training only)
         if aux_dim:
@@ -416,13 +419,25 @@ class PairGNNPolicy(nn.Module):
             e = e.detach()
         return self.head_q(self._made2_features(e, a, o["means"][r, pair], aim)).squeeze(-1)
 
-    def v_logit(self, o: dict[str, torch.Tensor]) -> torch.Tensor:
-        """(B,) logit of P(clear the rack from this position): mean and max of the live pairs' embeddings."""
+    def _v_pooled(self, o: dict[str, torch.Tensor]) -> torch.Tensor:
+        """(B, 2·VH): mean and max of the live pairs' embeddings."""
         e = o["e_qv"] if "e_qv" in o else (o["e"].detach() if self.qv_detach else o["e"])
         v = o["valid"][..., None].float()
         mean = (e * v).sum(1) / v.sum(1).clamp(min=1)
         mx = e.masked_fill(v == 0, -1e9).max(1).values.masked_fill(v.sum(1) == 0, 0.0)
-        return self.head_v(torch.cat([mean, mx], dim=-1)).squeeze(-1)
+        return torch.cat([mean, mx], dim=-1)
+
+    def v_logit(self, o: dict[str, torch.Tensor]) -> torch.Tensor:
+        """(B,) logit of P(clear the rack from this position): mean and max of the live pairs' embeddings."""
+        if self.v_steps:
+            raise ValueError("this V head is a hazard head (v_steps > 0): use v_hazard_logits")
+        return self.head_v(self._v_pooled(o)).squeeze(-1)
+
+    def v_hazard_logits(self, o: dict[str, torch.Tensor]) -> torch.Tensor:
+        """(B, v_steps) logits: shot j goes in, given that the shots before it did (V6-C)."""
+        if not self.v_steps:
+            raise ValueError("this V head is a single value head (v_steps = 0): use v_logit")
+        return self.head_v(self._v_pooled(o))
 
     def q_loss(self, rel: torch.Tensor, a: torch.Tensor, pair: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
         """BCE with soft targets: the search's score of each (state, shot) in [0, 1]."""

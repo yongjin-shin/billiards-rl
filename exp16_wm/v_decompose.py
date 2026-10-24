@@ -88,13 +88,17 @@ def main() -> None:
     torch.set_num_threads(args.threads)
     from exp16_wm.paired_eval import find_run
     from exp16_wm.v_decision_ceiling import ROW_KEYS, next_value_sources
-    from exp16_wm.v_testset import made_max_values, next_values
+    from exp16_wm.v_testset import first_step_values, made_max_values, next_values
     z = np.load(args.testset, allow_pickle=True)
     t = {k: z[k] for k in (*ROW_KEYS, "next_obs", "left_next")}
     kp = np.load(args.ceiling, allow_pickle=True)["k_pert"]
     preds = {"made max": made_max_values(t, [find_run(g) for g in args.runs])}
     for r in args.v_runs:
-        preds[os.path.basename(r.rstrip("/"))] = next_values(t, find_run(r))
+        name = os.path.basename(r.rstrip("/"))
+        preds[name] = next_values(t, find_run(r))
+        p1 = first_step_values(t, find_run(r))
+        if p1 is not None:
+            preds[f"{name} p1"] = p1                                      # a hazard V's first-shot probability alone
     preds["ceiling (1cm, 8 copies)"] = next_value_sources(t, kp[:, 0, :])["ceiling"]
     rec = pair_table(t, preds)
     res = summarize(rec, list(preds), "made max")

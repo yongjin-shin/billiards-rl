@@ -112,7 +112,8 @@ def policy_from_args(a: dict) -> PairGNNPolicy:
                       self_aim=a.get("made2_self_aim") or "", q_head=float(a.get("q_weight", 0) or 0) > 0,
                       v_head=float(a.get("v_weight", 0) or 0) > 0, qv_encoder=bool(a.get("qv_encoder", False)),
                       qv_hidden=int(a.get("qv_hidden", 0) or 0),
-                      qv_fourier=None if a.get("qv_fourier") is None else int(a["qv_fourier"]))
+                      qv_fourier=None if a.get("qv_fourier") is None else int(a["qv_fourier"]),
+                      v_steps=int(a.get("v_steps", 0) or 0))
     return m
 
 

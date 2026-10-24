@@ -66,12 +66,55 @@ def v_logits(model, rel: torch.Tensor) -> torch.Tensor:
     return model.v_logit({"e_qv": e, "valid": valid})
 
 
+def v_hazard_logits(model, rel: torch.Tensor) -> torch.Tensor:
+    """(B, S) hazard logits of a model with a hazard V head (V6-C): shot j goes in given that the shots before it did."""
+    _, e, valid, _ = model._encode_full(rel, qv=True)
+    return model.v_hazard_logits({"e_qv": e, "valid": valid})
+
+
+def hazard_targets(k: np.ndarray, left: np.ndarray, steps: int) -> tuple[np.ndarray, np.ndarray]:
+    """(reached, success), each (N, steps) float32: shot j (1-based) is played if j ≤ left and k ≥ j − 1, and succeeded if k ≥ j."""
+    k, left = np.asarray(k), np.asarray(left)
+    if left.max() > steps:
+        raise ValueError(f"v_steps {steps} is smaller than the most balls left, {int(left.max())}")
+    j = np.arange(1, steps + 1)[None, :]
+    reached = (j <= left[:, None]) & (k[:, None] >= j - 1)
+    return reached.astype(np.float32), (reached & (k[:, None] >= j)).astype(np.float32)
+
+
+def hazard_nll(logits: torch.Tensor, reached: torch.Tensor, success: torch.Tensor, reduction: str = "mean") -> torch.Tensor:
+    """Negative log-likelihood of each position's shot sequence: the sum over the shots that were played of BCE(logit, success).
+    reduction: mean over positions, or their sum."""
+    per = (F.binary_cross_entropy_with_logits(logits, success, reduction="none") * reached).sum(dim=1)
+    return per.mean() if reduction == "mean" else per.sum()
+
+
+def hazard_value(logits: torch.Tensor, left: torch.Tensor) -> torch.Tensor:
+    """(B,) expected balls = Σ_{j ≤ left} Π_{i ≤ j} sigmoid(logit_i) (the chance of getting at least j balls, added up)."""
+    surv = torch.cumprod(torch.sigmoid(logits), dim=1)
+    j = torch.arange(1, logits.shape[1] + 1, device=logits.device)[None, :]
+    return (surv * (j <= left[:, None]).to(surv.dtype)).sum(dim=1)
+
+
 @torch.no_grad()
 def predict_balls(model, obs: np.ndarray, left: np.ndarray, horizon: int = 0, chunk: int = 2048) -> np.ndarray:
     from exp16_wm.obs_transform import relative_obs
     rel = torch.as_tensor(relative_obs(obs))
+    if getattr(model, "v_steps", 0):
+        if horizon:
+            raise ValueError("a hazard V head does not take a horizon")
+        z = torch.cat([v_hazard_logits(model, rel[i:i + chunk]) for i in range(0, len(rel), chunk)])
+        return hazard_value(z, torch.as_tensor(np.asarray(left))).numpy()
     z = torch.cat([v_logits(model, rel[i:i + chunk]) for i in range(0, len(rel), chunk)])
     return torch.sigmoid(z).numpy() * cap(left, horizon)
+
+
+@torch.no_grad()
+def predict_first_step(model, obs: np.ndarray, chunk: int = 2048) -> np.ndarray:
+    """(N,) P(the first shot goes in) of a model with a hazard V head."""
+    from exp16_wm.obs_transform import relative_obs
+    rel = torch.as_tensor(relative_obs(obs))
+    return torch.sigmoid(torch.cat([v_hazard_logits(model, rel[i:i + chunk])[:, 0] for i in range(0, len(rel), chunk)])).numpy()
 
 
 def metrics(pred_balls: np.ndarray, k: np.ndarray, left: np.ndarray, horizon: int = 0) -> dict[str, float]:
@@ -106,13 +149,16 @@ def subsample_games(gid: np.ndarray, rows: np.ndarray, frac: float, seed: int) -
     return rows[np.isin(gid[rows], keep)]
 
 
-def widen_qv(model, run_args: dict, qv_hidden: int, qv_fourier: int | None = None):
-    """A copy of model whose Q / V encoder and V head have width qv_hidden and qv_fourier Fourier frequencies (None = the run's), freshly
-    initialised; every other weight is copied. The Q head is dropped (it reads made2 features of the made width)."""
+def widen_qv(model, run_args: dict, qv_hidden: int, qv_fourier: int | None = None, v_steps: int = 0):
+    """A copy of model whose Q / V encoder and V head have width qv_hidden, qv_fourier Fourier frequencies (None = the run's) and, with
+    v_steps > 0, a hazard head over that many shots, freshly initialised; every other weight is copied. The Q head is dropped (it reads
+    made2 features of the made width)."""
     from exp16_wm import eval_by_balls as E
     a = {**run_args, "qv_encoder": True, "qv_hidden": qv_hidden, "q_weight": 0, "v_weight": 1.0}
     if qv_fourier is not None:
         a["qv_fourier"] = qv_fourier
+    if v_steps:
+        a["v_steps"] = v_steps
     new = E.policy_from_args(a)
     keep = {k: v for k, v in model.state_dict().items() if not k.startswith(("qv_", "head_v", "head_q"))}
     res = new.load_state_dict(keep, strict=False)
@@ -137,6 +183,8 @@ def main() -> None:
     p.add_argument("--horizon", type=int, default=0, help="V3: count only the next H balls (0 = until the first miss, V2)")
     p.add_argument("--data-frac", type=float, default=1.0, help="V5: train on this fraction of the training games (val unchanged)")
     p.add_argument("--qv-hidden", type=int, default=0, help="V5: width of a fresh Q / V encoder and V head (0 = keep the run's)")
+    p.add_argument("--v-steps", type=int, default=0,
+                   help="V6-C: a hazard V head over this many shots (fresh Q / V encoder and head; 0 = the single value head)")
     p.add_argument("--qv-fourier", type=int, default=-1,
                    help="V6: Fourier frequencies of a fresh Q / V encoder's input coordinates (−1 = keep the run's; 0 = a fresh one without)")
     args = p.parse_args()
@@ -147,10 +195,12 @@ def main() -> None:
         raise ValueError(f"{run} has no Q / V encoder (trained without --qv-encoder)")
     run_args = json.load(open(os.path.join(run, "results.json")))["args"]
     new_width, new_fourier = bool(args.qv_hidden and args.qv_hidden != model.qv_hidden), args.qv_fourier >= 0
-    if new_width or new_fourier:
-        model, run_args = widen_qv(model, run_args, args.qv_hidden or model.qv_hidden, args.qv_fourier if new_fourier else None)
+    if args.v_steps and args.horizon:
+        raise ValueError("--v-steps (hazard head) does not take --horizon")
+    if new_width or new_fourier or args.v_steps:
+        model, run_args = widen_qv(model, run_args, args.qv_hidden or model.qv_hidden, args.qv_fourier if new_fourier else None, args.v_steps)
         if args.init == "made":
-            raise ValueError("--init made copies the made encoder, which has another width / input than --qv-hidden / --qv-fourier")
+            raise ValueError("--init made copies the made encoder, which has another width / input / head than --qv-hidden / --qv-fourier / --v-steps")
     elif args.init == "made":
         model.copy_encoder_to_qv()
         for mod in model.head_v.modules():
@@ -163,6 +213,14 @@ def main() -> None:
     if args.no_branch:
         d = {k: v[~d["branch"]] for k, v in d.items()}
     rel, y = torch.as_tensor(relative_obs(d["obs"])), torch.as_tensor(targets(d["k"], d["left"], args.horizon))
+    S = args.v_steps
+    if S:
+        reached, success = (torch.as_tensor(x) for x in hazard_targets(d["k"], d["left"], S))
+
+    def batch_loss(rows: torch.Tensor, reduction: str) -> torch.Tensor:
+        if S:
+            return hazard_nll(v_hazard_logits(model, rel[rows]), reached[rows], success[rows], reduction)
+        return F.binary_cross_entropy_with_logits(v_logits(model, rel[rows]), y[rows], reduction=reduction)
     tr, va = np.nonzero(~d["val"])[0], np.nonzero(d["val"])[0]
     n_full = len(tr)
     tr = subsample_games(d["gid"], tr, args.data_frac, args.seed)
@@ -176,14 +234,13 @@ def main() -> None:
         tl, tn = 0.0, 0
         for i in range(steps):
             b = torch.as_tensor(tr[rng.integers(0, len(tr), args.batch)])
-            loss = F.binary_cross_entropy_with_logits(v_logits(model, rel[b]), y[b])
+            loss = batch_loss(b, "mean")
             opt.zero_grad(); loss.backward(); opt.step()
             tl += loss.item(); tn += 1
         tr_hist.append(tl / max(1, tn))
         model.eval()
         with torch.no_grad():
-            vl = sum(F.binary_cross_entropy_with_logits(v_logits(model, rel[va[i:i + 4096]]), y[va[i:i + 4096]], reduction="sum").item()
-                     for i in range(0, len(va), 4096)) / max(1, len(va))
+            vl = sum(batch_loss(torch.as_tensor(va[i:i + 4096]), "sum").item() for i in range(0, len(va), 4096)) / max(1, len(va))
         hist.append(vl)
         if vl < best:
             best, best_state = vl, {k: v.clone() for k, v in model.state_dict().items()}
