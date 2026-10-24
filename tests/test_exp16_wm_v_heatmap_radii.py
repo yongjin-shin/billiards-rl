@@ -7,7 +7,7 @@ import numpy as np
 import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from exp16_wm.v_heatmap_radii import disk_average, jump_share, panels_of, plot_radii
+from exp16_wm.v_heatmap_radii import correlation_table, disk_average, jump_share, load_real, panels_of, plot_radii
 
 
 def test_disk_average_radius_zero_is_identity_and_constant_stays_constant_around_holes():
@@ -51,3 +51,25 @@ def test_plot_radii_writes_a_png(tmp_path):
     out = tmp_path / "r.png"
     plot_radii(str(cache), str(out))
     assert out.exists() and out.stat().st_size > 5000
+
+
+def test_panels_use_real_simulated_radii_when_given_and_the_approximation_otherwise():
+    c = _cache()
+    real3 = np.full_like(c["truth"], 7.0)
+    ps = panels_of(c, real={3.0: real3})
+    assert ps[3][1] == "8번 실제 시뮬레이션" and np.all(ps[3][2] == 7.0)                  # 3 cm is the simulation
+    assert ps[2][1].startswith("근사") and ps[4][1].startswith("근사")                   # the others stay approximated
+
+
+def test_correlation_table_reports_jumps_and_correlations_with_truth_and_v():
+    c = _cache(); c["v"] = c["truth"] * 0.5 + 1.0                                        # V is a rescaled copy of ① → corr 1 with ① and V itself
+    rows = correlation_table(panels_of(c))
+    assert rows[0][2] == pytest.approx(1.0) and rows[0][3] == pytest.approx(1.0) and rows[-1][3] == pytest.approx(1.0)
+    assert rows[0][1] >= rows[-2][1]                                                      # ① is no smoother than the widest average
+
+
+def test_load_real_reads_the_saved_radii_and_skips_missing_ones(tmp_path):
+    z = np.ones((3, 3))
+    np.savez(tmp_path / "r.npz", radii_cm=np.array([2.0, 4.0]), **{"smooth_2": z * 2, "smooth_4": z * 4})
+    got = load_real(str(tmp_path / "r.npz"))
+    assert sorted(got) == [2.0, 4.0] and got[4.0][0, 0] == 4.0
