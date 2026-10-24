@@ -54,10 +54,16 @@ def cap(left: np.ndarray, horizon: int = 0) -> np.ndarray:
     return np.minimum(left, horizon) if horizon > 0 else left
 
 
-def targets(k: np.ndarray, left: np.ndarray, horizon: int = 0) -> np.ndarray:
-    """Fraction of the countable balls (cap) that go in before the first miss, in [0, 1]."""
+def targets(k: np.ndarray, left: np.ndarray, horizon: int = 0, mode: str = "frac") -> np.ndarray:
+    """mode "frac": the fraction of the countable balls (cap) that go in before the first miss, in [0, 1];
+    mode "clear" (V6-D): 1 if every countable ball goes in (k ≥ cap), else 0."""
     c = np.maximum(1, cap(left, horizon)).astype(np.float32)
-    return np.clip(np.minimum(np.asarray(k, np.float32), c) / c, 0.0, 1.0)
+    frac = np.clip(np.minimum(np.asarray(k, np.float32), c) / c, 0.0, 1.0)
+    if mode == "frac":
+        return frac
+    if mode == "clear":
+        return (frac >= 1.0).astype(np.float32)
+    raise ValueError(f"mode must be frac or clear, got {mode!r}")
 
 
 def v_logits(model, rel: torch.Tensor) -> torch.Tensor:
@@ -183,6 +189,8 @@ def main() -> None:
     p.add_argument("--horizon", type=int, default=0, help="V3: count only the next H balls (0 = until the first miss, V2)")
     p.add_argument("--data-frac", type=float, default=1.0, help="V5: train on this fraction of the training games (val unchanged)")
     p.add_argument("--qv-hidden", type=int, default=0, help="V5: width of a fresh Q / V encoder and V head (0 = keep the run's)")
+    p.add_argument("--target", default="frac", choices=["frac", "clear"],
+                   help="V6-D: the label — frac = balls in a row / balls left (0 ~ 1), clear = 1 if every ball goes in else 0")
     p.add_argument("--v-steps", type=int, default=0,
                    help="V6-C: a hazard V head over this many shots (fresh Q / V encoder and head; 0 = the single value head)")
     p.add_argument("--qv-fourier", type=int, default=-1,
@@ -212,7 +220,7 @@ def main() -> None:
     d = load_v_data(sorted(glob.glob(args.data)), seed=args.seed)
     if args.no_branch:
         d = {k: v[~d["branch"]] for k, v in d.items()}
-    rel, y = torch.as_tensor(relative_obs(d["obs"])), torch.as_tensor(targets(d["k"], d["left"], args.horizon))
+    rel, y = torch.as_tensor(relative_obs(d["obs"])), torch.as_tensor(targets(d["k"], d["left"], args.horizon, args.target))
     S = args.v_steps
     if S:
         reached, success = (torch.as_tensor(x) for x in hazard_targets(d["k"], d["left"], S))

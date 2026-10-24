@@ -24,6 +24,16 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 BUCKETS = ("all", "Z", "P", "gap1", "gap2", "gap3+")
 
 
+def clear_truth(t: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
+    """A copy of the test set whose k_next is 1 where the next position's whole rack goes in (k_next ≥ its balls left), else 0 (V6-D)."""
+    return {**t, "k_next": (t["k_next"] >= t["left_next"]).astype(int)}
+
+
+def clear_counts(k_pert: np.ndarray, left_next: np.ndarray) -> np.ndarray:
+    """k_pert (M, C) with −1 for unplaced copies, left_next (M,) → (M, C): 1 where the copy clears the rack, 0 where not, −1 unplaced."""
+    return np.where(k_pert >= 0, (k_pert >= left_next[:, None]).astype(int), -1)
+
+
 def pair_table(t: dict[str, np.ndarray], preds: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
     """t: the saved test set (k_next, succ, cleared, valid; (N, K)); preds: name → (N, K) predicted value of each candidate's next position.
     One record per same-origin pair of rankable candidates with different k_next: kmin, kmax, and per predictor name the credit
@@ -83,6 +93,7 @@ def main() -> None:
     p.add_argument("--testset", required=True); p.add_argument("--ceiling", required=True)
     p.add_argument("--runs", nargs="+", required=True, help="made run globs (for the made-max baseline)")
     p.add_argument("--v-runs", nargs="+", required=True); p.add_argument("--out", default=""); p.add_argument("--threads", type=int, default=4)
+    p.add_argument("--truth", default="k", choices=["k", "clear"], help="order the pairs by the balls pocketed (k) or by whether the whole rack goes in (clear)")
     args = p.parse_args()
     import torch
     torch.set_num_threads(args.threads)
@@ -91,7 +102,10 @@ def main() -> None:
     from exp16_wm.v_testset import first_step_values, made_max_values, next_values
     z = np.load(args.testset, allow_pickle=True)
     t = {k: z[k] for k in (*ROW_KEYS, "next_obs", "left_next")}
-    kp = np.load(args.ceiling, allow_pickle=True)["k_pert"]
+    kp = np.load(args.ceiling, allow_pickle=True)["k_pert"][:, 0, :]
+    use = t["valid"] & t["succ"] & ~t["cleared"]
+    if args.truth == "clear":
+        kp = clear_counts(kp, t["left_next"][use])
     preds = {"made max": made_max_values(t, [find_run(g) for g in args.runs])}
     for r in args.v_runs:
         name = os.path.basename(r.rstrip("/"))
@@ -99,8 +113,8 @@ def main() -> None:
         p1 = first_step_values(t, find_run(r))
         if p1 is not None:
             preds[f"{name} p1"] = p1                                      # a hazard V's first-shot probability alone
-    preds["ceiling (1cm, 8 copies)"] = next_value_sources(t, kp[:, 0, :])["ceiling"]
-    rec = pair_table(t, preds)
+    preds["ceiling (1cm, 8 copies)"] = next_value_sources(t, kp)["ceiling"]
+    rec = pair_table(clear_truth(t) if args.truth == "clear" else t, preds)
     res = summarize(rec, list(preds), "made max")
     names = list(preds)
     for b, row in res.items():

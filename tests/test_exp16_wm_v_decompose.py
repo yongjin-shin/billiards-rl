@@ -7,7 +7,7 @@ import numpy as np
 import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from exp16_wm.v_decompose import bucket_masks, pair_table, summarize
+from exp16_wm.v_decompose import bucket_masks, clear_counts, clear_truth, pair_table, summarize
 
 
 def _set() -> dict[str, np.ndarray]:
@@ -44,3 +44,11 @@ def test_origin_without_two_rankable_candidates_gives_no_pairs():
     t = {"k_next": np.array([[1, 2]]), "succ": np.array([[True, False]]), "cleared": np.zeros((1, 2), bool), "valid": np.ones((1, 2), bool)}
     rec = pair_table(t, {"p": np.zeros((1, 2))})
     assert len(rec["kmin"]) == 0 and len(rec["credit:p"]) == 0
+
+
+def test_clear_truth_and_counts_turn_balls_into_whole_rack_or_not():
+    t = {"k_next": np.array([[3, 2, 0]]), "left_next": np.array([[3, 3, 3]])}
+    np.testing.assert_array_equal(clear_truth(t)["k_next"], [[1, 0, 0]])
+    assert t["k_next"][0, 0] == 3                                                  # the input is not modified
+    kp = np.array([[3, 2, -1, 3], [0, 1, 2, 2]])
+    np.testing.assert_array_equal(clear_counts(kp, np.array([3, 2])), [[1, 0, -1, 1], [0, 0, 1, 1]])     # unplaced stays −1

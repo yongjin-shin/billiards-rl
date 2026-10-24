@@ -244,3 +244,12 @@ def test_widen_qv_with_hazard_head_is_rebuilt_by_load_run():
     rebuilt = E.policy_from_args(a2)
     assert all(rebuilt.state_dict()[k].shape == v.shape for k, v in new.state_dict().items())
     assert E.policy_from_args(a).v_steps == 0                               # runs without the key are the single value head
+
+
+def test_targets_clear_is_one_only_when_every_countable_ball_goes_in():
+    k, left = np.array([5, 4, 0, 3, 2]), np.array([5, 5, 5, 3, 1])
+    np.testing.assert_array_equal(targets(k, left, mode="clear"), [1, 0, 0, 1, 1])
+    np.testing.assert_array_equal(targets(k, left, horizon=2, mode="clear"), [1, 1, 0, 1, 1])     # only the next 2 balls count: k ≥ min(left, 2)
+    np.testing.assert_allclose(targets(k, left), [1.0, 0.8, 0.0, 1.0, 1.0])                        # the default is unchanged
+    with pytest.raises(ValueError):
+        targets(k, left, mode="soft")
