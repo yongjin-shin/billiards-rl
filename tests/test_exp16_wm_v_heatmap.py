@@ -59,3 +59,43 @@ def test_with_cue_moves_only_the_cue_ball():
     out = with_cue(RAW, 0.3, 0.8, W, L)
     assert out[0] == np.float32(0.3) and out[1] == np.float32(0.4)
     np.testing.assert_array_equal(out[2:], RAW[2:])
+
+
+def test_plot3d_writes_a_png_from_a_cache(tmp_path):
+    from exp16_wm.v_heatmap import plot3d
+    xs, ys, valid = valid_grid(RAW, 0.1, R, W, L)
+    z = np.where(valid, np.random.default_rng(0).integers(0, 3, valid.shape).astype(float), np.nan)
+    cache = tmp_path / "c.npz"
+    np.savez(cache, raw=RAW, xs=xs, ys=ys, valid=valid, truth=z, smooth=z, v=z, left=2, row=0, meta="{}")
+    out = tmp_path / "o.png"
+    plot3d(str(cache), str(out))
+    assert out.exists() and out.stat().st_size > 5000
+
+
+def _cache(tmp_path, ny=5, nx=4):
+    xs, ys = np.arange(nx) * 0.02 + R, np.arange(ny) * 0.02 + R
+    truth = np.arange(ny * nx, dtype=float).reshape(ny, nx) % 3
+    truth[0, 0] = np.nan
+    cache = tmp_path / "c.npz"
+    np.savez(cache, raw=RAW, xs=xs, ys=ys, valid=np.isfinite(truth), truth=truth, smooth=truth * 0.9, v=truth * 0 + 1.5, left=2, row=0, meta="{}")
+    return str(cache)
+
+
+def test_html_page_embeds_the_maps_as_valid_json_with_nulls_for_holes(tmp_path):
+    import json
+    import re
+    from exp16_wm.v_heatmap_html import TITLE, build_html
+    html = build_html(_cache(tmp_path))
+    d = json.loads(re.search(r"const D = (\{.*?\});\n", html, re.S).group(1))
+    assert f"<title>{TITLE}</title>" in html and "NaN" not in html.split("<script>")[1].split("</script>")[0].split("const D = ")[1].split(";\n")[0]
+    assert d["nx"] == 4 and d["ny"] == 5 and [p["key"] for p in d["panels"]] == ["truth", "smooth", "v"]
+    assert all(len(p["z"]) == 20 for p in d["panels"]) and d["panels"][0]["z"][0] is None      # the hole is null, not NaN
+    assert d["panels"][2]["stats"]["std"] == 0.0 and d["panels"][2]["stats"]["jump"] == 0.0       # a flat map has no jumps
+
+
+def test_neighbour_jump_share_counts_steps_of_one_ball_and_ignores_holes():
+    from exp16_wm.v_heatmap_html import neighbour_jump_share
+    z = np.array([[0.0, 1.0, np.nan], [0.0, 0.5, 0.5]])
+    # horizontal pairs: (0,1)=1 ✓, (1,nan) skipped, (0,0.5)=0.5 ✗, (0.5,0.5)=0 ✗ ; vertical: (0,0)=0, (1,0.5)=0.5, (nan,.5) skipped → 1 of 5
+    assert neighbour_jump_share(z) == 0.2
+    assert np.isnan(neighbour_jump_share(np.full((2, 2), np.nan)))

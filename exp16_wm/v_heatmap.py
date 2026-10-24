@@ -101,10 +101,13 @@ def main() -> None:
     p.add_argument("--left", type=int, default=5); p.add_argument("--step", type=float, default=0.02)
     p.add_argument("--eps-mm", type=float, default=10.0); p.add_argument("--copies", type=int, default=8); p.add_argument("--seed", type=int, default=0)
     p.add_argument("--workers", type=int, default=4); p.add_argument("--cache", required=True); p.add_argument("--out", required=True)
+    p.add_argument("--out3d", default="", help="also draw the three maps as 3-D surfaces (height = value) to this file")
     args = p.parse_args()
     if not os.path.exists(args.cache):
         compute(args)
     plot(args)
+    if args.out3d:
+        plot3d(args.cache, args.out3d)
 
 
 def compute(args: argparse.Namespace) -> None:
@@ -184,6 +187,39 @@ def plot(args: argparse.Namespace) -> None:
     cb.outline.set_edgecolor(ink2)
     fig.savefig(args.out, dpi=150, facecolor=surface, bbox_inches="tight")
     print(f"saved {args.out}", flush=True)
+
+
+def plot3d(cache: str, out: str, elev: float = 38.0, azim: float = -58.0) -> None:
+    """The three maps of `cache` as surfaces over the table: x, y = the cue ball's position, height and colour = the value (balls)."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from matplotlib.colors import LinearSegmentedColormap
+    from exp16_wm.networks import TABLE_L, TABLE_W
+    c = np.load(cache, allow_pickle=True)
+    xs, ys, left = c["xs"], c["ys"], int(c["left"])
+    surface, ink, ink2 = "#fcfcfb", "#0b0b0b", "#52514e"
+    plt.rcParams.update({"font.family": "Apple SD Gothic Neo", "axes.unicode_minus": False})
+    cmap = LinearSegmentedColormap.from_list("blue_seq", ["#cde2fb", "#9ec5f4", "#6da7ec", "#3987e5", "#256abf", "#184f95", "#0d366b"])
+    X, Y = np.meshgrid(xs, ys)
+    fig = plt.figure(figsize=(16, 6.6), facecolor=surface)
+    fig.suptitle("같은 지도를 3차원으로: 바닥 = 수구 위치, 높이 = 그 자리에서 놓칠 때까지 넣는 공 수", color=ink, fontsize=14, x=0.02, ha="left", y=0.98)
+    panels = [("① 실제 결과 (위치마다 한 번)", c["truth"]), ("② 1 cm 평균 (8번)", c["smooth"]), ("③ V의 예측", c["v"])]
+    balls = live_balls(c["raw"], TABLE_W, TABLE_L)
+    for i, (title, z) in enumerate(panels):
+        ax = fig.add_subplot(1, 3, i + 1, projection="3d", facecolor=surface)
+        ax.plot_surface(X, Y, np.where(np.isfinite(z), z, np.nan), cmap=cmap, vmin=0, vmax=left, rcount=len(ys), ccount=len(xs),
+                        linewidth=0, antialiased=False, shade=False)
+        ax.scatter(balls[:, 0], balls[:, 1], np.zeros(len(balls)), s=120, facecolor=surface, edgecolor=ink, linewidth=1.5, depthshade=False, zorder=10)
+        ax.set_zlim(0, left); ax.set_zticks(range(0, left + 1)); ax.set_xticks([]); ax.set_yticks([])
+        ax.set_box_aspect((TABLE_W, TABLE_L, 1.3)); ax.view_init(elev=elev, azim=azim)
+        ax.tick_params(axis="z", colors=ink2, labelsize=9)
+        for a in (ax.xaxis, ax.yaxis, ax.zaxis):
+            a.pane.set_facecolor(surface); a.pane.set_edgecolor("#d8d7d2")
+        ax.set_title(title, color=ink, fontsize=12, loc="left", pad=2)
+    fig.subplots_adjust(left=0.0, right=1.0, wspace=-0.02, top=0.93, bottom=0.0)
+    fig.savefig(out, dpi=150, facecolor=surface, bbox_inches="tight")
+    print(f"saved {out}", flush=True)
 
 
 if __name__ == "__main__":
