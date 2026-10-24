@@ -7,7 +7,7 @@ import numpy as np
 import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from exp16_wm.v_heatmap_radii import correlation_table, disk_average, jump_share, load_real, panels_of, plot_radii
+from exp16_wm.v_heatmap_radii import correlation_table, disk_average, jump_share, load_real, panels_of, plot_radii, zone_auc, zone_table
 
 
 def test_disk_average_radius_zero_is_identity_and_constant_stays_constant_around_holes():
@@ -73,3 +73,19 @@ def test_load_real_reads_the_saved_radii_and_skips_missing_ones(tmp_path):
     np.savez(tmp_path / "r.npz", radii_cm=np.array([2.0, 4.0]), **{"smooth_2": z * 2, "smooth_4": z * 4})
     got = load_real(str(tmp_path / "r.npz"))
     assert sorted(got) == [2.0, 4.0] and got[4.0][0, 0] == 4.0
+
+
+def test_zone_auc_perfect_reversed_and_degenerate_cases():
+    zone = np.array([[0.0, 1.0, 4.0], [5.0, np.nan, 4.5]])
+    assert zone_auc(np.array([[0.1, 0.2, 0.9], [1.0, 0.0, 0.8]]), zone, 4.0) == 1.0          # high exactly where the zone is
+    assert zone_auc(-np.array([[0.1, 0.2, 0.9], [1.0, 0.0, 0.8]]), zone, 4.0) == 0.0
+    assert np.isnan(zone_auc(np.zeros((2, 3)), zone, 9.0))                                     # nobody is in the zone → no AUC
+    pred = np.array([[0.1, 0.2, 0.9], [1.0, 5.0, 0.8]])                                         # the NaN cell of zone_map is ignored (its pred 5.0 too)
+    assert zone_auc(pred, zone, 4.0) == 1.0
+
+
+def test_zone_table_rows_for_the_averaged_maps_only():
+    c = _cache()
+    rows = zone_table(panels_of(c), {"x": c["truth"]}, threshold=1.0)
+    assert len(rows) == 5 and rows[0][0] == "1 cm 평균"                                       # 1 cm, 2, 3, 4, 5 cm
+    assert set(rows[0][2]) == {"V", "① 한 번 친 결과", "x"} and 0.0 <= rows[0][1] <= 1.0

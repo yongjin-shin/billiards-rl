@@ -68,6 +68,45 @@ def correlation_table(panels: list[tuple[str, str, np.ndarray]]) -> list[tuple[s
     return rows
 
 
+def zone_auc(pred: np.ndarray, zone_map: np.ndarray, threshold: float) -> float:
+    """AUC of `pred` for telling the cells whose zone_map value is at least `threshold` ("good zone") from the others, over cells finite in
+    both; NaN if one of the two groups is empty."""
+    from sklearn.metrics import roc_auc_score
+    m = np.isfinite(pred) & np.isfinite(zone_map)
+    y = zone_map[m] >= threshold
+    if y.all() or not y.any():
+        return float("nan")
+    return float(roc_auc_score(y, pred[m]))
+
+
+def made_max_map(c, runs: list[str]) -> np.ndarray:
+    """The made head's highest pair probability with the cue ball on every free cell of the cache (the "is there an easy shot" baseline)."""
+    from exp16_wm.networks import TABLE_L, TABLE_W
+    from exp16_wm.paired_eval import find_run
+    from exp16_wm.v_heatmap import with_cue
+    from exp16_wm.v_testset import made_max_values
+    xs, ys, valid = c["xs"], c["ys"], c["valid"]
+    cells = np.argwhere(valid)
+    base = np.stack([with_cue(c["raw"], xs[ix], ys[iy], TABLE_W, TABLE_L) for iy, ix in cells])
+    n = len(cells)
+    t = {"next_obs": base[:, None, :], "valid": np.ones((n, 1), bool), "succ": np.ones((n, 1), bool), "cleared": np.zeros((n, 1), bool)}
+    out = np.full(valid.shape, np.nan)
+    out[cells[:, 0], cells[:, 1]] = made_max_values(t, [find_run(g) for g in runs])[:, 0]
+    return out
+
+
+def zone_table(panels: list[tuple[str, str, np.ndarray]], extra: dict[str, np.ndarray], threshold: float = 4.0) -> list[tuple[str, float, dict[str, float]]]:
+    """For every averaged map (all panels but ① and V): the share of cells in its good zone (≥ threshold) and the AUC for finding that zone
+    of V, of ① (one exact shot per cell) and of each predictor in `extra`."""
+    truth, v = panels[0][2], panels[-1][2]
+    preds = {"V": v, "① 한 번 친 결과": truth, **extra}
+    rows = []
+    for title, _, z in panels[1:-1]:
+        ok = np.isfinite(z)
+        rows.append((title, float((z[ok] >= threshold).mean()), {n: zone_auc(pv, z, threshold) for n, pv in preds.items()}))
+    return rows
+
+
 def simulate_radii(cache: str, runs: list[str], radii_cm: tuple[float, ...], out: str, workers: int = 8, seed: int = 0, copies: int = 8) -> None:
     """For each radius: the mean k over `copies` copies moved by that radius, at every free cue position of the cache (npz: smooth_<cm> maps)."""
     import time
@@ -156,9 +195,14 @@ def main() -> None:
         simulate_radii(args.cache, args.runs, (2.0, 3.0, 4.0, 5.0), args.real, args.workers)
     plot_radii(args.cache, args.out, args.real)
     c = np.load(args.cache, allow_pickle=True)
+    panels = panels_of(c, real=load_real(args.real) if args.real and os.path.exists(args.real) else None)
     print("title | adjacent-cell jump share | corr with ① | corr with V")
-    for t, j, r_t, r_v in correlation_table(panels_of(c, real=load_real(args.real) if args.real and os.path.exists(args.real) else None)):
+    for t, j, r_t, r_v in correlation_table(panels):
         print(f"{t:12s} | {j * 100:5.1f}% | {r_t:5.2f} | {r_v:5.2f}")
+    extra = {"made 최댓값": made_max_map(c, args.runs)} if args.runs else {}
+    print("\ngood zone = average >= 4 balls; AUC of each predictor for finding that zone")
+    for t, share, aucs in zone_table(panels, extra):
+        print(f"{t:10s} zone share {share * 100:4.1f}% | " + " | ".join(f"{n} {a:.3f}" for n, a in aucs.items()))
 
 
 if __name__ == "__main__":
