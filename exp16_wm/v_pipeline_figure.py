@@ -54,7 +54,7 @@ def main() -> None:
     z = dict(np.load(args.file, allow_pickle=True))
     ids = np.unique(z["layout_id"])
     lefts = {int(g): int(z["left"][z["layout_id"] == g][0]) for g in ids}
-    gid = args.layout if args.layout >= 0 else next((g for g, l in lefts.items() if l == 5), int(ids[0]))
+    gid = args.layout if args.layout >= 0 else next((g for g, l in lefts.items() if l == 5), max(lefts, key=lefts.get))
     arr = layout_arrays(z, gid)
     raw = arr["obs"][0]
     pred = None
@@ -113,24 +113,24 @@ def draw(arr: dict, raw: np.ndarray, pred: np.ndarray | None, sigma_cells: float
     a1.add_patch(Circle((cx, cy), 0.07, fill=False, edgecolor="#eb6834", linewidth=2.0, zorder=8))
     # 2: one cell magnified, six simulations
     a2 = fig.add_subplot(gs[0, 1])
-    a2.set_facecolor(surface); a2.set_xlim(-7.5, 7.5); a2.set_ylim(-7.5, 7.5); a2.set_aspect("equal")
+    a2.set_facecolor(surface); a2.set_xlim(-6.8, 6.8); a2.set_ylim(-6.8, 6.8); a2.set_aspect("equal")
     a2.set_title("② 칸 하나에서 6번 시뮬레이션", color=ink, fontsize=12.5, loc="left", pad=22)
     a2.text(0, 1.012, "정확한 위치 1번 + 1·2·3·4·6 cm 거리에서 각 1번 (방향은 무작위, 그림은 예시)", transform=a2.transAxes, color=ink2, fontsize=9.8, va="bottom")
     radii = arr["radii_mm"] / 10.0
     for r in radii:
         a2.add_patch(Circle((0, 0), r, fill=False, edgecolor=grid_c, linestyle=(0, (4, 3)), linewidth=1.2))
-    angles = np.deg2rad(np.array([20, 100, 175, 250, 320]) + 8 * np.arange(5))
+    angles = np.deg2rad(np.array([75, 150, 225, 300, 20]))
     ring_vals = arr["ring_k"][c, :, 0].astype(float)
     for r, ang, v in zip(radii, angles, ring_vals):
         x, y = r * np.cos(ang), r * np.sin(ang)
         if v < 0:
             continue
-        a2.scatter([x], [y], s=520, color=ramp(v / left), edgecolor=ink, linewidth=1.0, zorder=5)
-        a2.text(x, y, f"{int(v)}", ha="center", va="center", color="#ffffff" if v >= 2 else ink, fontsize=12, fontweight="bold", zorder=6)
-    a2.scatter([0], [0], s=640, marker="X", color=ramp(arr["exact"][c] / left), edgecolor=ink, linewidth=1.5, zorder=7)
+        a2.scatter([x], [y], s=330, color=ramp(v / left), edgecolor=ink, linewidth=1.0, zorder=5)
+        a2.text(x, y, f"{int(v)}", ha="center", va="center", color="#ffffff" if v >= 2 else ink, fontsize=10.5, fontweight="bold", zorder=6)
+    a2.scatter([0], [0], s=420, marker="X", color=ramp(arr["exact"][c] / left), edgecolor=ink, linewidth=1.5, zorder=7)
     placed = ring_vals[ring_vals >= 0]
-    a2.text(-7.2, -6.2, f"X: 정확한 위치에서 친 결과 = {int(arr['exact'][c])}개\n● 5곳의 결과 = {', '.join(str(int(v)) for v in placed)}\n→ 이 칸의 정답 = 5곳의 평균 = {placed.mean():.1f}개",
-            color=ink, fontsize=10.8, va="bottom", linespacing=1.55)
+    a2.text(0.0, -0.03, f"X: 정확한 위치에서 친 결과 = {int(arr['exact'][c])}개\n● 5곳의 결과 = {', '.join(str(int(v)) for v in placed)} (1·2·3·4·6 cm 순)\n→ 이 칸의 정답 = 5곳의 평균 = {placed.mean():.1f}개",
+            transform=a2.transAxes, color=ink, fontsize=10.8, va="top", linespacing=1.55)
     a2.set_xticks([]); a2.set_yticks([])
     for sp in a2.spines.values():
         sp.set_color("#eb6834"); sp.set_linewidth(1.6)
@@ -147,7 +147,7 @@ def draw(arr: dict, raw: np.ndarray, pred: np.ndarray | None, sigma_cells: float
     a5 = fig.add_subplot(gs[1, 0]); table(a5, "④ 모델이 모든 칸의 값을 한 번에 냄", "입력: 공 배치 + 칸의 수구 위치 → V → 그 칸의 값(공 수)")
     if pred is not None:
         im5 = show(a5, to_map(pred, ij, nxy))
-        a5.text(0.02, 0.02, "예: 지금 V(학습된 encoder로 시작)의 예측", transform=a5.transAxes, color=ink, fontsize=9.6, va="bottom", bbox={"facecolor": surface, "edgecolor": grid_c, "pad": 2.5})
+        a5.text(0.0, -0.015, "예: 지금 V(학습된 encoder로 시작)의 예측", transform=a5.transAxes, color=ink2, fontsize=9.8, va="top")
     else:
         a5.text(0.5, 0.5, "(모델 예측 없음)", transform=a5.transAxes, ha="center", color=ink2)
     # 6/7: blurred prediction and blurred label (the loss inputs)
@@ -171,11 +171,18 @@ def draw(arr: dict, raw: np.ndarray, pred: np.ndarray | None, sigma_cells: float
     a8.text(0, 0.93, "손실 = 블러한 예측 지도(⑤)와 블러한 정답 지도(⑥)의\n칸별 BCE 평균 (값은 남은 공 수로 나눈 비율)\n\n"
             "· 배치 4개씩 묶어 한 번에 계산 → 역전파 → 갱신\n· 학습 배치 90% / 검증 배치 10%로 나눠 검증 loss가\n  가장 낮은 epoch의 모델을 선택\n· 정책·made encoder는 고정, V 부분만 학습\n\n"
             "블러 0 cm로 하면 칸 하나씩 비교하는 점 단위 학습과 같음" + loss_txt, fontsize=11, color=ink2, va="top", linespacing=1.7)
-    # arrows between the stages
-    def arrow(x0, y0, x1, y1):
-        fig.add_artist(FancyArrowPatch((x0, y0), (x1, y1), transform=fig.transFigure, arrowstyle="-|>", mutation_scale=18, color=ink2, linewidth=1.6))
-    arrow(0.255, 0.62, 0.285, 0.62); arrow(0.505, 0.62, 0.535, 0.62)
-    arrow(0.255, 0.20, 0.285, 0.20); arrow(0.505, 0.20, 0.535, 0.20)
+    # arrows between the stages, from the panel positions
+    def arrow(src, dst, kind="right", both=False):
+        ps, pd = src.get_position(), dst.get_position()
+        if kind == "right":
+            x0, y0, x1, y1 = ps.x1 + 0.006, (ps.y0 + ps.y1) / 2, pd.x0 - 0.006, (pd.y0 + pd.y1) / 2
+        else:
+            x0, y0, x1, y1 = (ps.x0 + ps.x1) / 2, ps.y0 - 0.052, (pd.x0 + pd.x1) / 2, pd.y1 + 0.05
+        fig.add_artist(FancyArrowPatch((x0, y0), (x1, y1), transform=fig.transFigure, arrowstyle="<|-|>" if both else "-|>", mutation_scale=18, color=ink2, linewidth=1.6))
+    arrow(a1, a2); arrow(a2, a3); arrow(a5, a6); arrow(a3, a7, "down"); arrow(a7, a8)
+    arrow(a6, a7, both=True)
+    pa, pb = a6.get_position(), a7.get_position()
+    fig.text((pa.x1 + pb.x0) / 2, (pa.y0 + pa.y1) / 2 + 0.018, "비교", ha="center", fontsize=10, color=ink2)
     cax = fig.add_axes([0.745, 0.58, 0.008, 0.2]); cb = fig.colorbar(im3, cax=cax, ticks=range(0, left + 1)); cb.ax.tick_params(colors=ink2, labelsize=8); cb.ax.set_title("공 수", color=ink2, fontsize=9, pad=4)
     fig.savefig(out, dpi=135, facecolor=surface, bbox_inches="tight")
     print(f"saved {out}", flush=True)
