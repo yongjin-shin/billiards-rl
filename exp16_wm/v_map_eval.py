@@ -146,7 +146,7 @@ def main() -> None:
     for spec in args.model:
         name, path = spec.split("=", 1)
         preds[name] = predict_model(path, h["obs"], h["left"])
-    preds["(참고) 복사본 0번 하나(5표본)"] = lab["copy0"]
+    preds["(참고) 복사본 0번: 기준과 표본이 겹쳐 부풀려짐"] = lab["copy0"]
     res = {n: per_layout(h, pv, lab["ref"]) for n, pv in preds.items()}
     cols = ["corr", "corr_4", "corr_8", "explained_4", "explained_8", "auc", "corr_exact"]
     print(f"{'':30s} " + " ".join(f"{c:>20s}" for c in cols))
