@@ -7,7 +7,7 @@ import numpy as np
 import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from exp16_wm.v_map_data import aggregate, build_layout, finish_layout, label_from_copies, pick_layouts, relabel, ring_copies, run_layouts, sample_cells, write_file
+from exp16_wm.v_map_data import aggregate, build_layout, grid_cells, finish_layout, label_from_copies, pick_layouts, relabel, ring_copies, run_layouts, sample_cells, write_file
 
 W, L, R = 0.9906, 1.9812, 0.028575
 RAW = np.array([0.2, 0.2, 0.5, 0.5, 0.0, 0.3, 0.7, 0.0] + [0.0] * 12, np.float32)      # 2 balls on the table, cue ball anywhere; 20 = 2 + 3·2 + 12
@@ -117,3 +117,23 @@ def test_pipeline_files_keep_every_copy_and_relabel_sel_uses_them(tmp_path):
     old = {k: z[k] for k in z.files if k != "ring_k"}; np.savez(tmp_path / "old.npz", **old)
     with pytest.raises(ValueError):
         relabel(str(tmp_path / "old.npz"), str(tmp_path / "x.npz"), "sel:10:0")                      # a file from the older generator has no per-copy results
+
+
+def test_grid_cells_without_jitter_sit_on_the_grid_with_matching_cell_numbers_and_the_expected_size():
+    pts, ij, nxy = grid_cells(RAW, 0.07, 0.0, np.random.default_rng(0), R, W, L)
+    assert tuple(nxy) == (14, 28) and pts.shape == ij.shape and 300 < len(pts) < 392              # the cells next to the ball are dropped
+    np.testing.assert_allclose(pts, R + ij * 0.07, atol=1e-9)                                         # position = first cell + number × step
+    assert len({tuple(c) for c in ij}) == len(ij) and ij[:, 0].max() < 14 and ij[:, 1].max() < 28
+    pj, ij2, _ = grid_cells(RAW, 0.07, 0.03, np.random.default_rng(0), R, W, L)
+    assert np.abs(pj - (R + ij2 * 0.07)).max() <= 0.03 + 1e-9 and not np.allclose(pj, R + ij2 * 0.07)   # jitter moves points off their cells by ≤ jitter
+
+
+def test_write_file_stores_the_grid_cell_numbers_and_size(tmp_path):
+    radii = (10.0,)
+    lay = build_layout(RAW, 2, 7, 0, radii, 1, 0.07, 0.0, R, W, L)
+    k = run_layouts([lay], lambda jobs: [np.zeros(len(o), int) for o, _ in jobs])[0]
+    out = str(tmp_path / "g.npz")
+    n = write_file(out, np.stack([RAW]), np.array([2]), np.array([7]), [lay], [finish_layout(lay, k, 1, 1)], radii)
+    z = np.load(out, allow_pickle=True)
+    assert z["cell_ij"].shape == (n, 2) and tuple(z["grid_nxy"]) == (14, 28) and z["cell_ij"].dtype == np.int16
+    np.testing.assert_allclose(z["cell_xy"], R + z["cell_ij"] * 0.07, atol=1e-5)

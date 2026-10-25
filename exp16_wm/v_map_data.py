@@ -52,17 +52,25 @@ def pick_layouts(paths: list[str], per_left: int, seed: int, lefts: tuple[int, .
     return obs[idx], left[idx], key[idx]
 
 
-def sample_cells(raw: np.ndarray, step: float, jitter: float, rng: np.random.Generator, ball_r: float, w: float, l: float) -> np.ndarray:
-    """(M, 2) cue positions in metres: a step grid inside the cushions, each point shifted by up to ± jitter in x and y, kept only where
-    the ball is on the table (centre one radius from the cushion) and at least two radii from every ball still on it."""
+def grid_cells(raw: np.ndarray, step: float, jitter: float, rng: np.random.Generator, ball_r: float, w: float, l: float
+               ) -> tuple[np.ndarray, np.ndarray, tuple[int, int]]:
+    """The cue positions of a layout on a step grid inside the cushions, each point shifted by up to ± jitter in x and y (0 = exactly on the
+    grid), kept only where the ball is on the table (centre one radius from the cushion) and at least two radii from every ball still on it:
+    (M, 2) positions in metres, (M, 2) grid cell numbers (ix, iy) of the kept points, and the grid size (nx, ny)."""
     from exp16_wm.v_heatmap import live_balls
     xs, ys = np.arange(ball_r, w - ball_r + 1e-9, step), np.arange(ball_r, l - ball_r + 1e-9, step)
     gx, gy = np.meshgrid(xs, ys)
+    ix, iy = np.meshgrid(np.arange(len(xs)), np.arange(len(ys)))
     pts = np.stack([gx.ravel(), gy.ravel()], axis=1) + rng.uniform(-jitter, jitter, (gx.size, 2))
     ok = (pts[:, 0] >= ball_r) & (pts[:, 0] <= w - ball_r) & (pts[:, 1] >= ball_r) & (pts[:, 1] <= l - ball_r)
     for b in live_balls(raw, w, l):
         ok &= np.hypot(pts[:, 0] - b[0], pts[:, 1] - b[1]) >= 2.0 * ball_r + 1e-4
-    return pts[ok]
+    return pts[ok], np.stack([ix.ravel()[ok], iy.ravel()[ok]], axis=1), (len(xs), len(ys))
+
+
+def sample_cells(raw: np.ndarray, step: float, jitter: float, rng: np.random.Generator, ball_r: float, w: float, l: float) -> np.ndarray:
+    """(M, 2) cue positions in metres of grid_cells (without the cell numbers)."""
+    return grid_cells(raw, step, jitter, rng, ball_r, w, l)[0]
 
 
 def ring_copies(base: np.ndarray, radii_m: tuple[float, ...], copies: int, rng: np.random.Generator, w: float, l: float, ball_r: float) -> tuple[np.ndarray, np.ndarray]:
@@ -99,7 +107,7 @@ def build_layout(raw: np.ndarray, left: int, layout_id: int, seed: int, radii_mm
     """Everything to simulate for one layout: the cells, and obs (rows = per cell the exact position followed by its ring copies)."""
     from exp16_wm.v_heatmap import with_cue
     rng = np.random.default_rng([seed, layout_id])
-    cells = sample_cells(raw, step, jitter, rng, ball_r, w, l)
+    cells, ij, nxy = grid_cells(raw, step, jitter, rng, ball_r, w, l)
     radii_m = tuple(r / 1000.0 for r in radii_mm)
     per = 1 + len(radii_m) * copies
     obs = np.zeros((len(cells) * per, len(raw)), np.float32)
@@ -110,7 +118,7 @@ def build_layout(raw: np.ndarray, left: int, layout_id: int, seed: int, radii_mm
         obs[i * per] = base
         obs[i * per + 1:(i + 1) * per] = cp
         placed[i] = pl
-    return {"cells": cells, "obs": obs, "placed": placed, "per": np.array(per), "left": np.array(left)}
+    return {"cells": cells, "ij": ij, "nxy": np.array(nxy), "obs": obs, "placed": placed, "per": np.array(per), "left": np.array(left)}
 
 
 def finish_layout(lay: dict[str, np.ndarray], ks: np.ndarray, n_radii: int, copies: int) -> dict[str, np.ndarray]:
@@ -138,19 +146,21 @@ def run_layouts(layouts: list[dict[str, np.ndarray]], roll: Callable[[list[tuple
 def write_file(path: str, raws: np.ndarray, lefts: np.ndarray, ids: np.ndarray, lays: list[dict[str, np.ndarray]], fins: list[dict[str, np.ndarray]],
                radii_mm: tuple[float, ...], target: str = "robust") -> int:
     """Write one train_v-compatible npz for these layouts: obs (cue at the cell), k (float label), left, game (= layout id), branch, plus
-    k_exact, ring_mean, ring_k (every copy's result: (positions, radii, copies), −1 = not placed), cell_xy, layout_id, radii_mm.
+    k_exact, ring_mean, ring_k (every copy's result: (positions, radii, copies), −1 = not placed), cell_xy, cell_ij (grid cell numbers (ix, iy)),
+    grid_nxy (the grid size), layout_id, radii_mm.
     Returns the number of positions."""
     from exp16_wm.v_heatmap import with_cue
     from exp16_wm.networks import TABLE_L, TABLE_W
-    obs, k, left, game, kx, rm, xy, rk = [], [], [], [], [], [], [], []
+    obs, k, left, game, kx, rm, xy, rk, ij = [], [], [], [], [], [], [], [], []
     for raw, ell, gid, lay, fin in zip(raws, lefts, ids, lays, fins):
         n = len(lay["cells"])
         obs.append(np.stack([with_cue(raw, x, y, TABLE_W, TABLE_L) for x, y in lay["cells"]]))
         k.append(fin[target]); left.append(np.full(n, ell)); game.append(np.full(n, gid)); kx.append(fin["k_exact"]); rm.append(fin["ring_mean"]); xy.append(lay["cells"])
-        rk.append(fin["ring_k"].astype(np.int8))
+        rk.append(fin["ring_k"].astype(np.int8)); ij.append(lay["ij"])
     np.savez(path, obs=np.concatenate(obs).astype(np.float32), k=np.concatenate(k).astype(np.float32), left=np.concatenate(left).astype(np.int64),
              game=np.concatenate(game).astype(np.int64), branch=np.zeros(sum(len(a) for a in k), bool), k_exact=np.concatenate(kx),
-             ring_mean=np.concatenate(rm), ring_k=np.concatenate(rk), cell_xy=np.concatenate(xy).astype(np.float32), layout_id=np.concatenate(game).astype(np.int64),
+             ring_mean=np.concatenate(rm), ring_k=np.concatenate(rk), cell_xy=np.concatenate(xy).astype(np.float32), cell_ij=np.concatenate(ij).astype(np.int16),
+             grid_nxy=np.asarray(lays[0]["nxy"], dtype=np.int64), layout_id=np.concatenate(game).astype(np.int64),
              radii_mm=np.array(radii_mm), meta=str({"target": target}))
     return int(sum(len(a) for a in k))
 
