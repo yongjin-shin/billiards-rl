@@ -39,7 +39,8 @@ Experiment plans and next directions. For completed experiment results, see [exp
 [~] 수구를 목표 위치로 보내기 (CT 줄기, `feature/exp16-cue-target`, 2026-10-25~) — 아래 "CT 줄기: 지금까지와 다음" 참고
              └─ [x] CT0·CT0b: 공 한 개 데이터를 도착 위치가 테이블에 고르게 퍼지게 새로 모음 (시작 200곳 × 10만 발, 속도 하한 없음)
              └─ [x] CT2a·b·c: (시작, 목표[, 맞힐 벽 순서]) → (각도, 속도) head — 새 시작 위치에서 쿠션 0번 100%, 1번 97.6%, 2번 94.2% (2 cm 안)
-             └─ [ ] A0: 기존 made head 구조(공 × 목표 pair GNN + proposal + made2)가 목표를 포켓 대신 위치로 줘도 의도대로 움직이는가 — 먼저 (2026-10-26, 사용자)
+             └─ [x] A0: 기존 made head 구조(공 × 목표 pair + proposal + made2)가 목표를 포켓 대신 위치로 줘도 의도대로 움직이는가 — 통과(새 시작 2 cm 안 99.92%, made2 AUC 0.9996, 쿠션 0번만)
+             └─ [ ] A0b: 같은 구조에 맞힐 벽을 입력으로 더해 쿠션 1번·2번에서 MLP head와 비교 — 다음
              └─ [ ] CT3: 다른 공 + 포켓 제약을 붙인다 (도달 가능 영역 측정부터) — 그다음 (사용자 확정, 2026-10-26)
 [ ] Exp-17   Phase 1 HRL — System 2 (ball selection discrete 3) + System 1 (Phase 1 Exp-10 freeze)
 
@@ -745,7 +746,7 @@ rssm_v5 재학습 시 이 `--batch-size` 옵션을 쓸 것. 단, 이 모델 크�
 
 #### CT 줄기 인계 (2026-10-26, 다른 세션이 이어받을 때 먼저 읽을 것)
 
-**지금 상태 한 줄**: A0(기존 made head 구조가 위치 목표로 확장되는가)의 학습·평가 한 번(`logs/a0/run0`)을 돌리던 중 세션을 넘긴다. 결과는 `logs/a0/run0/result.json`(끝나면 생김, 없으면 `logs/a0/run0.log`로 진행 확인), 읽는 법은 experiments.md "A0"의 사전 등록 판단표. 그 결과가 기록돼 있으면 experiments.md 맨 끝 "A0 결과" 항목을 보면 된다.
+**지금 상태 한 줄**: A0(기존 made head 구조가 위치 목표로 확장되는가)가 끝나 기록됐다 — 쿠션 0번에서 통과(새 시작 2 cm 안 99.92%, made2 AUC 0.9996; MLP head 100%보다 중앙값 오차는 2배). 다음은 A0b(벽 입력으로 쿠션 1번·2번). 결과는 experiments.md 맨 끝 "A0 결과", 파일은 `logs/a0/run0/`.
 
 **위치와 환경**
 | 항목 | 값 |
@@ -772,8 +773,8 @@ python -m exp16_wm.goal_gnn train --data logs/ct0b/collect_200.npz --out logs/a0
 ```
 
 **다음에 할 일 (순서)**
-1. A0 결과를 판단표대로 experiments.md에 기록하고 이 문서의 CT 줄기 표·README 행을 갱신한다(예측: proposal 2 cm 안 ≥ 0.98, verify + refine ≥ proposal, made2 AUC ≥ 0.95).
-2. A0가 통과하면 A0b: 맞힐 벽(`--walls`)을 pair 입력에 더해 쿠션 1번·2번에서 MLP head(97.6%, 94.2%)와 같은 조건으로 비교한다(`goal_gnn.py`에는 아직 벽 입력이 없다. `cue_goal_head.py`의 `features(..., wall, n_seq)` 방식과 `feasible_cases`·`lookup_action` 평가를 재사용하면 된다).
+1. (끝남) A0 결과 기록.
+2. A0b: 맞힐 벽(`--walls`)을 pair 입력에 더해 쿠션 1번·2번에서 MLP head(97.6%, 94.2%)와 같은 조건으로 비교한다(`goal_gnn.py`에는 아직 벽 입력이 없다. `cue_goal_head.py`의 `features(..., wall, n_seq)` 방식과 `feasible_cases`·`lookup_action` 평가를 재사용하면 된다).
 3. CT3 첫 측정(위 후보 A): V0의 포켓 샷에서 속도를 바꿨을 때 수구가 서는 자리의 범위. 먼저 "공에 맞은 뒤의 수구는 정지 상태에서 친 head가 다루는 상태가 아니다"(후보 B)를 어떻게 다룰지 정한다.
 4. 급하지 않은 것: 쿠션 3번, 포켓 모서리 묶음(쿠션 1·2번 모두 1 ~ 3%).
 
