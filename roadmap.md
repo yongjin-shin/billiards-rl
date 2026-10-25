@@ -743,6 +743,47 @@ rssm_v5 재학습 시 이 `--batch-size` 옵션을 쓸 것. 단, 이 모델 크�
 | CT3 | 다른 공 + 포켓 제약을 붙인다 (위 "첫 측정", V0 state 사용) | 포켓 성공률 유지, 도달 가능 영역이 곡선으로 줄어드는 정도 → spin 필요성 |
 | CT4 | 타점(a, b)을 연다 | CT3에서 줄어든 영역이 얼마나 다시 넓어지는가 |
 
+#### CT 줄기 인계 (2026-10-26, 다른 세션이 이어받을 때 먼저 읽을 것)
+
+**지금 상태 한 줄**: A0(기존 made head 구조가 위치 목표로 확장되는가)의 학습·평가 한 번(`logs/a0/run0`)을 돌리던 중 세션을 넘긴다. 결과는 `logs/a0/run0/result.json`(끝나면 생김, 없으면 `logs/a0/run0.log`로 진행 확인), 읽는 법은 experiments.md "A0"의 사전 등록 판단표. 그 결과가 기록돼 있으면 experiments.md 맨 끝 "A0 결과" 항목을 보면 된다.
+
+**위치와 환경**
+| 항목 | 값 |
+|---|---|
+| worktree / 브랜치 | `/Users/yj/Documents/billiards-rl/.claude/worktrees/exp16-cue-target`, `feature/exp16-cue-target` (`feature/exp16-cue-predict`의 c637cc4에서 분기). **원격에 push하지 않았고 dev merge·tag도 아직** |
+| python | worktree에는 `.venv`가 없다. `/Users/yj/Documents/billiards-rl/.venv/bin/python`을 쓴다(pooltool 0.5.0, torch, scipy, matplotlib). 명령은 worktree 루트에서 `python -m exp16_wm.<모듈>` |
+| 데이터(**git 밖**, worktree의 `logs/`, 합 약 300 MB) | `logs/ct0b/collect_200.npz`(2,000만 샷, 281 MB), `logs/ct0b/walls_k1.npz`·`walls_k2.npz`(벽 라벨), `logs/ct0/forward.npz`(CT0 격자), `logs/ct2a/run*/`(모델 `head.pt`와 `result.json`), `logs/a0/run0/`, 그림 `logs/ct0b/k0_coverage.png`·`logs/ct2a/k1_routes.png`. 지우거나 worktree를 정리하면 재생성해야 한다(아래 명령, 수집 45분 · 라벨 20분) |
+| 이 줄기 밖의 데이터 | 포켓 파이프라인의 V0 등은 원본 저장소 `/Users/yj/Documents/billiards-rl/logs/teacher_data/`에 있다(예: `val_v0.npz`) — CT3에서 읽기만 한다 |
+| 테스트 | `python -m pytest tests/test_exp16_wm_single_ball.py tests/test_exp16_wm_cue_goal_data.py tests/test_exp16_wm_cue_goal_head.py tests/test_exp16_wm_cue_walls.py tests/test_exp16_wm_goal_gnn.py -q` → 58 passed |
+
+**코드** (모두 `exp16_wm/`): `single_ball.py`(수구 한 개 환경·CT0 격자·분석) · `cue_goal_data.py`(도착 위치가 퍼지게 수집) · `cue_walls.py`(맞힌 벽·경로 라벨) · `cue_goal_head.py`(MLP head, hindsight 학습, 새 시작 평가) · `goal_gnn.py`(A0: 포켓 GNN의 pair 구조 + proposal + made2) · `plot_cue_goal_coverage.py`, `cue_routes.py`(그림). 결과 파일에는 그 코드의 commit이 들어 있다.
+
+**재현 명령** (worktree 루트, `python` = 위 .venv의 python, 8 worker, 모두 `-u`로 백그라운드 실행 시 로그가 보인다)
+```
+python -m exp16_wm.cue_goal_data collect --starts 200 --workers 8 --out logs/ct0b/collect_200.npz      # 45분, 시작당 10만 샷
+python -m exp16_wm.cue_walls label --data logs/ct0b/collect_200.npz --out logs/ct0b/walls_k1.npz         # 9분
+python -m exp16_wm.cue_walls label --data logs/ct0b/collect_200.npz --out logs/ct0b/walls_k2.npz --k 2 --names-from logs/ct0b/walls_k1.npz   # 11분
+python -m exp16_wm.cue_goal_head train --data logs/ct0b/collect_200.npz --out logs/ct2a/run0              # CT2a 쿠션 0번, 약 6분 (CPU가 비면 2분)
+python -m exp16_wm.cue_goal_head train --data ... --k-bin 1 --out logs/ct2a/run_k1                          # CT2b-1 (벽 입력 없음)
+python -m exp16_wm.cue_goal_head train --data ... --walls logs/ct0b/walls_k1.npz --k-bin 1 --out logs/ct2a/run_k1_wall          # CT2b-2
+python -m exp16_wm.cue_goal_head train --data ... --walls logs/ct0b/walls_k2.npz --k-bin 2 --out logs/ct2a/run_k2_route          # CT2c
+python -m exp16_wm.cue_goal_head train --data ... --walls logs/ct0b/walls_k2.npz --k-bin 2 --n-train 3000000 --epochs 80 --out logs/ct2a/run_k2_route_big   # CT2c-2
+python -m exp16_wm.goal_gnn train --data logs/ct0b/collect_200.npz --out logs/a0/run0                       # A0
+```
+
+**다음에 할 일 (순서)**
+1. A0 결과를 판단표대로 experiments.md에 기록하고 이 문서의 CT 줄기 표·README 행을 갱신한다(예측: proposal 2 cm 안 ≥ 0.98, verify + refine ≥ proposal, made2 AUC ≥ 0.95).
+2. A0가 통과하면 A0b: 맞힐 벽(`--walls`)을 pair 입력에 더해 쿠션 1번·2번에서 MLP head(97.6%, 94.2%)와 같은 조건으로 비교한다(`goal_gnn.py`에는 아직 벽 입력이 없다. `cue_goal_head.py`의 `features(..., wall, n_seq)` 방식과 `feasible_cases`·`lookup_action` 평가를 재사용하면 된다).
+3. CT3 첫 측정(위 후보 A): V0의 포켓 샷에서 속도를 바꿨을 때 수구가 서는 자리의 범위. 먼저 "공에 맞은 뒤의 수구는 정지 상태에서 친 head가 다루는 상태가 아니다"(후보 B)를 어떻게 다룰지 정한다.
+4. 급하지 않은 것: 쿠션 3번, 포켓 모서리 묶음(쿠션 1·2번 모두 1 ~ 3%).
+
+**함정과 규칙 (이 줄기에서 겪은 것)**
+- pooltool 0.5.0은 공이 하나면 죽는다(`min() iterable argument is empty`). 두 번째 공을 `pocketed` 상태로 두는 `single_ball.make_cue_only_system`을 쓴다.
+- 속도에 하한을 두지 않는다. 기존 env의 [0.5, 8] m/s와 기존 샷 데이터(속도 ≥ 0.75)는 위치 과제에 못 쓴다. 쿠션 없이 서는 샷의 도착 거리는 7.76·v² m이고, 이 식은 시뮬레이터 검증용이며 **파이프라인에는 쓰지 않는다**.
+- `np.load(...)`의 npz는 키를 꺼낼 때마다 압축을 푼다. 반복문 안에서 `z["phi"][i]`를 쓰면 매우 느리다(한 번 꺼내서 변수에 담는다).
+- 평가는 항상 모델이 낸 행동을 시뮬레이터로 쳐서 목표와의 거리(2 cm 안 비율)를 잰다. 사례는 "그 시작의 기록 샷으로 갈 수 있다고 확인된 (목표, 경로)"이고 "계획기 상한"은 경로를 시뮬레이터로 다 쳐 본 값이다. 서로 다른 평가 집합의 숫자를 바로 비교하지 않는다(CT2b-2에서 같은 목표로 다시 쟀다).
+- 사용자 지침: 결과를 보기 전에 판단표를 experiments.md에 먼저 적는다 / 코드 전에 계획 / 같은 코드·같은 split control / 설명은 쉬운 말로 짧게(숫자와 그림), 번역투 금지 / 이전 과제에서 물려받은 설정(속도 하한 등)은 되묻지 말고 바꾼다 / 다른 프로세스(`train_vmap` 등)가 CPU를 쓰면 느려지니 `ps`로 확인한다.
+
 #### CT 줄기: 지금까지와 다음 (2026-10-26 정리)
 
 **왜 이 줄기를 하나**: 지금 파이프라인은 한 샷을 넣는 것(made head)은 잘하지만 샷 뒤 수구가 어디에 서는지는 고르지 못한다. 목표 위치로 수구를 보내는 능력을 따로 만들어서, 나중에 포켓 샷의 제약 안에서 수구 위치를 고르는 데 쓰려는 것이 출발점이다(사용자 제안, 2026-10-25).
