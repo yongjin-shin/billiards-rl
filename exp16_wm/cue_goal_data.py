@@ -206,7 +206,9 @@ def main() -> None:
     os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
     sizes = np.array([len(r["k"]) for r in results])
     np.savez_compressed(args.out, starts=starts, start_idx=np.repeat(np.arange(len(results)), sizes),
-                        **{key: np.concatenate([r[key] for r in results]) for key in ("phi", "v", "end", "k", "scratch", "round")},
+                        **{key: np.concatenate([r[key] for r in results]) for key in ("k", "scratch", "round")},
+                        # float32: angle error 3e-5 deg, position 1e-7 m — far below the cm goal
+                        **{key: np.concatenate([r[key] for r in results]).astype(np.float32) for key in ("phi", "v", "end")},
                         commit=code_version(), params=json.dumps(asdict(prm)))
     with open(os.path.splitext(args.out)[0] + "_summary.json", "w") as f:
         json.dump({"commit": code_version(), "params": asdict(prm), "starts": summaries}, f, indent=1)
