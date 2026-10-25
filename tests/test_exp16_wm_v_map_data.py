@@ -7,7 +7,7 @@ import numpy as np
 import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from exp16_wm.v_map_data import aggregate, build_layout, finish_layout, pick_layouts, relabel, ring_copies, run_layouts, sample_cells, write_file
+from exp16_wm.v_map_data import aggregate, build_layout, finish_layout, label_from_copies, pick_layouts, relabel, ring_copies, run_layouts, sample_cells, write_file
 
 W, L, R = 0.9906, 1.9812, 0.028575
 RAW = np.array([0.2, 0.2, 0.5, 0.5, 0.0, 0.3, 0.7, 0.0] + [0.0] * 12, np.float32)      # 2 balls on the table, cue ball anywhere; 20 = 2 + 3·2 + 12
@@ -92,3 +92,28 @@ def test_relabel_switches_the_label_between_exact_robust_worst_and_one_ring(tmp_
     np.testing.assert_allclose(got["ring30"], [4.0, 1.0, 0.0, 3.0])                       # row 1 had no ring-30 copy → its exact k
     with pytest.raises(ValueError):
         relabel(src, str(tmp_path / "x.npz"), "median")
+
+
+def test_label_from_copies_picks_radii_and_copies_and_falls_back_to_exact():
+    ring_k = np.array([[[1, 3, 5], [0, 0, 6], [2, 2, 2]],                         # position 0: radii 10, 30, 60 × copies 0, 1, 2
+                       [[-1, -1, -1], [4, -1, 4], [-1, -1, -1]]])                 # position 1: only two copies of radius 30 were placed
+    radii, kx = np.array([10.0, 30.0, 60.0]), np.array([7, 9])
+    np.testing.assert_allclose(label_from_copies(ring_k, radii, [10.0], [0, 1, 2], kx), [3.0, 9.0])           # three copies at one distance; none placed → exact
+    np.testing.assert_allclose(label_from_copies(ring_k, radii, [10.0, 30.0, 60.0], [0], kx), [1.0, 4.0])     # one copy at each of three distances
+    np.testing.assert_allclose(label_from_copies(ring_k, radii, [10.0, 30.0, 60.0], [0, 1, 2], kx), [(1 + 3 + 5 + 0 + 0 + 6 + 2 + 2 + 2) / 9, 4.0])
+
+
+def test_pipeline_files_keep_every_copy_and_relabel_sel_uses_them(tmp_path):
+    radii = (10.0, 30.0)
+    lays = [build_layout(RAW, 2, 7, 0, radii, 3, 0.1, 0.05, R, W, L)]
+    ks = run_layouts(lays, lambda jobs: [np.floor(o[:, 0] * 10).astype(int) for o, _ in jobs], chunk=9)
+    fins = [finish_layout(lays[0], ks[0], 2, 3)]
+    out = str(tmp_path / "m.npz")
+    n = write_file(out, np.stack([RAW]), np.array([2]), np.array([7]), lays, fins, radii)
+    z = np.load(out, allow_pickle=True)
+    assert z["ring_k"].shape == (n, 2, 3) and z["ring_k"].dtype == np.int8
+    relabel(out, str(tmp_path / "o.npz"), "sel:10:0,1,2"); relabel(out, str(tmp_path / "r10.npz"), "ring10")
+    np.testing.assert_allclose(np.load(tmp_path / "o.npz", allow_pickle=True)["k"], np.load(tmp_path / "r10.npz", allow_pickle=True)["k"])   # all three copies = the ring mean
+    old = {k: z[k] for k in z.files if k != "ring_k"}; np.savez(tmp_path / "old.npz", **old)
+    with pytest.raises(ValueError):
+        relabel(str(tmp_path / "old.npz"), str(tmp_path / "x.npz"), "sel:10:0")                      # a file from the older generator has no per-copy results

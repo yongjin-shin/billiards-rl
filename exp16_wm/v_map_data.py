@@ -138,24 +138,38 @@ def run_layouts(layouts: list[dict[str, np.ndarray]], roll: Callable[[list[tuple
 def write_file(path: str, raws: np.ndarray, lefts: np.ndarray, ids: np.ndarray, lays: list[dict[str, np.ndarray]], fins: list[dict[str, np.ndarray]],
                radii_mm: tuple[float, ...], target: str = "robust") -> int:
     """Write one train_v-compatible npz for these layouts: obs (cue at the cell), k (float label), left, game (= layout id), branch, plus
-    k_exact, ring_mean, cell_xy, layout_id, radii_mm. Returns the number of positions."""
+    k_exact, ring_mean, ring_k (every copy's result: (positions, radii, copies), −1 = not placed), cell_xy, layout_id, radii_mm.
+    Returns the number of positions."""
     from exp16_wm.v_heatmap import with_cue
     from exp16_wm.networks import TABLE_L, TABLE_W
-    obs, k, left, game, kx, rm, xy = [], [], [], [], [], [], []
+    obs, k, left, game, kx, rm, xy, rk = [], [], [], [], [], [], [], []
     for raw, ell, gid, lay, fin in zip(raws, lefts, ids, lays, fins):
         n = len(lay["cells"])
         obs.append(np.stack([with_cue(raw, x, y, TABLE_W, TABLE_L) for x, y in lay["cells"]]))
         k.append(fin[target]); left.append(np.full(n, ell)); game.append(np.full(n, gid)); kx.append(fin["k_exact"]); rm.append(fin["ring_mean"]); xy.append(lay["cells"])
+        rk.append(fin["ring_k"].astype(np.int8))
     np.savez(path, obs=np.concatenate(obs).astype(np.float32), k=np.concatenate(k).astype(np.float32), left=np.concatenate(left).astype(np.int64),
              game=np.concatenate(game).astype(np.int64), branch=np.zeros(sum(len(a) for a in k), bool), k_exact=np.concatenate(kx),
-             ring_mean=np.concatenate(rm), cell_xy=np.concatenate(xy).astype(np.float32), layout_id=np.concatenate(game).astype(np.int64),
+             ring_mean=np.concatenate(rm), ring_k=np.concatenate(rk), cell_xy=np.concatenate(xy).astype(np.float32), layout_id=np.concatenate(game).astype(np.int64),
              radii_mm=np.array(radii_mm), meta=str({"target": target}))
     return int(sum(len(a) for a in k))
 
 
+def label_from_copies(ring_k: np.ndarray, radii_mm: np.ndarray, radii_sel: list[float], copies_sel: list[int], k_exact: np.ndarray) -> np.ndarray:
+    """Mean of the placed copies of the chosen radii (radii_sel, in mm) and copy numbers (copies_sel) of every position; the exact k where
+    none of the chosen copies was placed. E.g. radii [10], copies [0, 1, 2]: three copies at one distance; radii [10, 30, 60], copies [0]:
+    one copy at each of three distances — the same number of samples spread over distances."""
+    ri = [int(np.nonzero(np.isclose(radii_mm, r))[0][0]) for r in radii_sel]
+    sel = ring_k[:, ri, :][:, :, copies_sel].reshape(len(ring_k), -1).astype(float)
+    ok = sel >= 0
+    n = ok.sum(axis=1)
+    return np.where(n > 0, np.where(ok, sel, 0.0).sum(axis=1) / np.maximum(n, 1), k_exact.astype(float)).astype(np.float32)
+
+
 def relabel(src: str, dst: str, target: str) -> int:
     """Copy a V7 file with another label in k: "exact" (the exact position's k), "robust" (mean over the radii), "worst" (min over the radii),
-    or "ring<mm>" (that radius only, e.g. ring10; the exact k where no copy of it was placed). Returns the number of positions."""
+    "ring<mm>" (that radius only, e.g. ring10; the exact k where no copy of it was placed) or "sel:<radii mm>:<copy numbers>" (the mean of
+    just those copies, e.g. sel:10,30,60:0; needs the per-copy results). Returns the number of positions."""
     z = dict(np.load(src, allow_pickle=True))
     kx, rm, radii = z["k_exact"].astype(np.float32), z["ring_mean"], z["radii_mm"]
     if target == "exact":
@@ -165,6 +179,11 @@ def relabel(src: str, dst: str, target: str) -> int:
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", RuntimeWarning)
             k = np.where(np.isfinite(rm).any(1), np.nanmean(rm, 1) if target == "robust" else np.nanmin(np.where(np.isfinite(rm), rm, np.inf), 1), kx)
+    elif target.startswith("sel:"):                                                              # sel:<radii mm, comma>:<copy numbers, comma>
+        if "ring_k" not in z:
+            raise ValueError(f"{src} has no per-copy results (ring_k): it was written by an older generator")
+        _, rs, cs = target.split(":")
+        k = label_from_copies(z["ring_k"], radii, [float(r) for r in rs.split(",")], [int(c) for c in cs.split(",")], z["k_exact"])
     elif target.startswith("ring"):
         j = int(np.nonzero(np.isclose(radii, float(target[4:])))[0][0])
         k = np.where(np.isfinite(rm[:, j]), rm[:, j], kx)
