@@ -7,7 +7,7 @@ import numpy as np
 import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from exp16_wm.v_heatmap_radii import correlation_table, disk_average, jump_share, load_real, panels_of, noise_report, plot_radii, zone_auc, zone_table
+from exp16_wm.v_heatmap_radii import blur, boltzmann, correlation_table, kl_div, trend_report, disk_average, jump_share, load_real, panels_of, noise_report, plot_radii, zone_auc, zone_table
 
 
 def test_disk_average_radius_zero_is_identity_and_constant_stays_constant_around_holes():
@@ -101,3 +101,29 @@ def test_noise_report_identical_maps_are_noise_free_and_independent_noise_lowers
     noisy = noise_report(base + rng.normal(0, 1.5, base.shape), base + rng.normal(0, 1.5, base.shape), v)
     assert noisy["reproducibility"] < 0.9 and noisy["jump_16"] < noisy["jump_single"] and noisy["zone_agreement"] < 1.0   # averaging two copies smooths
     assert noisy["corr_v_16_corrected"] > noisy["corr_v_16"]                                                              # the correction raises the correlation
+
+
+def test_blur_keeps_constants_and_holes_and_zero_sigma_is_identity():
+    z = np.full((6, 6), 2.0); z[2, 3] = np.nan
+    out = blur(z, 1.0)
+    assert np.isnan(out[2, 3]) and np.allclose(out[np.isfinite(out)], 2.0)
+    np.testing.assert_array_equal(blur(np.arange(6.0).reshape(2, 3), 0), np.arange(6.0).reshape(2, 3))
+
+
+def test_boltzmann_is_a_distribution_over_finite_cells_and_beta_zero_is_uniform():
+    z = np.array([[0.0, 1.0], [np.nan, 3.0]])
+    p = boltzmann(z, 1.0)
+    assert p.sum() == pytest.approx(1.0) and p[1, 0] == 0.0 and p[1, 1] > p[0, 1] > p[0, 0]
+    np.testing.assert_allclose(boltzmann(z, 0.0)[np.isfinite(z)], 1 / 3)
+    assert kl_div(p, p) == pytest.approx(0.0)
+
+
+def test_trend_report_a_rescaled_copy_is_perfect_a_flat_or_random_map_explains_nothing():
+    rng = np.random.default_rng(0)
+    ref = blur(rng.normal(0, 1, (30, 20)) * 2 + 3, 2.0)
+    same = trend_report(ref * 0.2 + 7.0, ref, sigma_cells=0.0)                       # only the scale and offset differ: temperature is fitted away
+    assert same["explained"] > 0.97 and same["corr"] == pytest.approx(1.0)
+    flat = trend_report(np.zeros_like(ref) + 1.0, ref, sigma_cells=0.0)
+    assert abs(flat["explained"]) < 1e-9
+    rand = trend_report(rng.normal(0, 1, ref.shape), ref, sigma_cells=0.0)
+    assert rand["explained"] < 0.2 and rand["kl_uniform"] > 0

@@ -20,7 +20,7 @@ import os
 import sys
 
 import numpy as np
-from scipy.ndimage import convolve
+from scipy.ndimage import convolve, gaussian_filter
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -95,6 +95,67 @@ def noise_report(a: np.ndarray, b: np.ndarray, v: np.ndarray, threshold: float =
             "corr_v_single": (cv(a) + cv(b)) / 2, "corr_v_16": cv(avg), "corr_v_16_corrected": cv(avg) / float(np.sqrt(rel)),
             "zone_agreement": float(np.mean(za == zb)), "replicate_auc": float(roc_auc_score(za, b[m])) if 0 < za.mean() < 1 else float("nan"),
             "v_auc": float(roc_auc_score(za, v[m])) if 0 < za.mean() < 1 else float("nan")}
+
+
+def blur(z: np.ndarray, sigma_cells: float) -> np.ndarray:
+    """Gaussian blur of a map that ignores NaN cells (they stay NaN); sigma 0 returns the map unchanged."""
+    if sigma_cells <= 0:
+        return z.copy()
+    ok = np.isfinite(z)
+    num = gaussian_filter(np.where(ok, z, 0.0), sigma_cells, mode="constant")
+    den = gaussian_filter(ok.astype(float), sigma_cells, mode="constant")
+    return np.where(ok, num / np.maximum(den, 1e-12), np.nan)
+
+
+def boltzmann(z: np.ndarray, beta: float) -> np.ndarray:
+    """The distribution over the finite cells of z with probability ∝ exp(beta · z) (NaN cells get 0)."""
+    ok = np.isfinite(z)
+    w = np.exp(beta * (z[ok] - z[ok].max()))
+    p = np.zeros_like(z, dtype=float)
+    p[ok] = w / w.sum()
+    return p
+
+
+def kl_div(p: np.ndarray, q: np.ndarray) -> float:
+    m = p > 0
+    return float(np.sum(p[m] * (np.log(p[m]) - np.log(np.maximum(q[m], 1e-300)))))
+
+
+def trend_report(pred: np.ndarray, ref: np.ndarray, sigma_cells: float = 1.0, tau_ref: float = 1.0) -> dict[str, float]:
+    """Compare a predictor map with a reference map as trends: both blurred by sigma_cells over the cells finite in both; the reference
+    becomes the Boltzmann distribution p ∝ exp(ref / tau_ref) (tau_ref in balls) over the cue positions; the predictor becomes
+    q ∝ exp(beta · standardised pred) with beta ≥ 0 fitted to minimise KL(p ‖ q) (so only WHERE the predictor puts mass counts, not the
+    scale of its values). explained = 1 − KL(p ‖ q) / KL(p ‖ uniform): 0 = no better than a flat map, 1 = the same distribution."""
+    m = np.isfinite(pred) & np.isfinite(ref)
+    pr, rf = blur(np.where(m, pred, np.nan), sigma_cells), blur(np.where(m, ref, np.nan), sigma_cells)
+    p = boltzmann(rf, 1.0 / tau_ref)
+    uniform = np.where(m, 1.0 / m.sum(), 0.0)
+    kl_uni = kl_div(p, uniform)
+    std = float(np.nanstd(pr))
+    z = (pr - np.nanmean(pr)) / std if std > 0 else np.zeros_like(pr)
+    betas = np.concatenate([[0.0], np.logspace(-2, 1.5, 120)])
+    kls = [kl_div(p, boltzmann(z, b)) for b in betas]
+    i = int(np.argmin(kls))
+    ok = np.isfinite(pr)
+    return {"explained": float(1.0 - kls[i] / kl_uni) if kl_uni > 0 else float("nan"), "beta": float(betas[i]), "kl": float(kls[i]), "kl_uniform": float(kl_uni),
+            "corr": float(np.corrcoef(pr[ok], rf[ok])[0, 1])}
+
+
+def v_map_of_run(c, run_dir: str) -> np.ndarray:
+    """A trained V run's prediction (balls) with the cue ball on every free cell of the cache."""
+    from exp16_wm.networks import TABLE_L, TABLE_W
+    from exp16_wm.paired_eval import find_run
+    from exp16_wm.v_heatmap import with_cue
+    from exp16_wm.v_testset import next_values
+    xs, ys, valid = c["xs"], c["ys"], c["valid"]
+    cells = np.argwhere(valid)
+    base = np.stack([with_cue(c["raw"], xs[ix], ys[iy], TABLE_W, TABLE_L) for iy, ix in cells])
+    n = len(cells)
+    t = {"next_obs": base[:, None, :], "valid": np.ones((n, 1), bool), "succ": np.ones((n, 1), bool), "cleared": np.zeros((n, 1), bool),
+         "left_next": np.full((n, 1), int(c["left"]))}
+    out = np.full(valid.shape, np.nan)
+    out[cells[:, 0], cells[:, 1]] = next_values(t, find_run(run_dir))[:, 0]
+    return out
 
 
 def made_max_map(c, runs: list[str]) -> np.ndarray:
@@ -208,7 +269,26 @@ def main() -> None:
     p.add_argument("--runs", nargs="+", default=[]); p.add_argument("--workers", type=int, default=8)
     p.add_argument("--replicate", default="", help="npz of the same radius simulated with another seed (smooth_<--replicate-cm>): print the noise report")
     p.add_argument("--replicate-cm", type=float, default=3.0)
+    p.add_argument("--trend", action="store_true", help="compare V runs (--v-runs) and baselines with the simulated --replicate-cm map as trends (blur + Boltzmann + KL)")
+    p.add_argument("--v-runs", nargs="*", default=[])
     args = p.parse_args()
+    if args.trend:
+        c = np.load(args.cache, allow_pickle=True)
+        cm = args.replicate_cm
+        ref, rep = np.load(args.real)[f"smooth_{cm:g}"], np.load(args.replicate)[f"smooth_{cm:g}"]
+        preds = {"V v6a_ctrl (정확한 정답)": c["v"]}
+        for r in args.v_runs:
+            preds[os.path.basename(r.rstrip("/"))] = v_map_of_run(c, r)
+        if args.runs:
+            preds["made 최댓값"] = made_max_map(c, args.runs)
+        preds["① 한 번 친 결과"] = c["truth"]
+        preds["같은 지도 다른 seed (잡음 한계)"] = rep
+        for sg in (1.0, 2.0):
+            print(f"\n== 기준 = {cm:g} cm 평균(seed 0)을 블러 σ={sg * 2:g} cm로 매끄럽게 한 경향, 온도 1개로 분포화, 예측자도 같은 블러")
+            for n, pm in preds.items():
+                r = trend_report(pm, ref, sg)
+                print(f"  {n:34s} KL이 설명하는 몫 {r['explained']:.3f} | 상관 {r['corr']:.3f} | 역온도 {r['beta']:.2f}")
+        return
     if args.replicate:
         c = np.load(args.cache, allow_pickle=True)
         a, b = np.load(args.real)[f"smooth_{args.replicate_cm:g}"], np.load(args.replicate)[f"smooth_{args.replicate_cm:g}"]
