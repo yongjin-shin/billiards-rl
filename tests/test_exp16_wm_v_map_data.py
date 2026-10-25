@@ -7,7 +7,7 @@ import numpy as np
 import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from exp16_wm.v_map_data import aggregate, build_layout, finish_layout, pick_layouts, ring_copies, run_layouts, sample_cells, write_file
+from exp16_wm.v_map_data import aggregate, build_layout, finish_layout, pick_layouts, relabel, ring_copies, run_layouts, sample_cells, write_file
 
 W, L, R = 0.9906, 1.9812, 0.028575
 RAW = np.array([0.2, 0.2, 0.5, 0.5, 0.0, 0.3, 0.7, 0.0] + [0.0] * 12, np.float32)      # 2 balls on the table, cue ball anywhere; 20 = 2 + 3·2 + 12
@@ -76,3 +76,19 @@ def test_pipeline_with_a_fake_simulator_keeps_row_order_and_writes_a_train_v_fil
     d = load_v_data([out], val_frac=0.5)
     assert len(d["k"]) == n == sum(len(l["cells"]) for l in lays) and d["k"].dtype == np.float32
     assert set(np.unique(d["gid"])) == {7, 8} and d["val"].sum() > 0 and set(np.unique(d["left"])) == {2, 3}   # split by layout (a layout is a "game")
+
+
+def test_relabel_switches_the_label_between_exact_robust_worst_and_one_ring(tmp_path):
+    n = 4
+    np.savez(tmp_path / "v.npz", obs=np.zeros((n, 20), np.float32), k=np.zeros(n, np.float32), left=np.full(n, 3), game=np.arange(n), branch=np.zeros(n, bool),
+             k_exact=np.array([3, 1, 0, 2]), ring_mean=np.array([[2.0, 4.0], [0.0, np.nan], [np.nan, np.nan], [1.0, 3.0]], np.float32),
+             radii_mm=np.array([10.0, 30.0]), meta="{}")
+    src = str(tmp_path / "v.npz")
+    got = {}
+    for t in ("exact", "robust", "worst", "ring10", "ring30"):
+        relabel(src, str(tmp_path / f"{t}.npz"), t); got[t] = np.load(tmp_path / f"{t}.npz", allow_pickle=True)["k"]
+    np.testing.assert_allclose(got["exact"], [3, 1, 0, 2]); np.testing.assert_allclose(got["robust"], [3.0, 0.0, 0.0, 2.0])
+    np.testing.assert_allclose(got["worst"], [2.0, 0.0, 0.0, 1.0]); np.testing.assert_allclose(got["ring10"], [2.0, 0.0, 0.0, 1.0])
+    np.testing.assert_allclose(got["ring30"], [4.0, 1.0, 0.0, 3.0])                       # row 1 had no ring-30 copy → its exact k
+    with pytest.raises(ValueError):
+        relabel(src, str(tmp_path / "x.npz"), "median")

@@ -153,15 +153,46 @@ def write_file(path: str, raws: np.ndarray, lefts: np.ndarray, ids: np.ndarray, 
     return int(sum(len(a) for a in k))
 
 
+def relabel(src: str, dst: str, target: str) -> int:
+    """Copy a V7 file with another label in k: "exact" (the exact position's k), "robust" (mean over the radii), "worst" (min over the radii),
+    or "ring<mm>" (that radius only, e.g. ring10; the exact k where no copy of it was placed). Returns the number of positions."""
+    z = dict(np.load(src, allow_pickle=True))
+    kx, rm, radii = z["k_exact"].astype(np.float32), z["ring_mean"], z["radii_mm"]
+    if target == "exact":
+        k = kx
+    elif target in ("robust", "worst"):
+        import warnings
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)
+            k = np.where(np.isfinite(rm).any(1), np.nanmean(rm, 1) if target == "robust" else np.nanmin(np.where(np.isfinite(rm), rm, np.inf), 1), kx)
+    elif target.startswith("ring"):
+        j = int(np.nonzero(np.isclose(radii, float(target[4:])))[0][0])
+        k = np.where(np.isfinite(rm[:, j]), rm[:, j], kx)
+    else:
+        raise ValueError(f"target must be exact, robust, worst or ring<mm>, got {target!r}")
+    z["k"] = k.astype(np.float32); z["meta"] = np.array(str({"target": target}))
+    np.savez(dst, **z)
+    return len(k)
+
+
 def main() -> None:
     p = argparse.ArgumentParser()
-    p.add_argument("--data", required=True, help="V data files to take the layouts from"); p.add_argument("--out-dir", required=True)
+    p.add_argument("--relabel", nargs=3, metavar=("SRC_GLOB", "DST_DIR", "TARGET"), help="instead of simulating: copy files with another label (exact | robust | worst | ring<mm>)")
+    p.add_argument("--data", help="V data files to take the layouts from"); p.add_argument("--out-dir")
     p.add_argument("--layouts-per-left", type=int, default=4); p.add_argument("--per-file", type=int, default=10, help="layouts per output file (resume unit)")
     p.add_argument("--radii-mm", type=float, nargs="+", default=list(RADII_MM)); p.add_argument("--copies", type=int, default=3)
     p.add_argument("--step", type=float, default=0.05); p.add_argument("--jitter", type=float, default=0.025)
     p.add_argument("--seed", type=int, default=0); p.add_argument("--id-offset", type=int, default=0, help="layout ids start here (keep train / held-out ids apart)")
-    p.add_argument("--runs", nargs="+", required=True); p.add_argument("--workers", type=int, default=8)
+    p.add_argument("--runs", nargs="+"); p.add_argument("--workers", type=int, default=8)
     args = p.parse_args()
+    if args.relabel:
+        src, dst, target = args.relabel
+        os.makedirs(dst, exist_ok=True)
+        for f in sorted(glob.glob(src)):
+            print(f"{os.path.basename(f)} -> {target}: {relabel(f, os.path.join(dst, os.path.basename(f)), target)} positions", flush=True)
+        return
+    if not (args.data and args.out_dir and args.runs):
+        raise SystemExit("simulating needs --data, --out-dir and --runs")
     from multiprocessing import Pool
     import pooltool as pt
     from exp16_wm import v_heatmap as H
