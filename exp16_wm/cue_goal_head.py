@@ -24,7 +24,9 @@ from scipy.spatial import cKDTree
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from exp16_wm.cue_goal_data import BALL_R, TABLE_L, TABLE_W
-from exp16_wm.cue_walls import N_WALLS, WALLS
+from exp16_wm.cue_walls import N_WALLS, WALLS, route_digits
+
+JAW = WALLS.index("포켓 모서리")
 from exp16_wm.single_ball import make_cue_only_system, sample_starts, shoot
 
 ANGLE_TOL_RAD = float(np.radians(0.1))
@@ -33,12 +35,16 @@ V_CLIP = (1e-4, 8.0)
 SCALE = np.array([TABLE_W, TABLE_L], np.float32)
 
 
-def features(start: np.ndarray, goal: np.ndarray, wall: np.ndarray | None = None) -> np.ndarray:
-    """(n, 7): start and goal as table fractions, the vector start -> goal in metres, and its length; with `wall` (n,) ints, N_WALLS one-hot columns more."""
+def features(start: np.ndarray, goal: np.ndarray, wall: np.ndarray | None = None, n_seq: int = 1) -> np.ndarray:
+    """
+    (n, 7): start and goal as table fractions, the vector start -> goal in metres, and its length. With `wall` (n,) route integers
+    (cue_walls.route_code) of n_seq cushions: N_WALLS one-hot columns for each wall of the route, in order.
+    """
     d = goal - start
     cols = [start / SCALE, goal / SCALE, d, np.linalg.norm(d, axis=1, keepdims=True)]
     if wall is not None:
-        cols.append(np.eye(N_WALLS, dtype=np.float32)[np.asarray(wall, int)])
+        digits = route_digits(np.asarray(wall), n_seq)
+        cols += [np.eye(N_WALLS, dtype=np.float32)[digits[:, j]] for j in range(n_seq)]
     return np.concatenate(cols, axis=1).astype(np.float32)
 
 
@@ -60,10 +66,11 @@ def load_rows(path: str, k_bin: int, n_holdout: int, n_train: int, seed: int, wa
     on_table = (end[:, 0] >= 0) & (end[:, 0] <= TABLE_W) & (end[:, 1] >= 0) & (end[:, 1] <= TABLE_L)
     kk = np.minimum(k, 3)
     ok = on_table & ~scratch & (kk == k_bin)
-    wall = None
-    if walls_path:                                      # one-cushion shots with a wall label (exp16_wm.cue_walls); the others are dropped
+    wall, n_seq = None, 1
+    if walls_path:                                      # shots with a route label (exp16_wm.cue_walls); the others are dropped
         zw = np.load(walls_path)
-        wall = np.full(len(k), -1, np.int8); wall[zw["rows"]] = zw["wall"]
+        n_seq = int(zw["n_seq"]) if "n_seq" in zw.files else 1
+        wall = np.full(len(k), -1, np.int16); wall[zw["rows"]] = zw["wall"]
         ok &= wall >= 0
     rng = np.random.default_rng(seed)
     perm = rng.permutation(len(starts))
@@ -72,7 +79,7 @@ def load_rows(path: str, k_bin: int, n_holdout: int, n_train: int, seed: int, wa
     rows = np.nonzero(in_train)[0]
     rows = rng.choice(rows, size=min(n_train, len(rows)), replace=False)
     return {"starts": starts, "holdout": hold, "train_starts": train_starts, "rows": rows, "sidx": sidx, "ok": ok,
-            "phi": z["phi"], "v": z["v"], "end": end, "wall": wall}
+            "phi": z["phi"], "v": z["v"], "end": end, "wall": wall, "n_seq": n_seq}
 
 
 class Head(nn.Module):
@@ -102,10 +109,10 @@ def loss_fn(pred: torch.Tensor, tgt: torch.Tensor) -> torch.Tensor:
     return (pseudo_huber(ang) + pseudo_huber(lv)).mean()
 
 
-def predict_action(model: Head, start: np.ndarray, goal: np.ndarray, wall: np.ndarray | None = None) -> tuple[np.ndarray, np.ndarray]:
-    """(angle in degrees 0..360, speed m/s) for each (start, goal[, wall])."""
+def predict_action(model: Head, start: np.ndarray, goal: np.ndarray, wall: np.ndarray | None = None, n_seq: int = 1) -> tuple[np.ndarray, np.ndarray]:
+    """(angle in degrees 0..360, speed m/s) for each (start, goal[, route])."""
     with torch.no_grad():
-        out = model(torch.from_numpy(features(start, goal, wall))).numpy().astype(np.float64)
+        out = model(torch.from_numpy(features(start, goal, wall, n_seq))).numpy().astype(np.float64)
     phi = np.degrees(np.arctan2(out[:, 1], out[:, 0])) % 360.0
     return phi, np.clip(np.exp(out[:, 2]), *V_CLIP)
 
@@ -159,11 +166,12 @@ def feasible_cases(data: dict, start_ids: np.ndarray, n_goals: int, seed: int, t
     goal (a route that is known to exist). Returns start (m, 2), goal (m, 2), wall (m,), goal id (m,) — one goal id for all walls of a goal.
     """
     S, G, W, GID, gid = [], [], [], [], 0
+    n_routes = N_WALLS ** data.get("n_seq", 1)
     for j, i in enumerate(start_ids):
         goals = sample_starts(n_goals, seed + 7919 * (j + 1)).astype(np.float32)
         rows_i = np.nonzero((data["sidx"] == i) & data["ok"])[0]
-        hit = np.zeros((n_goals, N_WALLS), bool)
-        for w in range(N_WALLS):
+        hit = np.zeros((n_goals, n_routes), bool)
+        for w in range(n_routes):
             rw = rows_i[data["wall"][rows_i] == w]
             if len(rw):
                 hit[:, w] = cKDTree(data["end"][rw]).query(goals)[0] <= tol
@@ -192,8 +200,9 @@ def train(data: dict, epochs: int, batch: int, lr: float, width: int, depth: int
     rows = data["rows"]
     s = data["starts"][data["sidx"][rows]]; g = data["end"][rows].astype(np.float32)
     wall = data["wall"][rows] if data.get("wall") is not None else None
-    x = torch.from_numpy(features(s, g, wall)); y = torch.from_numpy(targets(data["phi"][rows], data["v"][rows]))
-    model = Head(width, depth, n_extra=0 if wall is None else N_WALLS)
+    n_seq = data.get("n_seq", 1)
+    x = torch.from_numpy(features(s, g, wall, n_seq)); y = torch.from_numpy(targets(data["phi"][rows], data["v"][rows]))
+    model = Head(width, depth, n_extra=0 if wall is None else n_seq * N_WALLS)
     model.x_mean.copy_(x.mean(0)); model.x_std.copy_(x.std(0) + 1e-6)
     model.lv_mean.copy_(y[:, 2].mean()); model.lv_std.copy_(y[:, 2].std())
     opt = torch.optim.Adam(model.parameters(), lr=lr)
@@ -228,16 +237,25 @@ def main() -> None:
     data = load_rows(args.data, args.k_bin, args.holdout, args.n_train, args.seed, args.walls)
     print(f"[ct2a] train rows {len(data['rows'])} from {len(data['train_starts'])} starts, holdout {len(data['holdout'])} starts", flush=True)
     model = train(data, args.epochs, args.batch, args.lr, args.width, args.depth, args.seed, log=lambda m: print(m, flush=True))
-    torch.save({"state": model.state_dict(), "width": args.width, "depth": args.depth, "n_extra": 0 if args.walls is None else N_WALLS, "args": vars(args)}, os.path.join(args.out, "head.pt"))
+    torch.save({"state": model.state_dict(), "width": args.width, "depth": args.depth, "n_extra": 0 if args.walls is None else data["n_seq"] * N_WALLS, "n_seq": data["n_seq"], "args": vars(args)}, os.path.join(args.out, "head.pt"))
     result = {"commit": code_version(), "args": vars(args), "k_bin": args.k_bin}
     for name, ids in (("new_starts", data["holdout"]), ("train_starts", data["train_starts"][: len(data["holdout"])])):
         if args.walls:
+            n_seq = data["n_seq"]
             s, g, w, gid = feasible_cases(data, ids, args.n_goals, 1000 + args.seed)
-            err = play_error(s, g, *predict_action(model, s, g, w))
+            err = play_error(s, g, *predict_action(model, s, g, w, n_seq))
             lerr = play_error(s, g, *lookup_action(data, s, g, w))
-            result[name] = {"model": summarize(err), "lookup_baseline": summarize(lerr), "planner_best_wall_model": summarize(best_per_goal(err, gid)),
-                            "planner_best_wall_lookup": summarize(best_per_goal(lerr, gid)), "n_goals": int(gid.max() + 1) if len(gid) else 0,
-                            "per_wall": {WALLS[i]: summarize(err[w == i]) for i in range(N_WALLS) if (w == i).any()}}
+            jaw = (route_digits(w, n_seq) == JAW).any(axis=1)                        # a pocket-jaw cushion anywhere in the route
+            res = {"model": summarize(err), "lookup_baseline": summarize(lerr), "n_goals": int(gid.max() + 1) if len(gid) else 0,
+                   "planner_best_route_model": summarize(best_per_goal(err, gid)), "planner_best_route_lookup": summarize(best_per_goal(lerr, gid)),
+                   "straight_walls_only": {"model": summarize(err[~jaw]), "lookup_baseline": summarize(lerr[~jaw])},
+                   "with_pocket_jaw": {"model": summarize(err[jaw])} if jaw.any() else {}}
+            if (~jaw).any():
+                keep = ~jaw
+                res["planner_best_route_straight_only_model"] = summarize(best_per_goal(err[keep], gid[keep]))
+                res["by_first_wall_straight_only"] = {WALLS[i]: summarize(err[keep & (route_digits(w, n_seq)[:, 0] == i)]) for i in range(N_WALLS)
+                                                      if (keep & (route_digits(w, n_seq)[:, 0] == i)).any()}
+            result[name] = res
         else:
             s, g = eval_cases(data["starts"], ids, args.n_goals, 1000 + args.seed)
             phi, v = predict_action(model, s, g)

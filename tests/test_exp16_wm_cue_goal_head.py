@@ -185,3 +185,51 @@ def test_lookup_with_wall_replays_a_shot_of_that_wall():
     assert phi[0] == 20.0                                      # wall 1's shot (10.0) ends nearer the goal, but wall 2 was asked for
     phi2, _ = lookup_action(data, np.array([[0.25, 0.25]], np.float32), np.array([[0.3, 0.3]], np.float32), np.array([5]))
     assert phi2[0] == 10.0                                     # no shot of wall 5: falls back to any shot of the nearest start
+
+
+# ---------------------------------------------------------------- CT2c: routes of two cushions
+
+
+def test_features_with_a_two_wall_route_has_two_one_hots():
+    from exp16_wm.cue_walls import N_WALLS
+    s = np.array([[0.2, 0.4], [0.3, 0.5]], np.float32); g = np.array([[0.5, 0.8], [0.6, 0.9]], np.float32)
+    route = np.array([2 * N_WALLS + 5, 6 * N_WALLS + 0])                      # (wall 2 then 5), (wall 6 then 0)
+    f = features(s, g, route, n_seq=2)
+    assert f.shape == (2, 7 + 2 * N_WALLS)
+    assert f[0, 7 + 2] == 1 and f[0, 7 + N_WALLS + 5] == 1 and f[0, 7:].sum() == 2
+    assert f[1, 7 + 6] == 1 and f[1, 7 + N_WALLS + 0] == 1 and f[1, 7:].sum() == 2
+
+
+def test_load_rows_reads_the_route_length_from_the_walls_file(tmp_path):
+    p = str(tmp_path / "d.npz"); k, scratch, end = _fake_npz(p)
+    cand = np.nonzero((k == 2) & ~scratch & (np.arange(len(k)) != 5))[0]
+    w = str(tmp_path / "w.npz"); np.savez(w, rows=cand, wall=(np.arange(len(cand)) % 49).astype(np.int16), n_seq=2)
+    d = load_rows(p, 2, 2, 10_000, 3, walls_path=w)
+    assert d["n_seq"] == 2 and (d["wall"][d["rows"]] >= 0).all() and d["wall"][d["rows"]].max() < 49
+    assert load_rows(p, 1, 2, 10_000, 3)["n_seq"] == 1
+
+
+def test_training_and_prediction_with_two_wall_routes():
+    from exp16_wm.cue_walls import N_WALLS
+    rng = np.random.default_rng(2); n = 3000
+    start = rng.uniform([0.1, 0.1], [0.8, 1.8], (n, 2)).astype(np.float32); goal = rng.uniform([0.1, 0.1], [0.8, 1.8], (n, 2)).astype(np.float32)
+    route = rng.integers(0, N_WALLS ** 2, n)
+    phi = (np.degrees(np.arctan2(*(goal - start).T[::-1])) + 7.0 * (route // N_WALLS) + 3.0 * (route % N_WALLS)) % 360.0
+    data = {"starts": start, "sidx": np.arange(n), "rows": np.arange(n), "end": goal, "phi": phi.astype(np.float32),
+            "v": np.full(n, 0.3, np.float32), "wall": route.astype(np.int16), "n_seq": 2}
+    logs: list[str] = []
+    model = train(data, epochs=5, batch=256, lr=2e-3, width=48, depth=3, seed=0, log=logs.append)
+    assert model.x_mean.shape == (7 + 2 * N_WALLS,)
+    assert float(logs[-1].split("loss ")[1].split()[0]) < float(logs[0].split("loss ")[1].split()[0])
+    ph, vv = predict_action(model, start[:10], goal[:10], route[:10], n_seq=2)
+    assert ph.shape == (10,) and (vv > 0).all()
+
+
+def test_feasible_cases_with_two_wall_routes_uses_route_integers():
+    from exp16_wm.cue_goal_head import feasible_cases
+    starts = np.array([[0.5, 1.0]], np.float32)
+    goals = sample_starts_for_test(2, 1000 + 7919)
+    end = np.array([goals[0] + 0.004], np.float32)
+    data = {"starts": starts, "sidx": np.zeros(1, int), "ok": np.ones(1, bool), "end": end, "wall": np.array([3 * 7 + 4], np.int16), "n_seq": 2}
+    s, g, w, gid = feasible_cases(data, np.array([0]), 2, seed=1000)
+    assert w.tolist() == [25] and gid.tolist() == [0]
