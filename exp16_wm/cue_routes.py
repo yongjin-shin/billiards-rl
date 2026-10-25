@@ -22,38 +22,11 @@ from scipy.spatial import cKDTree
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from exp16_wm.cue_goal_data import TABLE_L, TABLE_W
 from exp16_wm.cue_goal_head import load_rows
-from exp16_wm.cue_goal_data import standing_mask  # noqa: F401  (kept for parity with the other plots)
 from exp16_wm.plot_cue_goal_coverage import INK, INK2, SURFACE, _font, draw_table
-from exp16_wm.single_ball import CUSHION_EVENTS, make_cue_only_system, sample_starts
-from simulator import play_shot
+from exp16_wm.cue_walls import WALLS, replay, wall_names
+from exp16_wm.single_ball import sample_starts
 
 COLORS = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300"]   # categorical slots 1-6, fixed order
-
-
-def replay(start: np.ndarray, phi: np.ndarray, v: np.ndarray) -> tuple[list[str], np.ndarray, np.ndarray]:
-    """Per shot: id of the cushion hit, the cue ball position at that contact, and where it ended."""
-    system = make_cue_only_system(float(start[0]), float(start[1]))
-    ids, contact, end = [], np.zeros((len(phi), 2)), np.zeros((len(phi), 2))
-    for i in range(len(phi)):
-        out = play_shot(system, float(phi[i]), float(v[i]))
-        hit = [e for e in out.events if e.event_type in CUSHION_EVENTS][0]
-        ids.append(next(str(a.id) for a in hit.agents if str(a.id) != "cue"))
-        contact[i] = next(a.final.state.rvw[0][:2] for a in hit.agents if str(a.id) == "cue")
-        end[i] = out.balls["cue"].state.rvw[0][:2]
-    return ids, contact, end
-
-
-def wall_names(ids: list[str], contact: np.ndarray) -> dict[str, str]:
-    """Name each cushion by where its contacts lie (bottom / top / left / right, lower or upper half of a long side); '...t' = pocket jaw."""
-    names = {}
-    for cid in sorted(set(ids)):
-        if cid.endswith("t"):
-            names[cid] = "포켓 모서리"; continue
-        c = np.median(contact[[i for i, x in enumerate(ids) if x == cid]], axis=0)
-        if c[1] < 0.2: names[cid] = "아래 짧은 변"
-        elif c[1] > TABLE_L - 0.2: names[cid] = "위 짧은 변"
-        else: names[cid] = ("왼쪽 " if c[0] < TABLE_W / 2 else "오른쪽 ") + ("아래" if c[1] < TABLE_L / 2 else "위")
-    return names
 
 
 def main() -> None:
@@ -67,11 +40,11 @@ def main() -> None:
     ex = d["train_starts"][np.argmin(np.linalg.norm(starts[d["train_starts"]] - centre, axis=1))]
     rows = np.nonzero(d["ok"] & (d["sidx"] == ex))[0]
     t0 = time.time()
-    ids, contact, end = replay(starts[ex], d["phi"][rows], d["v"][rows])
+    ids_arr, contact, end = replay(starts[ex], d["phi"][rows], d["v"][rows])
     print(f"start {ex} at {starts[ex].round(3)}: replayed {len(rows):,} one-cushion shots in {time.time() - t0:.0f}s")
-    names = wall_names(ids, contact)
-    group = np.array([names[c] for c in ids])                     # several ids can be one wall (the pocket jaws are many)
-    order = ["왼쪽 아래", "왼쪽 위", "오른쪽 아래", "오른쪽 위", "아래 짧은 변", "위 짧은 변", "포켓 모서리"]
+    names = wall_names(ids_arr, contact)
+    group = np.array([names[str(c)] for c in ids_arr])                     # several ids can be one wall (the pocket jaws are many)
+    order = WALLS
     color = dict(zip(order, COLORS + ["#8a8984"]))
     print("shots per wall:", {w: int((group == w).sum()) for w in order})
     trees = {w: cKDTree(end[group == w]) for w in order if (group == w).any()}
