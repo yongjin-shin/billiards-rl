@@ -7,7 +7,7 @@ import numpy as np
 import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from exp16_wm.v_heatmap_radii import blur, boltzmann, correlation_table, kl_div, trend_report, disk_average, jump_share, load_real, panels_of, noise_report, plot_radii, zone_auc, zone_table
+from exp16_wm.v_heatmap_radii import plot_trend, trend_fit, blur, boltzmann, correlation_table, kl_div, trend_report, disk_average, jump_share, load_real, panels_of, noise_report, plot_radii, zone_auc, zone_table
 
 
 def test_disk_average_radius_zero_is_identity_and_constant_stays_constant_around_holes():
@@ -127,3 +127,18 @@ def test_trend_report_a_rescaled_copy_is_perfect_a_flat_or_random_map_explains_n
     assert abs(flat["explained"]) < 1e-9
     rand = trend_report(rng.normal(0, 1, ref.shape), ref, sigma_cells=0.0)
     assert rand["explained"] < 0.2 and rand["kl_uniform"] > 0
+
+
+def test_trend_fit_returns_two_distributions_over_the_same_cells_and_plot_trend_writes_a_png(tmp_path):
+    rng = np.random.default_rng(1)
+    ref = blur(rng.normal(0, 1, (30, 20)) * 2 + 3, 2.0)
+    pred = ref * 0.3 + rng.normal(0, 0.2, ref.shape)
+    f = trend_fit(pred, ref, 1.0)
+    assert f["p"].sum() == pytest.approx(1.0) and f["q"].sum() == pytest.approx(1.0) and f["uniform"].sum() == pytest.approx(1.0)
+    assert np.array_equal(f["p"] > 0, f["q"] > 0) and 0.3 < f["explained"] <= 1.0
+    c = _cache()
+    ny, nx = c["truth"].shape
+    r2 = blur(np.random.default_rng(2).normal(0, 1, (ny, nx)) + 2, 1.0)
+    out = tmp_path / "t.png"
+    plot_trend(c, r2, {"V": r2 * 0.5 + 1.0, "made": np.random.default_rng(3).normal(0, 1, (ny, nx))}, str(out), sigma_cells=1.0)
+    assert out.exists() and out.stat().st_size > 5000

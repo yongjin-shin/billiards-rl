@@ -121,11 +121,12 @@ def kl_div(p: np.ndarray, q: np.ndarray) -> float:
     return float(np.sum(p[m] * (np.log(p[m]) - np.log(np.maximum(q[m], 1e-300)))))
 
 
-def trend_report(pred: np.ndarray, ref: np.ndarray, sigma_cells: float = 1.0, tau_ref: float = 1.0) -> dict[str, float]:
+def trend_fit(pred: np.ndarray, ref: np.ndarray, sigma_cells: float = 1.0, tau_ref: float = 1.0) -> dict:
     """Compare a predictor map with a reference map as trends: both blurred by sigma_cells over the cells finite in both; the reference
     becomes the Boltzmann distribution p ∝ exp(ref / tau_ref) (tau_ref in balls) over the cue positions; the predictor becomes
     q ∝ exp(beta · standardised pred) with beta ≥ 0 fitted to minimise KL(p ‖ q) (so only WHERE the predictor puts mass counts, not the
-    scale of its values). explained = 1 − KL(p ‖ q) / KL(p ‖ uniform): 0 = no better than a flat map, 1 = the same distribution."""
+    scale of its values). Returns the blurred maps, p, q, beta, the KLs and explained = 1 − KL(p ‖ q) / KL(p ‖ uniform): 0 = no better
+    than a flat map, 1 = the same distribution."""
     m = np.isfinite(pred) & np.isfinite(ref)
     pr, rf = blur(np.where(m, pred, np.nan), sigma_cells), blur(np.where(m, ref, np.nan), sigma_cells)
     p = boltzmann(rf, 1.0 / tau_ref)
@@ -137,8 +138,81 @@ def trend_report(pred: np.ndarray, ref: np.ndarray, sigma_cells: float = 1.0, ta
     kls = [kl_div(p, boltzmann(z, b)) for b in betas]
     i = int(np.argmin(kls))
     ok = np.isfinite(pr)
-    return {"explained": float(1.0 - kls[i] / kl_uni) if kl_uni > 0 else float("nan"), "beta": float(betas[i]), "kl": float(kls[i]), "kl_uniform": float(kl_uni),
+    return {"pred_blur": pr, "ref_blur": rf, "p": p, "q": boltzmann(z, float(betas[i])), "uniform": uniform, "beta": float(betas[i]), "kl": float(kls[i]),
+            "kl_uniform": float(kl_uni), "explained": float(1.0 - kls[i] / kl_uni) if kl_uni > 0 else float("nan"),
             "corr": float(np.corrcoef(pr[ok], rf[ok])[0, 1])}
+
+
+def trend_report(pred: np.ndarray, ref: np.ndarray, sigma_cells: float = 1.0, tau_ref: float = 1.0) -> dict[str, float]:
+    """The numbers of trend_fit (explained, beta, kl, kl_uniform, corr)."""
+    f = trend_fit(pred, ref, sigma_cells, tau_ref)
+    return {k: f[k] for k in ("explained", "beta", "kl", "kl_uniform", "corr")}
+
+
+def plot_trend(c, ref: np.ndarray, preds: dict[str, np.ndarray], out: str, sigma_cells: float = 2.0, tau_ref: float = 1.0, ref_name: str = "3 cm 평균") -> None:
+    """Draw the Boltzmann fit in 2-D: the blurred reference and its distribution p, then for each predictor its fitted distribution q (top)
+    and where q puts more (red) or less (blue) mass than p (bottom). Distributions are shown as multiples of the uniform distribution."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from matplotlib.colors import LinearSegmentedColormap, TwoSlopeNorm
+    from matplotlib.patches import Circle
+    from exp16_wm.networks import TABLE_L, TABLE_W
+    from exp16_wm.v_heatmap import live_balls
+    xs, ys, left = c["xs"], c["ys"], int(c["left"])
+    surface, ink, ink2 = "#fcfcfb", "#0b0b0b", "#52514e"
+    plt.rcParams.update({"font.family": "Apple SD Gothic Neo", "axes.unicode_minus": False})
+    blue = LinearSegmentedColormap.from_list("blue_seq", ["#cde2fb", "#9ec5f4", "#6da7ec", "#3987e5", "#256abf", "#184f95", "#0d366b"])
+    orange = LinearSegmentedColormap.from_list("orange_seq", ["#fdebdf", "#f9cdb0", "#f3a273", "#eb6834", "#c24e1d", "#8a3512"])
+    div = LinearSegmentedColormap.from_list("blue_red", ["#2a78d6", "#f0efec", "#e34948"])
+    for cm in (blue, orange, div):
+        cm.set_bad(surface)
+    fits = {n: trend_fit(pm, ref, sigma_cells, tau_ref) for n, pm in preds.items()}
+    first = next(iter(fits.values()))
+    N = int(np.isfinite(first["p"] + first["q"]).sum())
+    ratio = lambda d: np.where(d > 0, d * N, np.nan)                          # multiples of the uniform distribution
+    top_max = max(np.nanmax(ratio(first["p"])), *[np.nanmax(ratio(f["q"])) for f in fits.values()])
+    dmax = max(np.nanmax(np.abs(ratio(f["q"]) - ratio(f["p"]))) for f in fits.values())
+    ncol = 1 + len(fits)
+    fig, axes = plt.subplots(2, ncol, figsize=(2.55 * ncol + 1.2, 11.2), facecolor=surface)
+    fig.subplots_adjust(left=0.02, right=0.93, top=0.86, bottom=0.04, wspace=0.12, hspace=0.20)
+    fig.text(0.02, 0.975, "Boltzmann으로 맞췄을 때 (2D)", color=ink, fontsize=15, ha="left", va="top")
+    fig.text(0.02, 0.945, f"기준 = {ref_name}을 블러 σ {sigma_cells * 2:g} cm로 매끄럽게 한 경향, 분포 p ∝ exp(값 / {tau_ref:g}개). 예측자는 같은 블러 뒤 온도 하나를 맞춘 분포 q.\n"
+             "색 = 균등 분포의 몇 배로 그 자리에 확률이 몰리는가(위). 아래는 q가 p보다 많이(빨강) 또는 적게(파랑) 몰린 곳.", color=ink2, fontsize=10.5, ha="left", va="top")
+    ext = (xs[0] - 0.01, xs[-1] + 0.01, ys[0] - 0.01, ys[-1] + 0.01)
+    pockets = [(0, 0), (TABLE_W, 0), (0, TABLE_L / 2), (TABLE_W, TABLE_L / 2), (0, TABLE_L), (TABLE_W, TABLE_L)]
+    balls = live_balls(c["raw"], TABLE_W, TABLE_L)
+
+    def frame(ax):
+        ax.set_facecolor(surface)
+        for b in balls:
+            ax.add_patch(Circle(b, 0.028575, facecolor=surface, edgecolor=ink, linewidth=1.1, zorder=5))
+        for pk in pockets:
+            ax.add_patch(Circle(pk, 0.032, facecolor=ink, edgecolor="none", zorder=6))
+        ax.set_xlim(-0.04, TABLE_W + 0.04); ax.set_ylim(-0.04, TABLE_L + 0.04); ax.set_aspect("equal"); ax.set_xticks([]); ax.set_yticks([])
+        for sp in ax.spines.values():
+            sp.set_color(ink2); sp.set_linewidth(0.8)
+
+    def show(ax, z, cmap, norm=None, vmin=None, vmax=None):
+        return ax.imshow(np.ma.masked_invalid(z), origin="lower", extent=ext, cmap=cmap, norm=norm, vmin=vmin, vmax=vmax, interpolation="nearest")
+
+    im_b = show(axes[0, 0], first["ref_blur"], blue, vmin=0, vmax=left)
+    frame(axes[0, 0]); axes[0, 0].set_title("기준의 값 (블러)\n공 수", color=ink, fontsize=11.5, pad=8)
+    im_p = show(axes[1, 0], ratio(first["p"]), orange, vmin=0, vmax=top_max)
+    frame(axes[1, 0]); axes[1, 0].set_title("기준의 분포 p\n(Boltzmann)", color=ink, fontsize=11.5, pad=8)
+    for j, (name, f) in enumerate(fits.items(), start=1):
+        show(axes[0, j], ratio(f["q"]), orange, vmin=0, vmax=top_max); frame(axes[0, j])
+        axes[0, j].set_title(f"{name}\n설명하는 몫 {f['explained']:.2f} · 상관 {f['corr']:.2f}", color=ink, fontsize=11.5, pad=8)
+        im_d = show(axes[1, j], ratio(f["q"]) - ratio(f["p"]), div, norm=TwoSlopeNorm(vcenter=0.0, vmin=-dmax, vmax=dmax)); frame(axes[1, j])
+        axes[1, j].set_title(f"q-p (역온도 {f['beta']:.2f})", color=ink2, fontsize=10.5, pad=8)
+    cb0 = fig.colorbar(im_b, ax=axes[0, 0], orientation="horizontal", fraction=0.04, pad=0.02, ticks=range(0, left + 1))
+    cb0.ax.tick_params(colors=ink2, labelsize=8); cb0.outline.set_edgecolor(ink2)
+    cax1 = fig.add_axes([0.945, 0.50, 0.012, 0.26]); cb1 = fig.colorbar(im_p, cax=cax1); cb1.ax.set_title("균등의\n배수", color=ink2, fontsize=9.5, pad=6)
+    cax2 = fig.add_axes([0.945, 0.08, 0.012, 0.26]); cb2 = fig.colorbar(im_d, cax=cax2); cb2.ax.set_title("q-p", color=ink2, fontsize=9.5, pad=6)
+    for cb in (cb1, cb2):
+        cb.ax.tick_params(colors=ink2, labelsize=9); cb.outline.set_edgecolor(ink2)
+    fig.savefig(out, dpi=140, facecolor=surface, bbox_inches="tight")
+    print(f"saved {out}", flush=True)
 
 
 def v_map_of_run(c, run_dir: str) -> np.ndarray:
@@ -269,6 +343,7 @@ def main() -> None:
     p.add_argument("--runs", nargs="+", default=[]); p.add_argument("--workers", type=int, default=8)
     p.add_argument("--replicate", default="", help="npz of the same radius simulated with another seed (smooth_<--replicate-cm>): print the noise report")
     p.add_argument("--replicate-cm", type=float, default=3.0)
+    p.add_argument("--trend-plot", default="", help="with --trend: also draw the Boltzmann fit of V runs / baselines to this PNG")
     p.add_argument("--trend", action="store_true", help="compare V runs (--v-runs) and baselines with the simulated --replicate-cm map as trends (blur + Boltzmann + KL)")
     p.add_argument("--v-runs", nargs="*", default=[])
     args = p.parse_args()
@@ -283,11 +358,14 @@ def main() -> None:
             preds["made 최댓값"] = made_max_map(c, args.runs)
         preds["① 한 번 친 결과"] = c["truth"]
         preds["같은 지도 다른 seed (잡음 한계)"] = rep
-        for sg in (1.0, 2.0):
-            print(f"\n== 기준 = {cm:g} cm 평균(seed 0)을 블러 σ={sg * 2:g} cm로 매끄럽게 한 경향, 온도 1개로 분포화, 예측자도 같은 블러")
-            for n, pm in preds.items():
-                r = trend_report(pm, ref, sg)
-                print(f"  {n:34s} KL이 설명하는 몫 {r['explained']:.3f} | 상관 {r['corr']:.3f} | 역온도 {r['beta']:.2f}")
+        print(f"\n== 기준 = {cm:g} cm 평균(seed 0). 경향: 지도와 예측자를 블러 σ 2 cm / 4 cm로 매끄럽게 한 뒤 Boltzmann 분포로 바꿔 온도 하나를 맞춘 KL이 설명하는 몫(상관). 구역: 평균 4개 이상인 좋은 구역의 AUC")
+        print(f"  {'':34s} {'경향 σ2cm':>16s} {'경향 σ4cm':>16s}   구역 AUC")
+        for n, pm in preds.items():
+            r1, r2 = trend_report(pm, ref, 1.0), trend_report(pm, ref, 2.0)
+            print(f"  {n:34s} {r1['explained']:7.3f} ({r1['corr']:.2f}) {r2['explained']:7.3f} ({r2['corr']:.2f})   {zone_auc(pm, ref, 4.0):.3f}")
+        if args.trend_plot:
+            keep = {n: preds[n] for n in ("V v6a_ctrl (정확한 정답)", "made 최댓값", "같은 지도 다른 seed (잡음 한계)") if n in preds}
+            plot_trend(c, ref, keep, args.trend_plot, sigma_cells=2.0, ref_name=f"{cm:g} cm 평균")
         return
     if args.replicate:
         c = np.load(args.cache, allow_pickle=True)

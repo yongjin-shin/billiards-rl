@@ -83,9 +83,16 @@ def radii_figure(png: str) -> str:
         .replace('<section class="explain">', '<section class="explain" id="radii">')
 
 
-def build_html(cache: str, explain_png: str = "", radii_png: str = "") -> str:
+def trend_figure(png: str) -> str:
+    return explain_figure(png, "경향끼리 비교하면: Boltzmann으로 맞춘 모습",
+                          "기준(3 cm 평균을 매끄럽게 한 경향)을 확률 분포로 바꾸고, V·made 최댓값·잡음 한계의 값도 같은 분포로 바꿔 온도 하나를 맞춘 모습입니다. 위: 균등 분포의 몇 배로 그 자리에 확률이 몰리는가. 아래: 기준보다 많이(빨강) 또는 적게(파랑) 몰린 곳.",
+                          "기준 분포와 V, made 최댓값, 잡음 한계 예측자가 맞춘 분포를 2차원 지도로 나란히 놓고 그 차이를 아래에 그린 그림.") \
+        .replace('<section class="explain">', '<section class="explain" id="trend">')
+
+
+def build_html(cache: str, explain_png: str = "", radii_png: str = "", trend_png: str = "") -> str:
     data = page_data(cache)
-    return (TEMPLATE.replace("__TITLE__", TITLE).replace("__EXPLAIN__", explain_figure(explain_png) + radii_figure(radii_png))
+    return (TEMPLATE.replace("__TITLE__", TITLE).replace("__EXPLAIN__", explain_figure(explain_png) + radii_figure(radii_png) + trend_figure(trend_png))
             .replace("__DATA__", json.dumps(data, ensure_ascii=False, allow_nan=False, separators=(",", ":"))))
 
 
@@ -94,8 +101,9 @@ def main() -> None:
     p.add_argument("--cache", required=True); p.add_argument("--out", required=True)
     p.add_argument("--explain-png", default="", help="a picture (exp16_wm.v_heatmap_explain) to show above the maps")
     p.add_argument("--radii-png", default="", help="the radius comparison (exp16_wm.v_heatmap_radii) to show above the maps")
+    p.add_argument("--trend-png", default="", help="the Boltzmann-fit figure (exp16_wm.v_heatmap_radii --trend-plot) to show above the maps")
     args = p.parse_args()
-    html = build_html(args.cache, args.explain_png, args.radii_png)
+    html = build_html(args.cache, args.explain_png, args.radii_png, args.trend_png)
     os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
     with open(args.out, "w") as f:
         f.write(html)
