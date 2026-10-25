@@ -7,7 +7,7 @@ import numpy as np
 import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from exp16_wm.v_map_eval import bootstrap_ci, corr, layout_metrics, load_heldout, noise_limit, per_layout, reference_labels, smooth_scattered, trend_vectors
+from exp16_wm.v_map_eval import paired_diff, bootstrap_ci, corr, layout_metrics, load_heldout, noise_limit, per_layout, reference_labels, smooth_scattered, trend_vectors
 
 
 def _xy(n=400, seed=0):
@@ -79,3 +79,13 @@ def test_load_reference_noise_limit_and_per_layout_on_fake_files(tmp_path):
 
 def test_corr_returns_nan_for_a_constant_vector():
     assert np.isnan(corr(np.ones(5), np.arange(5.0))) and corr(np.arange(5.0), np.arange(5.0) * 2) == pytest.approx(1.0)
+
+
+def test_paired_diff_detects_a_consistent_gain_and_not_a_zero_mean_difference():
+    rng = np.random.default_rng(0)
+    base = rng.normal(0.4, 0.1, 100)
+    gain = paired_diff(base + 0.05 + rng.normal(0, 0.02, 100), base)
+    assert gain["lo"] > 0.04 and gain["share_better"] > 0.95
+    null = paired_diff(base + rng.normal(0, 0.05, 100), base)
+    assert null["lo"] < 0 < null["hi"] and 0.3 < null["share_better"] < 0.7
+    x = np.array([1.0, np.nan, 3.0]); assert paired_diff(x, np.array([0.0, 0.0, 1.0]))["diff"] == pytest.approx(1.5)      # the NaN layout is dropped

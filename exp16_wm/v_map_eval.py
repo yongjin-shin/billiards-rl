@@ -104,6 +104,14 @@ def bootstrap_ci(x: np.ndarray, B: int = 4000, seed: int = 0) -> tuple[float, fl
     return float(x.mean()), float(np.percentile(means, 2.5)), float(np.percentile(means, 97.5))
 
 
+def paired_diff(x: np.ndarray, y: np.ndarray, B: int = 4000, seed: int = 0) -> dict[str, float]:
+    """x − y per layout (layouts where either is NaN dropped): the mean, its bootstrap 95% interval over layouts, and the share of layouts with x > y."""
+    m = np.isfinite(x) & np.isfinite(y)
+    d = (x - y)[m]
+    mean, lo, hi = bootstrap_ci(d, B, seed)
+    return {"diff": mean, "lo": lo, "hi": hi, "share_better": float(np.mean(d > 0))}
+
+
 def noise_limit(h: dict[str, np.ndarray], labels: dict[str, np.ndarray]) -> dict[str, float]:
     """Reliability of the 15-sample reference from the correlation r of copy 0 and copy 1 (5 samples each, independent): the mean of three such
     components has reliability 3r / (1 + 2r); a noise-free map would correlate with the reference at most sqrt(reliability)."""
@@ -133,6 +141,7 @@ def main() -> None:
     p.add_argument("--heldout", required=True); p.add_argument("--runs", nargs="+", default=[], help="made run globs for the made-max baseline")
     p.add_argument("--model", action="append", default=[], help="name=run_dir (repeatable)"); p.add_argument("--out", default="")
     p.add_argument("--threads", type=int, default=4)
+    p.add_argument("--diff", action="append", default=[], help="A-B (model names): paired per-layout difference of every score, A minus B (repeatable)")
     args = p.parse_args()
     import torch
     torch.set_num_threads(args.threads)
@@ -152,6 +161,12 @@ def main() -> None:
     print(f"{'':30s} " + " ".join(f"{c:>20s}" for c in cols))
     for n, r in res.items():
         print(f"{n:30s} " + " ".join("{:6.3f} [{:5.3f},{:5.3f}]".format(*bootstrap_ci(r[c])) for c in cols), flush=True)
+    for spec in args.diff:
+        a, b = spec.split("-", 1) if spec.count("-") == 1 else spec.rsplit("-", 1)
+        print(f"\n{a} − {b} (paired over layouts; share = layouts where {a} is higher)")
+        for c in cols:
+            d = paired_diff(res[a][c], res[b][c])
+            print(f"  {c:12s} {d['diff']:+.3f} [{d['lo']:+.3f}, {d['hi']:+.3f}]  better in {d['share_better'] * 100:.0f}% of layouts", flush=True)
     if args.out:
         os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
         json.dump({"layouts": ids.tolist(), "noise": noise_limit(h, lab), "metrics": {n: {c: r[c].tolist() for c in r} for n, r in res.items()}}, open(args.out, "w"))
