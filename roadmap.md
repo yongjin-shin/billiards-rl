@@ -750,7 +750,7 @@ rssm_v5 재학습 시 이 `--batch-size` 옵션을 쓸 것. 단, 이 모델 크�
 **위치와 환경**
 | 항목 | 값 |
 |---|---|
-| worktree / 브랜치 | `/Users/yj/Documents/billiards-rl/.claude/worktrees/exp16-cue-target`, `feature/exp16-cue-target` (`feature/exp16-cue-predict`의 c637cc4에서 분기). **원격에 push하지 않았고 dev merge·tag도 아직** |
+| worktree / 브랜치 | `/Users/yj/Documents/billiards-rl/.claude/worktrees/exp16-cue-target`, `feature/exp16-cue-target` (`feature/exp16-cue-predict`의 c637cc4에서 분기). **2026-10-26 `origin/feature/exp16-cue-target`에 push함(코드·문서만, `logs/`의 데이터는 git 밖). dev merge·tag는 아직** |
 | python | worktree에는 `.venv`가 없다. `/Users/yj/Documents/billiards-rl/.venv/bin/python`을 쓴다(pooltool 0.5.0, torch, scipy, matplotlib). 명령은 worktree 루트에서 `python -m exp16_wm.<모듈>` |
 | 데이터(**git 밖**, worktree의 `logs/`, 합 약 300 MB) | `logs/ct0b/collect_200.npz`(2,000만 샷, 281 MB), `logs/ct0b/walls_k1.npz`·`walls_k2.npz`(벽 라벨), `logs/ct0/forward.npz`(CT0 격자), `logs/ct2a/run*/`(모델 `head.pt`와 `result.json`), `logs/a0/run0/`, 그림 `logs/ct0b/k0_coverage.png`·`logs/ct2a/k1_routes.png`. 지우거나 worktree를 정리하면 재생성해야 한다(아래 명령, 수집 45분 · 라벨 20분) |
 | 이 줄기 밖의 데이터 | 포켓 파이프라인의 V0 등은 원본 저장소 `/Users/yj/Documents/billiards-rl/logs/teacher_data/`에 있다(예: `val_v0.npz`) — CT3에서 읽기만 한다 |
