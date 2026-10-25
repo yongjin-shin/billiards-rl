@@ -7,7 +7,8 @@ import numpy as np
 import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from exp16_wm.v_map_data import aggregate, build_layout, grid_cells, finish_layout, label_from_copies, pick_layouts, relabel, ring_copies, run_layouts, sample_cells, write_file
+from exp16_wm.v_map_data import (aggregate, build_layout, finish_layout, grid_cells, label_from_copies, pick_layouts, relabel, ring_copies, run_layouts,
+                                sample_cells, shuffle_layouts, write_file)
 
 W, L, R = 0.9906, 1.9812, 0.028575
 RAW = np.array([0.2, 0.2, 0.5, 0.5, 0.0, 0.3, 0.7, 0.0] + [0.0] * 12, np.float32)      # 2 balls on the table, cue ball anywhere; 20 = 2 + 3·2 + 12
@@ -137,3 +138,13 @@ def test_write_file_stores_the_grid_cell_numbers_and_size(tmp_path):
     z = np.load(out, allow_pickle=True)
     assert z["cell_ij"].shape == (n, 2) and tuple(z["grid_nxy"]) == (14, 28) and z["cell_ij"].dtype == np.int16
     np.testing.assert_allclose(z["cell_xy"], R + z["cell_ij"] * 0.07, atol=1e-5)
+
+
+def test_shuffle_layouts_keeps_the_pairs_mixes_the_balls_left_and_is_seeded(tmp_path):
+    obs, left, _ = pick_layouts([_v_file(tmp_path, 120)], 8, seed=0)
+    assert list(left[:8]) == [2] * 8                                                    # pick_layouts lists them by balls left
+    so, sl = shuffle_layouts(obs, left, seed=3)
+    assert sorted(sl.tolist()) == sorted(left.tolist()) and len(set(sl[:10].tolist())) > 2    # any prefix now holds several numbers of balls left
+    assert all(any(np.array_equal(o, q) for q in obs) for o in so[:5])                   # every layout is still one of the originals
+    np.testing.assert_array_equal(shuffle_layouts(obs, left, seed=3)[1], sl)
+    assert not np.array_equal(shuffle_layouts(obs, left, seed=4)[1], sl)

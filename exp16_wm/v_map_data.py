@@ -52,6 +52,13 @@ def pick_layouts(paths: list[str], per_left: int, seed: int, lefts: tuple[int, .
     return obs[idx], left[idx], key[idx]
 
 
+def shuffle_layouts(raws: np.ndarray, lefts: np.ndarray, seed: int) -> tuple[np.ndarray, np.ndarray]:
+    """The layouts in a random order (pick_layouts lists them by balls left): a job cut short, and any split by layout number, then holds a
+    mix of every number of balls left."""
+    perm = np.random.default_rng([seed, 99]).permutation(len(raws))
+    return raws[perm], lefts[perm]
+
+
 def grid_cells(raw: np.ndarray, step: float, jitter: float, rng: np.random.Generator, ball_r: float, w: float, l: float
                ) -> tuple[np.ndarray, np.ndarray, tuple[int, int]]:
     """The cue positions of a layout on a step grid inside the cushions, each point shifted by up to ± jitter in x and y (0 = exactly on the
@@ -212,6 +219,7 @@ def main() -> None:
     p.add_argument("--radii-mm", type=float, nargs="+", default=list(RADII_MM)); p.add_argument("--copies", type=int, default=3)
     p.add_argument("--step", type=float, default=0.05); p.add_argument("--jitter", type=float, default=0.025)
     p.add_argument("--seed", type=int, default=0); p.add_argument("--id-offset", type=int, default=0, help="layout ids start here (keep train / held-out ids apart)")
+    p.add_argument("--shuffle", action="store_true", help="put the layouts in a random order before numbering and writing them")
     p.add_argument("--runs", nargs="+"); p.add_argument("--workers", type=int, default=8)
     args = p.parse_args()
     if args.relabel:
@@ -230,6 +238,8 @@ def main() -> None:
     from exp16_wm.paired_eval import find_run
     paths = sorted(glob.glob(args.data))
     raws, lefts, _ = pick_layouts(paths, args.layouts_per_left, args.seed)
+    if args.shuffle:
+        raws, lefts = shuffle_layouts(raws, lefts, args.seed)
     ids = args.id_offset + np.arange(len(raws))
     os.makedirs(args.out_dir, exist_ok=True)
     ball_r = float(pt.BallParams.default().R)

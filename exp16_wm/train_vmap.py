@@ -98,6 +98,7 @@ def main() -> None:
     p.add_argument("--sigma-cm", type=float, default=8.0, help="Gaussian blur of the maps in cm (0 = point-wise)"); p.add_argument("--step-cm", type=float, default=7.0)
     p.add_argument("--epochs", type=int, default=100); p.add_argument("--layouts-per-step", type=int, default=4); p.add_argument("--lr", type=float, default=1e-3)
     p.add_argument("--seed", type=int, default=0); p.add_argument("--threads", type=int, default=2)
+    p.add_argument("--select", default="best", choices=["best", "last"], help="the model to keep: the epoch with the lowest validation loss, or the last epoch")
     p.add_argument("--init", default="fresh", choices=["fresh", "keep"], help="fresh: a new Q / V encoder (like --qv-fourier 0 in train_v); keep: the run's own")
     args = p.parse_args()
     torch.set_num_threads(args.threads); torch.manual_seed(args.seed)
@@ -138,14 +139,16 @@ def main() -> None:
             best, best_state = vl, {k: v.clone() for k, v in model.state_dict().items()}
         if ep % 5 == 0 or ep == args.epochs - 1:
             print(f"  epoch {ep}: train loss {tr_hist[-1]:.4f}  val loss {vl:.4f} (best {best:.4f}) {time.time() - t0:.0f}s", flush=True)
-    model.load_state_dict(best_state); model.eval()
+    if args.select == "best":
+        model.load_state_dict(best_state)
+    model.eval()
     os.makedirs(args.out, exist_ok=True)
     a = json.load(open(os.path.join(run, "results.json")))
     a["args"] = {**run_args, "v_weight": 1.0, "qv_encoder": True, "v_horizon": 0}
-    a["v2"] = {**vars(args), "from_run": run, "best_val_loss": best, "val_history": hist, "train_history": tr_hist, "n_train": len(tr), "git_commit": code_version()}
+    a["v2"] = {**vars(args), "from_run": run, "best_val_loss": best, "selected_epoch": hist.index(best) if args.select == "best" else len(hist) - 1, "val_history": hist, "train_history": tr_hist, "n_train": len(tr), "git_commit": code_version()}
     json.dump(a, open(os.path.join(args.out, "results.json"), "w"), indent=1)
     torch.save({"gnn": model.state_dict()}, os.path.join(args.out, "bc_model.pt"))
-    print(f"saved {args.out} (best val {best:.4f} at epoch {hist.index(best)})", flush=True)
+    print(f"saved {args.out} (kept: {'epoch ' + str(hist.index(best)) + ', best val ' + format(best, '.4f') if args.select == 'best' else 'the last epoch'})", flush=True)
 
 
 if __name__ == "__main__":
